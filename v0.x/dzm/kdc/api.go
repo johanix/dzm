@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -808,162 +809,104 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			successCount := 0
 			errorCount := 0
 			
+			// Collect all keys from all zones first
+			type ZoneKeyInfo struct {
+				ZoneName   string
+				StandbyZSK *DNSSECKey
+				ActiveKSK  *DNSSECKey
+				Nodes      []*Node
+				Result     *DistributionResult
+			}
+			
+			zoneInfos := make([]*ZoneKeyInfo, 0, len(req.Zones))
+			allKeyIDs := make([]string, 0)
+			allKeys := make([]*DNSSECKey, 0)
+			
+			// First pass: collect keys and validate zones
 			for _, zoneName := range req.Zones {
-				result := DistributionResult{
+				zoneInfo := &ZoneKeyInfo{
 					ZoneName: zoneName,
-					Status:   "error",
+					Result: &DistributionResult{
+						ZoneName: zoneName,
+						Status:   "error",
+					},
 				}
 				
 				// Find a standby ZSK for this zone
 				keys, err := kdcDB.GetDNSSECKeysForZone(zoneName)
 				if err != nil {
-					result.Msg = fmt.Sprintf("Failed to get keys: %v", err)
-					results = append(results, result)
+					zoneInfo.Result.Msg = fmt.Sprintf("Failed to get keys: %v", err)
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
 				
-				// Get nodes for this zone (needed to check confirmations for distributed ZSKs)
+				// Get nodes for this zone
 				nodes, err := kdcDB.GetActiveNodesForZone(zoneName)
 				if err != nil {
-					result.Msg = fmt.Sprintf("Failed to get nodes for zone: %v", err)
-					results = append(results, result)
+					zoneInfo.Result.Msg = fmt.Sprintf("Failed to get nodes for zone: %v", err)
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
+				zoneInfo.Nodes = nodes
 				
-				// Find ZSK to distribute (prefer 'distributed' that needs retry, then 'standby')
-				var standbyZSK *DNSSECKey
-				var distributedZSK *DNSSECKey
-				var distributedZSKNeedsRetry *DNSSECKey
-				var zskStates []string
-				for _, key := range keys {
-					if key.KeyType == KeyTypeZSK {
-						zskStates = append(zskStates, string(key.State))
-						if key.State == KeyStateStandby && standbyZSK == nil {
-							// Keep track of first standby ZSK as fallback
-							standbyZSK = key
-						} else if key.State == KeyStateDistributed {
-							// Check if this distributed ZSK needs retry
-							distID, err := kdcDB.GetOrCreateDistributionID(zoneName, key)
-							if err == nil && len(nodes) > 0 {
-								confirmedNodeIDs, err := kdcDB.GetDistributionConfirmations(distID)
-								if err == nil {
-									// Build map of confirmed nodes
-									confirmedMap := make(map[string]bool)
-									for _, nodeID := range confirmedNodeIDs {
-										confirmedMap[nodeID] = true
-									}
-									// Check if any nodes haven't confirmed
-									needsRetry := false
-									for _, node := range nodes {
-										if node.NotifyAddress != "" && !confirmedMap[node.ID] {
-											needsRetry = true
-											break
-										}
-									}
-									if needsRetry {
-										// This distributed ZSK needs retry - prefer it
-										distributedZSKNeedsRetry = key
-										log.Printf("KDC: Zone %s: Found ZSK %s in state distributed that needs retry", zoneName, key.ID)
-										break // Found one that needs retry, use it
-									}
-								}
-							}
-							// Keep track of first distributed ZSK as fallback (even if all confirmed)
-							if distributedZSK == nil {
-								distributedZSK = key
-								log.Printf("KDC: Zone %s: Found ZSK %s in state distributed", zoneName, key.ID)
-							}
-						}
-					}
-				}
-				// Prefer distributed ZSK that needs retry, then standby, then any distributed
-				if distributedZSKNeedsRetry != nil {
-					standbyZSK = distributedZSKNeedsRetry
-					log.Printf("KDC: Zone %s: Will retry distribution for ZSK %s in state distributed", zoneName, standbyZSK.ID)
-				} else if standbyZSK == nil && distributedZSK != nil {
-					// All distributed ZSKs are fully confirmed, but we'll check again later
-					standbyZSK = distributedZSK
-					log.Printf("KDC: Zone %s: Will check if ZSK %s in state distributed needs retry", zoneName, standbyZSK.ID)
-				}
-				
-				// Check zone signing mode FIRST - only distribute keys for edgesigned zones
+				// Check zone signing mode
 				_, err = kdcDB.GetZone(zoneName)
 				if err != nil {
-					result.Msg = fmt.Sprintf("Failed to get zone: %v", err)
-					results = append(results, result)
+					zoneInfo.Result.Msg = fmt.Sprintf("Failed to get zone: %v", err)
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
 				signingMode, err := kdcDB.GetZoneSigningMode(zoneName)
 				if err != nil {
-					result.Msg = fmt.Sprintf("Failed to get signing mode: %v", err)
-					results = append(results, result)
+					zoneInfo.Result.Msg = fmt.Sprintf("Failed to get signing mode: %v", err)
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
 				if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
-					result.Msg = fmt.Sprintf("Zone has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", signingMode)
-					results = append(results, result)
+					zoneInfo.Result.Msg = fmt.Sprintf("Zone has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", signingMode)
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
-
-				// For edgesign_full zones, find KSK to distribute (prefer 'active', but also handle 'active_dist' for retries)
+				
+				// Find ZSK to distribute
+				var standbyZSK *DNSSECKey
+				for _, key := range keys {
+					if key.KeyType == KeyTypeZSK && key.State == KeyStateStandby {
+						standbyZSK = key
+						break
+					}
+				}
+				
+				// Find KSK for edgesign_full zones
 				var activeKSK *DNSSECKey
-				var activeDistKSK *DNSSECKey
 				if signingMode == ZoneSigningModeEdgesignFull {
-					log.Printf("KDC: Zone %s uses sign_edge_full, searching for KSK to distribute (checked %d keys)", zoneName, len(keys))
 					for _, key := range keys {
-						if key.KeyType == KeyTypeKSK {
-							log.Printf("KDC: Zone %s: Found KSK %s in state %s", zoneName, key.ID, key.State)
-							if key.State == KeyStateActive {
-								activeKSK = key
-								log.Printf("KDC: Zone %s: Selected KSK %s for distribution (state: %s)", zoneName, key.ID, key.State)
-								break // Prefer active over active_dist
-							} else if key.State == KeyStateActiveDist && activeDistKSK == nil {
-								// Keep track of active_dist KSK for retry if no active KSK found
-								activeDistKSK = key
-								log.Printf("KDC: Zone %s: Found KSK %s in state %s (candidate for retry)", zoneName, key.ID, key.State)
-							}
-						}
-					}
-					// If no active KSK found, use active_dist KSK for retry
-					if activeKSK == nil && activeDistKSK != nil {
-						activeKSK = activeDistKSK
-						log.Printf("KDC: Zone %s: Will retry distribution for KSK %s in state active_dist", zoneName, activeKSK.ID)
-					}
-					if activeKSK == nil {
-						log.Printf("KDC: Zone %s uses sign_edge_full but no active or active_dist KSK found (checked %d keys)", zoneName, len(keys))
-						// Log all KSK states for debugging
-						for _, key := range keys {
-							if key.KeyType == KeyTypeKSK {
-								log.Printf("KDC: Zone %s has KSK %s in state %s", zoneName, key.ID, key.State)
-							}
+						if key.KeyType == KeyTypeKSK && key.State == KeyStateActive {
+							activeKSK = key
+							break
 						}
 					}
 				}
-
+				
 				if standbyZSK == nil && activeKSK == nil {
-					if len(zskStates) == 0 {
-						result.Msg = "No ZSK keys found for zone"
-					} else {
-						result.Msg = fmt.Sprintf("No standby or distributed ZSK found for zone (available ZSK states: %s)", strings.Join(zskStates, ", "))
-					}
-					results = append(results, result)
+					zoneInfo.Result.Msg = "No standby ZSK or active KSK found for zone"
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
-
-				// Check if we have any nodes (already retrieved above)
+				
 				if len(nodes) == 0 {
-					result.Msg = fmt.Sprintf("No active nodes serve zone %s (zone may not be assigned to any components, or no nodes are assigned to those components)", zoneName)
-					results = append(results, result)
+					zoneInfo.Result.Msg = fmt.Sprintf("No active nodes serve zone %s", zoneName)
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
-
+				
 				// Check if any nodes have notify_address configured
 				nodesWithNotify := 0
 				for _, node := range nodes {
@@ -972,273 +915,149 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					}
 				}
 				if nodesWithNotify == 0 {
-					result.Msg = fmt.Sprintf("No nodes with notify_address configured for zone %s (%d nodes found but none have notify_address)", zoneName, len(nodes))
-					results = append(results, result)
+					zoneInfo.Result.Msg = fmt.Sprintf("No nodes with notify_address configured for zone %s", zoneName)
+					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
-
-				// Distribute ZSK (if available)
-				var distributionID string
-				var kskDistributionID string
-				var encryptedCount int
-				var zskNodeCount int // Track number of nodes that received ZSK
-				var kskNodeCount int // Track number of nodes that received KSK
+				
+				zoneInfo.StandbyZSK = standbyZSK
+				zoneInfo.ActiveKSK = activeKSK
+				zoneInfos = append(zoneInfos, zoneInfo)
+				
+				// Collect key IDs for shared distribution ID
 				if standbyZSK != nil {
-					distributionID, err = kdcDB.GetOrCreateDistributionID(zoneName, standbyZSK)
-					if err != nil {
-						result.Msg = fmt.Sprintf("Failed to get/create distribution ID: %v", err)
-						results = append(results, result)
+					allKeyIDs = append(allKeyIDs, standbyZSK.ID)
+					allKeys = append(allKeys, standbyZSK)
+				}
+				if activeKSK != nil {
+					allKeyIDs = append(allKeyIDs, activeKSK.ID)
+					allKeys = append(allKeys, activeKSK)
+				}
+			}
+			
+			// If no valid zones, return early
+			if len(zoneInfos) == 0 {
+				resp.Results = results
+				if errorCount > 0 {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("No valid zones to distribute (all %d zones had errors)", len(req.Zones))
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+			
+			// Create a single distribution ID for all keys across all zones
+			// Use a hash of all zone names + all key IDs
+			allZoneNames := make([]string, len(zoneInfos))
+			for i, zi := range zoneInfos {
+				allZoneNames[i] = zi.ZoneName
+			}
+			sort.Strings(allZoneNames)
+			
+			// Create distribution ID from sorted zone names and sorted key IDs
+			// Use 4 bytes (8 hex chars) for shorter, more convenient IDs
+			hash := sha256.New()
+			for _, zoneName := range allZoneNames {
+				hash.Write([]byte(zoneName))
+			}
+			for _, keyID := range allKeyIDs {
+				hash.Write([]byte(keyID))
+			}
+			hashBytes := hash.Sum(nil)
+			sharedDistributionID := hex.EncodeToString(hashBytes[:4])
+			
+			log.Printf("KDC: Created shared distribution ID %s for %d key(s) across %d zone(s)", sharedDistributionID, len(allKeys), len(zoneInfos))
+			
+			// Collect all unique nodes across all zones
+			nodeMap := make(map[string]*Node)
+			for _, zoneInfo := range zoneInfos {
+				for _, node := range zoneInfo.Nodes {
+					if node.NotifyAddress != "" {
+						nodeMap[node.ID] = node
+					}
+				}
+			}
+			allNodes := make([]*Node, 0, len(nodeMap))
+			for _, node := range nodeMap {
+				allNodes = append(allNodes, node)
+			}
+			
+			log.Printf("KDC: Will distribute %d key(s) to %d unique node(s) using shared distribution ID %s", len(allKeys), len(allNodes), sharedDistributionID)
+			
+			// Second pass: encrypt all keys for all nodes using the shared distribution ID
+			totalEncryptedCount := 0
+			for _, zoneInfo := range zoneInfos {
+				encryptedCount := 0
+				
+				// Update key states
+				if zoneInfo.StandbyZSK != nil && zoneInfo.StandbyZSK.State == KeyStateStandby {
+					if err := kdcDB.UpdateKeyState(zoneInfo.ZoneName, zoneInfo.StandbyZSK.ID, KeyStateDistributed); err != nil {
+						zoneInfo.Result.Msg = fmt.Sprintf("Failed to update ZSK state: %v", err)
+						results = append(results, *zoneInfo.Result)
 						errorCount++
 						continue
 					}
-					
-					// Determine which nodes need distribution
-					var nodesToDistribute []*Node
-					if standbyZSK.State == KeyStateStandby {
-						// First-time distribution: distribute to all nodes
-						log.Printf("KDC: Distributing ZSK %s for zone %s (first-time distribution)", standbyZSK.ID, zoneName)
-						nodesToDistribute = nodes
-						// Transition to distributed state
-						if err := kdcDB.UpdateKeyState(zoneName, standbyZSK.ID, KeyStateDistributed); err != nil {
-							result.Msg = fmt.Sprintf("Failed to update key state: %v", err)
-							results = append(results, result)
-							errorCount++
-							continue
-						}
-					} else if standbyZSK.State == KeyStateDistributed {
-						// Retry distribution: only distribute to nodes that haven't confirmed
-						log.Printf("KDC: Retrying distribution for ZSK %s in state distributed (zone: %s)", standbyZSK.ID, zoneName)
-						
-						// Get list of nodes that have already confirmed
-						confirmedNodeIDs, err := kdcDB.GetDistributionConfirmations(distributionID)
+				}
+				
+				if zoneInfo.ActiveKSK != nil && zoneInfo.ActiveKSK.State == KeyStateActive {
+					if err := kdcDB.UpdateKeyState(zoneInfo.ZoneName, zoneInfo.ActiveKSK.ID, KeyStateActiveDist); err != nil {
+						zoneInfo.Result.Msg = fmt.Sprintf("Failed to update KSK state: %v", err)
+						results = append(results, *zoneInfo.Result)
+						errorCount++
+						continue
+					}
+				}
+				
+				// Encrypt keys for all nodes (each node gets all keys from all zones in this distribution)
+				for _, node := range allNodes {
+					if zoneInfo.StandbyZSK != nil {
+						_, _, _, err := kdcDB.EncryptKeyForNode(zoneInfo.StandbyZSK, node, kdcConf, sharedDistributionID)
 						if err != nil {
-							log.Printf("KDC: Warning: Failed to get confirmations for distribution %s: %v", distributionID, err)
-							// If we can't get confirmations, distribute to all nodes (safe fallback)
-							nodesToDistribute = nodes
-						} else {
-							// Build map of confirmed nodes for quick lookup
-							confirmedMap := make(map[string]bool)
-							for _, nodeID := range confirmedNodeIDs {
-								confirmedMap[nodeID] = true
-							}
-							
-							// Filter to only nodes that haven't confirmed
-							for _, node := range nodes {
-								if node.NotifyAddress == "" {
-									continue
-								}
-								if !confirmedMap[node.ID] {
-									nodesToDistribute = append(nodesToDistribute, node)
-								} else {
-									log.Printf("KDC: Skipping node %s (already confirmed distribution %s)", node.ID, distributionID)
-								}
-							}
-							
-							if len(nodesToDistribute) == 0 {
-								log.Printf("KDC: All nodes have already confirmed distribution %s for ZSK %s, no retry needed", distributionID, standbyZSK.ID)
-								// Don't create new distributions, but don't fail either
-								// Clear standbyZSK so we don't try to encrypt it, but continue to KSK distribution if needed
-								standbyZSK = nil
-							} else {
-								log.Printf("KDC: Retrying distribution for ZSK %s to %d node(s) that haven't confirmed", standbyZSK.ID, len(nodesToDistribute))
-							}
-						}
-					} else {
-						log.Printf("KDC: ZSK %s is in unexpected state %s, skipping distribution", standbyZSK.ID, standbyZSK.State)
-						// If no KSK to distribute either, fail
-						if activeKSK == nil {
-							result.Msg = fmt.Sprintf("ZSK %s is in unexpected state %s", standbyZSK.ID, standbyZSK.State)
-							results = append(results, result)
-							errorCount++
+							log.Printf("KDC: Warning: Failed to encrypt ZSK %s for node %s: %v", zoneInfo.StandbyZSK.ID, node.ID, err)
 							continue
 						}
-						// Otherwise, continue to KSK distribution
-						standbyZSK = nil
+						encryptedCount++
 					}
-
-					// Encrypt ZSK for nodes that need distribution
-					if standbyZSK != nil && len(nodesToDistribute) > 0 {
-						for _, node := range nodesToDistribute {
-							if node.NotifyAddress == "" {
-								log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
-								continue
-							}
-							_, _, _, err := kdcDB.EncryptKeyForNode(standbyZSK, node, kdcConf)
-							if err != nil {
-								log.Printf("KDC: Warning: Failed to encrypt ZSK for node %s: %v", node.ID, err)
-								continue
-							}
-							encryptedCount++
-							zskNodeCount++
-						}
-						log.Printf("KDC: Encrypted ZSK %s for %d/%d target node(s) serving zone %s", standbyZSK.ID, zskNodeCount, len(nodesToDistribute), zoneName)
-					}
-				}
-
-				// Distribute active KSK for edgesign_full zones
-				if activeKSK != nil {
-					kskDistributionID, err = kdcDB.GetOrCreateDistributionID(zoneName, activeKSK)
-					if err != nil {
-						log.Printf("KDC: Error: Failed to get/create distribution ID for KSK %s: %v", activeKSK.ID, err)
-					} else {
-						log.Printf("KDC: KSK %s distribution ID: %s", activeKSK.ID, kskDistributionID)
-						// Use KSK distribution ID if ZSK wasn't distributed
-						if distributionID == "" {
-							distributionID = kskDistributionID
-						}
-						
-						// Determine which nodes need distribution
-						var nodesToDistribute []*Node
-						if activeKSK.State == KeyStateActive {
-							// First-time distribution: distribute to all nodes
-							log.Printf("KDC: Distributing KSK %s for zone %s (sign_edge_full, first-time distribution)", activeKSK.ID, zoneName)
-							nodesToDistribute = nodes
-							// Transition to active_dist state
-							if err := kdcDB.UpdateKeyState(zoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
-								log.Printf("KDC: Error: Failed to update KSK state to active_dist: %v", err)
-								continue
-							}
-							log.Printf("KDC: Successfully updated KSK %s state to active_dist", activeKSK.ID)
-						} else if activeKSK.State == KeyStateActiveDist {
-							// Retry distribution: only distribute to nodes that haven't confirmed
-							log.Printf("KDC: Retrying distribution for KSK %s in state active_dist (zone: %s)", activeKSK.ID, zoneName)
-							
-							// Get list of nodes that have already confirmed
-							confirmedNodeIDs, err := kdcDB.GetDistributionConfirmations(kskDistributionID)
-							if err != nil {
-								log.Printf("KDC: Warning: Failed to get confirmations for distribution %s: %v", kskDistributionID, err)
-								// If we can't get confirmations, distribute to all nodes (safe fallback)
-								nodesToDistribute = nodes
-							} else {
-								// Build map of confirmed nodes for quick lookup
-								confirmedMap := make(map[string]bool)
-								for _, nodeID := range confirmedNodeIDs {
-									confirmedMap[nodeID] = true
-								}
-								
-								// Filter to only nodes that haven't confirmed
-								for _, node := range nodes {
-									if node.NotifyAddress == "" {
-										continue
-									}
-									if !confirmedMap[node.ID] {
-										nodesToDistribute = append(nodesToDistribute, node)
-									} else {
-										log.Printf("KDC: Skipping node %s (already confirmed distribution %s)", node.ID, kskDistributionID)
-									}
-								}
-								
-								if len(nodesToDistribute) == 0 {
-									log.Printf("KDC: All nodes have already confirmed distribution %s for KSK %s, no retry needed", kskDistributionID, activeKSK.ID)
-									// Don't create new distributions, but don't fail either
-									continue
-								}
-								log.Printf("KDC: Retrying distribution for KSK %s to %d node(s) that haven't confirmed", activeKSK.ID, len(nodesToDistribute))
-							}
-						} else {
-							log.Printf("KDC: KSK %s is in unexpected state %s, skipping distribution", activeKSK.ID, activeKSK.State)
+					
+					if zoneInfo.ActiveKSK != nil {
+						_, _, _, err := kdcDB.EncryptKeyForNode(zoneInfo.ActiveKSK, node, kdcConf, sharedDistributionID)
+						if err != nil {
+							log.Printf("KDC: Warning: Failed to encrypt KSK %s for node %s: %v", zoneInfo.ActiveKSK.ID, node.ID, err)
 							continue
 						}
-						
-						// Encrypt KSK for nodes that need distribution
-						kskEncryptedCount := 0
-						for _, node := range nodesToDistribute {
-							if node.NotifyAddress == "" {
-								log.Printf("KDC: Skipping node %s (no notify_address) for KSK distribution", node.ID)
-								continue
-							}
-							log.Printf("KDC: Encrypting KSK %s for node %s", activeKSK.ID, node.ID)
-							_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node, kdcConf)
-							if err != nil {
-								log.Printf("KDC: Error: Failed to encrypt KSK for node %s: %v", node.ID, err)
-								continue
-							}
-							kskEncryptedCount++
-							kskNodeCount++
-							log.Printf("KDC: Successfully encrypted KSK %s for node %s", activeKSK.ID, node.ID)
-						}
-						log.Printf("KDC: Encrypted KSK %s for %d/%d target node(s) serving zone %s", activeKSK.ID, kskEncryptedCount, len(nodesToDistribute), zoneName)
-						encryptedCount += kskEncryptedCount
-					}
-				} else {
-					log.Printf("KDC: No active or active_dist KSK to distribute for zone %s (sign_edge_full)", zoneName)
-				}
-				
-				// Check if we have any keys to distribute (ZSK or KSK)
-				if standbyZSK == nil && activeKSK == nil {
-					// No keys to distribute - this could mean all distributions are already confirmed
-					result.Msg = "No keys to distribute (all distributions already confirmed or no keys available)"
-					results = append(results, result)
-					errorCount++
-					continue
-				}
-				
-				if encryptedCount == 0 {
-					result.Msg = fmt.Sprintf("Failed to encrypt key for any node (tried %d nodes)", len(nodes))
-					results = append(results, result)
-					errorCount++
-					continue
-				}
-				
-				// Send NOTIFY to all active nodes for ZSK distribution (if ZSK was distributed)
-				if kdcConf != nil && kdcConf.ControlZone != "" && distributionID != "" && standbyZSK != nil {
-					if err := kdcDB.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
-						log.Printf("KDC: Warning: Failed to send NOTIFYs for ZSK distribution: %v", err)
-					} else {
-						log.Printf("KDC: Successfully sent NOTIFY for ZSK distribution %s", distributionID)
+						encryptedCount++
 					}
 				}
 				
-				// Send NOTIFY to all active nodes for KSK distribution (if KSK was distributed)
-				if kdcConf != nil && kdcConf.ControlZone != "" && activeKSK != nil && kskDistributionID != "" {
-					if err := kdcDB.SendNotifyWithDistributionID(kskDistributionID, kdcConf.ControlZone); err != nil {
-						log.Printf("KDC: Warning: Failed to send NOTIFYs for KSK distribution: %v", err)
-					} else {
-						log.Printf("KDC: Successfully sent NOTIFY for KSK distribution %s", kskDistributionID)
-					}
-				}
+				totalEncryptedCount += encryptedCount
 				
-				result.Status = "success"
-				if standbyZSK != nil {
-					result.KeyID = standbyZSK.ID
-				} else if activeKSK != nil {
-					result.KeyID = activeKSK.ID
-				}
-				
-				// Count keys and nodes for the message
+				zoneInfo.Result.Status = "success"
 				keyCount := 0
-				if standbyZSK != nil {
+				if zoneInfo.StandbyZSK != nil {
 					keyCount++
+					zoneInfo.Result.KeyID = zoneInfo.StandbyZSK.ID
 				}
-				if activeKSK != nil {
+				if zoneInfo.ActiveKSK != nil {
 					keyCount++
+					if zoneInfo.Result.KeyID == "" {
+						zoneInfo.Result.KeyID = zoneInfo.ActiveKSK.ID
+					}
 				}
 				
-				// Determine node count: use ZSK node count if available, otherwise KSK node count
-				// Both keys are distributed to the same set of nodes, so use whichever is available
-				nodeCount := zskNodeCount
-				if nodeCount == 0 && activeKSK != nil {
-					// If no ZSK was distributed, use KSK node count
-					// Note: kskNodeCount is set in the KSK distribution loop above
-					nodeCount = kskNodeCount
-				}
-				
-				var keyPlural, nodePlural string
-				if keyCount == 1 {
-					keyPlural = "key"
-				} else {
-					keyPlural = "keys"
-				}
-				if nodeCount == 1 {
-					nodePlural = "node"
-				} else {
-					nodePlural = "nodes"
-				}
-				
-				result.Msg = fmt.Sprintf("%d %s distributed (distribution ID: %s) to %d %s", keyCount, keyPlural, distributionID, nodeCount, nodePlural)
-				results = append(results, result)
+				zoneInfo.Result.Msg = fmt.Sprintf("%d key distributed (distribution ID: %s) to %d node(s)", keyCount, sharedDistributionID, len(allNodes))
+				results = append(results, *zoneInfo.Result)
 				successCount++
+			}
+			
+			// Send a single NOTIFY for the shared distribution
+			if kdcConf != nil && kdcConf.ControlZone != "" && sharedDistributionID != "" && totalEncryptedCount > 0 {
+				if err := kdcDB.SendNotifyWithDistributionID(sharedDistributionID, kdcConf.ControlZone); err != nil {
+					log.Printf("KDC: Warning: Failed to send NOTIFY for shared distribution %s: %v", sharedDistributionID, err)
+				} else {
+					log.Printf("KDC: Successfully sent NOTIFY for shared distribution %s", sharedDistributionID)
+				}
 			}
 			
 			resp.Results = results
@@ -2516,34 +2335,51 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 		if kdcConfRaw, ok := configMap["KdcConf"]; ok {
 			if kdcConfPtr, ok := kdcConfRaw.(*KdcConf); ok {
 				kdcConf = kdcConfPtr
+			} else {
+				log.Printf("SetupKdcAPIRoutes: WARNING: KdcConf in config map is not *KdcConf (got %T)", kdcConfRaw)
 			}
+		} else {
+			log.Printf("SetupKdcAPIRoutes: WARNING: KdcConf not found in config map")
 		}
-	}
-	
-	// Create subrouter with API key requirement
-	var sr *mux.Router
-	if apikey != "" {
-		sr = router.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
 	} else {
-		sr = router.PathPrefix("/api/v1").Subrouter()
+		log.Printf("SetupKdcAPIRoutes: WARNING: conf is not a map[string]interface{} (got %T)", conf)
 	}
 	
-	// Add ping endpoint
-	if pingHandler != nil {
-		sr.HandleFunc("/ping", pingHandler).Methods("POST")
+	if kdcConf == nil {
+		log.Printf("SetupKdcAPIRoutes: WARNING: kdcConf is nil, /kdc/config, /kdc/debug, and /kdc/service-transaction routes will NOT be registered")
 	}
 	
-	sr.HandleFunc("/kdc/zone", APIKdcZone(kdcDB, kdcConf)).Methods("POST")
-	sr.HandleFunc("/kdc/node", APIKdcNode(kdcDB)).Methods("POST")
-	sr.HandleFunc("/kdc/distrib", APIKdcDistrib(kdcDB, kdcConf)).Methods("POST")
-	sr.HandleFunc("/kdc/service", APIKdcService(kdcDB)).Methods("POST")
-	sr.HandleFunc("/kdc/component", APIKdcComponent(kdcDB)).Methods("POST")
-	sr.HandleFunc("/kdc/service-component", APIKdcServiceComponent(kdcDB)).Methods("POST")
-	sr.HandleFunc("/kdc/node-component", APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
-	if kdcConf != nil {
-		sr.HandleFunc("/kdc/service-transaction", APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
-		sr.HandleFunc("/kdc/config", APIKdcConfig(kdcConf, conf)).Methods("POST")
-		sr.HandleFunc("/kdc/debug", APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
+	// Register routes directly on the main router with full paths
+	// The router passed in already has /api/v1 routes set up via SetupAPIRouter.
+	// We register KDC-specific routes with the full path /api/v1/kdc/* directly on the router.
+	// We use the same API key header requirement as the main /api/v1 routes.
+	if apikey != "" {
+		// Routes require API key header (same as main /api/v1 routes)
+		router.Path("/api/v1/kdc/zone").Headers("X-API-Key", apikey).HandlerFunc(APIKdcZone(kdcDB, kdcConf)).Methods("POST")
+		router.Path("/api/v1/kdc/node").Headers("X-API-Key", apikey).HandlerFunc(APIKdcNode(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/distrib").Headers("X-API-Key", apikey).HandlerFunc(APIKdcDistrib(kdcDB, kdcConf)).Methods("POST")
+		router.Path("/api/v1/kdc/service").Headers("X-API-Key", apikey).HandlerFunc(APIKdcService(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/component").Headers("X-API-Key", apikey).HandlerFunc(APIKdcComponent(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/service-component").Headers("X-API-Key", apikey).HandlerFunc(APIKdcServiceComponent(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/node-component").Headers("X-API-Key", apikey).HandlerFunc(APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
+		if kdcConf != nil {
+			router.Path("/api/v1/kdc/service-transaction").Headers("X-API-Key", apikey).HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
+			router.Path("/api/v1/kdc/config").Headers("X-API-Key", apikey).HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
+			router.Path("/api/v1/kdc/debug").Headers("X-API-Key", apikey).HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
+		}
+	} else {
+		router.Path("/api/v1/kdc/zone").HandlerFunc(APIKdcZone(kdcDB, kdcConf)).Methods("POST")
+		router.Path("/api/v1/kdc/node").HandlerFunc(APIKdcNode(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/distrib").HandlerFunc(APIKdcDistrib(kdcDB, kdcConf)).Methods("POST")
+		router.Path("/api/v1/kdc/service").HandlerFunc(APIKdcService(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/component").HandlerFunc(APIKdcComponent(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/service-component").HandlerFunc(APIKdcServiceComponent(kdcDB)).Methods("POST")
+		router.Path("/api/v1/kdc/node-component").HandlerFunc(APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
+		if kdcConf != nil {
+			router.Path("/api/v1/kdc/service-transaction").HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
+			router.Path("/api/v1/kdc/config").HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
+			router.Path("/api/v1/kdc/debug").HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
+		}
 	}
 	
 	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug")

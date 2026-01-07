@@ -9,7 +9,9 @@ package kdc
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -1880,6 +1882,32 @@ func (kdc *KdcDB) GetOrCreateDistributionID(zoneName string, key *DNSSECKey) (st
 	// Generate a stable distribution ID: hex-encoded keytag (16-bit, so 4 hex chars)
 	// Format: <keytag-hex> (e.g., "a1b2" for keytag 41394)
 	distributionID := fmt.Sprintf("%04x", key.KeyID)
+	return distributionID, nil
+}
+
+// CreateDistributionIDForKeys creates a single distribution ID for multiple keys
+// This allows grouping multiple keys into a single distribution
+// The distribution ID is based on zone name and a hash of all key IDs
+func (kdc *KdcDB) CreateDistributionIDForKeys(zoneName string, keyIDs []string) (string, error) {
+	if len(keyIDs) == 0 {
+		return "", fmt.Errorf("keyIDs cannot be empty")
+	}
+
+	// Sort key IDs for consistent hashing
+	sortedKeyIDs := make([]string, len(keyIDs))
+	copy(sortedKeyIDs, keyIDs)
+	sort.Strings(sortedKeyIDs)
+
+	// Create a hash of zone name + sorted key IDs
+	hash := sha256.New()
+	hash.Write([]byte(zoneName))
+	for _, keyID := range sortedKeyIDs {
+		hash.Write([]byte(keyID))
+	}
+	hashBytes := hash.Sum(nil)
+
+	// Use first 8 hex chars of hash as distribution ID (16 hex chars = 8 bytes)
+	distributionID := hex.EncodeToString(hashBytes[:8])
 	return distributionID, nil
 }
 
@@ -3883,64 +3911,57 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *KdcCon
 		return nil // Not an error, just no keys to distribute
 	}
 
-	// Distribute each standby ZSK
-	encryptedCount := 0
-	var lastDistributionID string
+	// Collect all keys to distribute (ZSKs + optional KSK)
+	allKeys := make([]*DNSSECKey, 0, len(standbyZSKs)+1)
+	allKeyIDs := make([]string, 0, len(standbyZSKs)+1)
+	
 	for _, key := range standbyZSKs {
-		// Get or create distribution ID
-		distributionID, err := kdc.GetOrCreateDistributionID(zoneName, key)
-		if err != nil {
-			log.Printf("KDC: Warning: Failed to get/create distribution ID for key %s: %v", key.ID, err)
-			continue
-		}
-		lastDistributionID = distributionID
+		allKeys = append(allKeys, key)
+		allKeyIDs = append(allKeyIDs, key.ID)
+	}
+	if activeKSK != nil {
+		allKeys = append(allKeys, activeKSK)
+		allKeyIDs = append(allKeyIDs, activeKSK.ID)
+	}
 
-		// Transition to distributed state
-		if err := kdc.UpdateKeyState(zoneName, key.ID, KeyStateDistributed); err != nil {
+	// Create a single distribution ID for all keys
+	distributionID, err := kdc.CreateDistributionIDForKeys(zoneName, allKeyIDs)
+	if err != nil {
+		return fmt.Errorf("failed to create distribution ID for keys: %v", err)
+	}
+	log.Printf("KDC: Created distribution ID %s for %d key(s) (zone: %s)", distributionID, len(allKeys), zoneName)
+
+	// Distribute all keys using the same distribution ID
+	encryptedCount := 0
+	for _, key := range allKeys {
+		// Determine target state based on key type
+		targetState := KeyStateDistributed
+		if key.KeyType == KeyTypeKSK {
+			targetState = KeyStateActiveDist
+		}
+
+		// Transition to target state
+		if err := kdc.UpdateKeyState(zoneName, key.ID, targetState); err != nil {
 			log.Printf("KDC: Warning: Failed to update key state for key %s: %v", key.ID, err)
 			continue
 		}
 
-		// Encrypt key for the node
-		_, _, _, err = kdc.EncryptKeyForNode(key, node, kdcConf)
+		// Encrypt key for the node using the shared distribution ID
+		_, _, _, err = kdc.EncryptKeyForNode(key, node, kdcConf, distributionID)
 		if err != nil {
 			log.Printf("KDC: Warning: Failed to encrypt key %s for node %s: %v", key.ID, nodeID, err)
 			continue
 		}
 
 		encryptedCount++
-		log.Printf("KDC: Distributed key %s for zone %s to node %s (distribution ID: %s)", key.ID, zoneName, nodeID, distributionID)
+		log.Printf("KDC: Distributed key %s (type: %s) for zone %s to node %s (distribution ID: %s)", key.ID, key.KeyType, zoneName, nodeID, distributionID)
 	}
 
-	// Distribute active KSK for edgesign_full zones
-	if activeKSK != nil {
-		// Get or create distribution ID for KSK
-		distributionID, err := kdc.GetOrCreateDistributionID(zoneName, activeKSK)
-		if err != nil {
-			log.Printf("KDC: Warning: Failed to get/create distribution ID for KSK %s: %v", activeKSK.ID, err)
-		} else {
-			lastDistributionID = distributionID
-			// Transition to active_dist state (not distributed, since it's already active)
-			if err := kdc.UpdateKeyState(zoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
-				log.Printf("KDC: Warning: Failed to update KSK state for key %s: %v", activeKSK.ID, err)
-			} else {
-				// Encrypt key for the node
-				_, _, _, err = kdc.EncryptKeyForNode(activeKSK, node, kdcConf)
-				if err != nil {
-					log.Printf("KDC: Warning: Failed to encrypt KSK %s for node %s: %v", activeKSK.ID, nodeID, err)
-				} else {
-					encryptedCount++
-					log.Printf("KDC: Distributed KSK %s for zone %s to node %s (distribution ID: %s)", activeKSK.ID, zoneName, nodeID, distributionID)
-				}
-			}
-		}
-	}
-
-	if encryptedCount > 0 && lastDistributionID != "" {
+	if encryptedCount > 0 && distributionID != "" {
 		// Send NOTIFY to the node
 		if kdcConf != nil && kdcConf.ControlZone != "" {
-			if err := kdc.SendNotifyWithDistributionID(lastDistributionID, kdcConf.ControlZone); err != nil {
-				log.Printf("KDC: Warning: Failed to send NOTIFY for distribution %s: %v", lastDistributionID, err)
+			if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
+				log.Printf("KDC: Warning: Failed to send NOTIFY for distribution %s: %v", distributionID, err)
 			}
 		}
 		log.Printf("KDC: Distributed %d key(s) for zone %s to node %s", encryptedCount, zoneName, nodeID)

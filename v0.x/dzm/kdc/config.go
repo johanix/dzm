@@ -20,7 +20,7 @@ type KdcConf struct {
 	PublishTime time.Duration `yaml:"publish_time" mapstructure:"publish_time"` // Time to wait before published -> standby
 	RetireTime time.Duration `yaml:"retire_time" mapstructure:"retire_time"` // Time to wait before retired -> removed
 	DistributionTTL time.Duration `yaml:"distribution_ttl" mapstructure:"distribution_ttl"` // TTL for distributions (default: 5 minutes, like TSIG)
-	JsonchunkMaxSize int `yaml:"jsonchunk_max_size" mapstructure:"jsonchunk_max_size"` // Maximum RDATA size per JSONCHUNK (bytes, default: 60000)
+	JsonchunkMaxSize int `yaml:"jsonchunk_max_size" mapstructure:"jsonchunk_max_size"` // Maximum RDATA size per CHUNK (bytes, default: 60000)
 }
 
 // DatabaseConf represents database configuration

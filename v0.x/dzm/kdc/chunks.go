@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * Chunk preparation and retrieval for JSONMANIFEST and JSONCHUNK queries
+ * Chunk preparation and retrieval for MANIFEST and CHUNK queries
  */
 
 package kdc
@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 )
@@ -31,8 +32,9 @@ type chunkCache struct {
 }
 
 type preparedChunks struct {
-	manifest  *core.JSONMANIFEST
-	chunks    []*core.JSONCHUNK
+	manifest  *core.MANIFEST
+	chunks    []*core.CHUNK
+	chunk2s   []*core.CHUNK2 // CHUNK2 records (unified manifest/chunk)
 	checksum  string
 	timestamp int64
 }
@@ -58,10 +60,23 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	// Not in cache, prepare chunks
 	log.Printf("KDC: Preparing chunks for node %s, distribution %s", nodeID, distributionID)
 
+	// Get the node to access its long-term public key for HMAC
+	node, err := kdc.GetNode(nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
+	}
+	if len(node.LongTermPubKey) != 32 {
+		return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	}
+
 	// Get all distribution records for this distributionID
 	records, err := kdc.GetDistributionRecordsForDistributionID(distributionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get distribution records: %v", err)
+	}
+
+	if len(records) == 0 {
+		return nil, fmt.Errorf("no distribution records found for distribution %s (may have been purged after completion)", distributionID)
 	}
 
 	// Filter to records for this node (or all nodes if nodeID is empty)
@@ -73,7 +88,8 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	}
 
 	if len(nodeRecords) == 0 {
-		return nil, fmt.Errorf("no distribution records found for node %s, distribution %s", nodeID, distributionID)
+		log.Printf("KDC: Distribution %s exists but has no records for node %s (found %d records for other nodes)", distributionID, nodeID, len(records))
+		return nil, fmt.Errorf("no distribution records found for node %s, distribution %s (distribution exists but not for this node)", nodeID, distributionID)
 	}
 
 	// Determine content type: use "encrypted_keys" if we have keys, otherwise "zonelist"
@@ -85,39 +101,41 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	var keyCount int
 
 	if contentType == "encrypted_keys" {
-		// Prepare JSON structure with encrypted keys
-		// Format: array of objects, each containing zone_name, key_id, encrypted_key, ephemeral_pub_key
-		type EncryptedKeyEntry struct {
-			ZoneName       string `json:"zone_name"`
-			KeyID          string `json:"key_id"`
-			KeyType        string `json:"key_type,omitempty"`
-			Algorithm      uint8  `json:"algorithm,omitempty"`
-			Flags          uint16 `json:"flags,omitempty"`
-			PublicKey      string `json:"public_key,omitempty"`
-			EncryptedKey   string `json:"encrypted_key"`   // base64-encoded
-			EphemeralPubKey string `json:"ephemeral_pub_key"` // base64-encoded (duplicate, for verification)
+		// Prepare JSON structure with all key data (including private keys in cleartext)
+		// The entire JSON will be encrypted using HPKE
+		type KeyEntry struct {
+			ZoneName   string `json:"zone_name"`
+			KeyID      string `json:"key_id"`
+			KeyType    string `json:"key_type,omitempty"`
+			Algorithm  uint8  `json:"algorithm,omitempty"`
+			Flags      uint16 `json:"flags,omitempty"`
+			PublicKey  string `json:"public_key,omitempty"`
+			PrivateKey string `json:"private_key"` // Private key in cleartext (will be encrypted as part of entire payload)
 		}
 
-		entries := make([]EncryptedKeyEntry, 0, len(nodeRecords))
+		entries := make([]KeyEntry, 0, len(nodeRecords))
 		zoneSet := make(map[string]bool)
 		
 		for _, record := range nodeRecords {
-			// Get the key details to include key_id
+			// Get the key details to include key_id and private key
 			key, err := kdc.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
 			if err != nil {
 				log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
 				continue
 			}
 
-			entry := EncryptedKeyEntry{
-				ZoneName:       record.ZoneName,
-				KeyID:          record.KeyID,
-				KeyType:        string(key.KeyType),
-				Algorithm:      key.Algorithm,
-				Flags:          key.Flags,
-				PublicKey:      key.PublicKey,
-				EncryptedKey:   base64.StdEncoding.EncodeToString(record.EncryptedKey),
-				EphemeralPubKey: base64.StdEncoding.EncodeToString(record.EphemeralPubKey),
+			// Decrypt the private key from the distribution record to get cleartext
+			// The record.EncryptedKey was encrypted using HPKE, we need to decrypt it
+			// But wait - we don't have the node's private key here. We need to get the cleartext private key
+			// from the DNSSECKey structure instead.
+			entry := KeyEntry{
+				ZoneName:  record.ZoneName,
+				KeyID:     record.KeyID,
+				KeyType:   string(key.KeyType),
+				Algorithm: key.Algorithm,
+				Flags:     key.Flags,
+				PublicKey: key.PublicKey,
+				PrivateKey: base64.StdEncoding.EncodeToString(key.PrivateKey), // Base64-encode private key bytes
 			}
 			entries = append(entries, entry)
 			zoneSet[record.ZoneName] = true
@@ -130,16 +148,48 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 			return nil, fmt.Errorf("no valid keys found for node %s, distribution %s", nodeID, distributionID)
 		}
 
-		// Marshal to JSON
+		// Marshal to JSON (cleartext)
 		keysJSON, err := json.Marshal(entries)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal encrypted keys JSON: %v", err)
+			return nil, fmt.Errorf("failed to marshal keys JSON: %v", err)
 		}
 
-		// Base64 encode the JSON
-		base64Data = []byte(base64.StdEncoding.EncodeToString(keysJSON))
-		log.Printf("KDC: Prepared encrypted_keys: %d keys for %d zones, JSON size: %d bytes, base64 size: %d bytes", 
-			keyCount, zoneCount, len(keysJSON), len(base64Data))
+		// Debug logging: log cleartext content (masking private keys)
+		if tdns.Globals.Debug {
+			// Create a copy for logging with masked private keys
+			logEntries := make([]map[string]interface{}, len(entries))
+			for i, entry := range entries {
+				logEntries[i] = map[string]interface{}{
+					"zone_name":   entry.ZoneName,
+					"key_id":      entry.KeyID,
+					"key_type":    entry.KeyType,
+					"algorithm":   entry.Algorithm,
+					"flags":       entry.Flags,
+					"public_key":  entry.PublicKey,
+					"private_key": "***MASKED***",
+				}
+			}
+			logJSON, _ := json.Marshal(logEntries)
+			log.Printf("KDC: DEBUG: Cleartext distribution payload (private keys masked): %s", string(logJSON))
+		}
+
+		log.Printf("KDC: Prepared keys JSON: %d keys for %d zones, JSON size: %d bytes", 
+			keyCount, zoneCount, len(keysJSON))
+
+		// Encrypt the entire JSON payload using HPKE
+		ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, keysJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
+		}
+
+		// Combine ephemeral public key and ciphertext for transport
+		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
+		encryptedData := append(ephemeralPub, ciphertext...)
+
+		// Base64 encode the encrypted data
+		base64Data = []byte(base64.StdEncoding.EncodeToString(encryptedData))
+		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> encrypted %d bytes -> base64 %d bytes", 
+			len(keysJSON), len(encryptedData), len(base64Data))
 	} else {
 		// "zonelist" mode (fallback)
 		// Collect zone names from distribution records
@@ -194,17 +244,20 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	// DNS UDP message limit is ~1232 bytes with EDNS0, but we need to account for:
 	// - DNS headers (~12 bytes)
 	// - QNAME length (variable, ~50-100 bytes typical)
-	// - JSONMANIFEST structure overhead (~200-300 bytes for metadata, field names, etc.)
+	// - MANIFEST structure overhead (~200-300 bytes for metadata, field names, etc.)
 	// - JSON encoding overhead (base64 string encoding adds ~33% overhead)
 	// So we use a conservative threshold of ~500 bytes for base64Data to ensure it fits
 	const inlinePayloadThreshold = 500
 	payloadSize := len(base64Data)
 	
 	// Create a test manifest to check actual size
-	testManifest := &core.JSONMANIFEST{
+	// Note: We use a placeholder HMAC for size estimation (actual HMAC will be calculated later)
+	testHMAC := make([]byte, 32) // HMAC-SHA256 is 32 bytes
+	testManifest := &core.MANIFEST{
+		Format:     core.FormatJSON,
 		ChunkCount: 0,
 		ChunkSize:  0,
-		Checksum:   checksum,
+		HMAC:       testHMAC,
 		Metadata:   metadata,
 		Payload:    base64Data, // Test with actual payload
 	}
@@ -216,7 +269,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
 
-	var chunks []*core.JSONCHUNK
+	var chunks []*core.CHUNK
 	var chunkSize uint16
 	var chunkCount uint16
 
@@ -224,7 +277,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in JSONMANIFEST", 
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in MANIFEST", 
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
@@ -236,10 +289,10 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
-	manifest := &core.JSONMANIFEST{
+	manifest := &core.MANIFEST{
+		Format:     core.FormatJSON, // Set format to JSON (1)
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
-		Checksum:   checksum,
 		Metadata:   metadata,
 	}
 
@@ -249,9 +302,63 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		copy(manifest.Payload, base64Data)
 	}
 
+	// Calculate HMAC using the recipient node's long-term public key
+	// This ensures each distribution is authenticated for the specific recipient node
+	if err := manifest.CalculateHMAC(node.LongTermPubKey); err != nil {
+		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
+	}
+	log.Printf("KDC: Calculated HMAC for MANIFEST using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
+
+	// Create CHUNK2 records (unified manifest/chunk format)
+	chunk2s := make([]*core.CHUNK2, 0)
+	
+	// Create manifest CHUNK2 (Total=0)
+	// First, marshal the manifest JSON data (same as MANIFEST payload)
+	jsonFields := struct {
+		ChunkCount uint16                 `json:"chunk_count"`
+		ChunkSize  uint16                 `json:"chunk_size,omitempty"`
+		Metadata   map[string]interface{} `json:"metadata,omitempty"`
+		Payload    []byte                 `json:"payload,omitempty"`
+	}{
+		ChunkCount: manifest.ChunkCount,
+		ChunkSize:  manifest.ChunkSize,
+		Metadata:   manifest.Metadata,
+		Payload:    manifest.Payload,
+	}
+	manifestJSON, err := json.Marshal(jsonFields)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK2: %v", err)
+	}
+	
+	manifestCHUNK2 := &core.CHUNK2{
+		Format:     manifest.Format,
+		HMACLen:    uint16(len(manifest.HMAC)),
+		HMAC:       manifest.HMAC,
+		Sequence:   0, // Unused for manifest
+		Total:      0, // 0 indicates manifest
+		DataLength: uint16(len(manifestJSON)),
+		Data:       manifestJSON,
+	}
+	chunk2s = append(chunk2s, manifestCHUNK2)
+	
+	// Create data CHUNK2 records (Total>0)
+	for _, chunk := range chunks {
+		chunk2 := &core.CHUNK2{
+			Format:     manifest.Format, // Store format from manifest (not 0)
+			HMACLen:    0, // No HMAC for data chunks
+			HMAC:       nil,
+			Sequence:   chunk.Sequence,
+			Total:      chunk.Total,
+			DataLength: uint16(len(chunk.Data)),
+			Data:       chunk.Data,
+		}
+		chunk2s = append(chunk2s, chunk2)
+	}
+
 	prepared := &preparedChunks{
 		manifest:  manifest,
 		chunks:    chunks,
+		chunk2s:   chunk2s,
 		checksum:  checksum,
 		timestamp: 0, // TODO: add timestamp
 	}
@@ -261,17 +368,18 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	globalChunkCache.cache[cacheKey] = prepared
 	globalChunkCache.mu.Unlock()
 
-	log.Printf("KDC: Prepared %d chunks for node %s, distribution %s", len(chunks), nodeID, distributionID)
+	log.Printf("KDC: Prepared %d chunks (MANIFEST/CHUNK) and %d CHUNK2 records for node %s, distribution %s", 
+		len(chunks), len(chunk2s), nodeID, distributionID)
 	return prepared, nil
 }
 
 // splitIntoChunks splits data into chunks of specified size
-func splitIntoChunks(data []byte, chunkSize int) []*core.JSONCHUNK {
+func splitIntoChunks(data []byte, chunkSize int) []*core.CHUNK {
 	if chunkSize <= 0 {
 		chunkSize = 60000 // Default
 	}
 
-	var chunks []*core.JSONCHUNK
+	var chunks []*core.CHUNK
 	total := len(data)
 	numChunks := (total + chunkSize - 1) / chunkSize // Ceiling division
 
@@ -285,7 +393,7 @@ func splitIntoChunks(data []byte, chunkSize int) []*core.JSONCHUNK {
 		chunkData := make([]byte, end-start)
 		copy(chunkData, data[start:end])
 
-		chunk := &core.JSONCHUNK{
+		chunk := &core.CHUNK{
 			Sequence: uint16(i),
 			Total:    uint16(numChunks),
 			Data:     chunkData,
@@ -297,7 +405,7 @@ func splitIntoChunks(data []byte, chunkSize int) []*core.JSONCHUNK {
 }
 
 // GetManifestForNode retrieves or prepares manifest for a node's distribution event
-func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcConf) (*core.JSONMANIFEST, error) {
+func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcConf) (*core.MANIFEST, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
 		return nil, err
@@ -306,7 +414,7 @@ func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcCon
 }
 
 // GetChunkForNode retrieves a specific chunk for a node's distribution event
-func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.JSONCHUNK, error) {
+func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.CHUNK, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
 		return nil, err
@@ -317,6 +425,21 @@ func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16,
 	}
 
 	return prepared.chunks[chunkID], nil
+}
+
+// GetCHUNK2ForNode retrieves a CHUNK2 record for a node's distribution event
+// chunkID 0 returns the manifest CHUNK2 (Total=0), chunkID > 0 returns data CHUNK2 (Total>0)
+func (kdc *KdcDB) GetCHUNK2ForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.CHUNK2, error) {
+	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
+	if err != nil {
+		return nil, err
+	}
+
+	if int(chunkID) >= len(prepared.chunk2s) {
+		return nil, fmt.Errorf("CHUNK2 ID %d out of range (max %d)", chunkID, len(prepared.chunk2s)-1)
+	}
+
+	return prepared.chunk2s[chunkID], nil
 }
 
 // GetDistributionRecordsForDistributionID gets all distribution records for a distribution ID
@@ -505,18 +628,19 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	// Not in cache, prepare chunks
 	log.Printf("KDC: Preparing %s chunks for node %s, distribution %s", contentType, nodeID, distributionID)
 
+	// Get the node to access its long-term public key for HMAC
+	node, err := kdc.GetNode(nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
+	}
+	if len(node.LongTermPubKey) != 32 {
+		return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	}
+
 	var dataToChunk []byte
 	// var err error
 
 	if contentType == "encrypted_text" {
-		// Get node's public key
-		node, err := kdc.GetNode(nodeID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
-		}
-		if len(node.LongTermPubKey) != 32 {
-			return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-		}
 
 		// Encrypt the text using HPKE
 		ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, []byte(text))
@@ -545,10 +669,13 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	payloadSize := len(dataToChunk)
 	
 	// Create a test manifest to check actual size
-	testManifest := &core.JSONMANIFEST{
+	// Note: We use a placeholder HMAC for size estimation (actual HMAC will be calculated later)
+	testHMAC := make([]byte, 32) // HMAC-SHA256 is 32 bytes
+	testManifest := &core.MANIFEST{
+		Format:     core.FormatJSON,
 		ChunkCount: 0,
 		ChunkSize:  0,
-		Checksum:   checksum,
+		HMAC:       testHMAC,
 		Metadata: map[string]interface{}{
 			"content":         contentType,
 			"distribution_id": distributionID,
@@ -564,7 +691,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
 
-	var chunks []*core.JSONCHUNK
+	var chunks []*core.CHUNK
 	var chunkSize uint16
 	var chunkCount uint16
 
@@ -572,7 +699,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in JSONMANIFEST", 
+		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in MANIFEST", 
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
@@ -585,10 +712,10 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	}
 
 	// Create manifest
-	manifest := &core.JSONMANIFEST{
+	manifest := &core.MANIFEST{
+		Format:     core.FormatJSON, // Set format to JSON (1)
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
-		Checksum:   checksum,
 		Metadata: map[string]interface{}{
 			"content":         contentType,
 			"distribution_id": distributionID,
@@ -603,9 +730,62 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		copy(manifest.Payload, dataToChunk)
 	}
 
+	// Calculate HMAC using the recipient node's long-term public key
+	// This ensures each distribution is authenticated for the specific recipient node
+	if err := manifest.CalculateHMAC(node.LongTermPubKey); err != nil {
+		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
+	}
+	log.Printf("KDC: Calculated HMAC for MANIFEST using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
+
+	// Create CHUNK2 records (unified manifest/chunk format)
+	chunk2s := make([]*core.CHUNK2, 0)
+	
+	// Create manifest CHUNK2 (Total=0)
+	jsonFields := struct {
+		ChunkCount uint16                 `json:"chunk_count"`
+		ChunkSize  uint16                 `json:"chunk_size,omitempty"`
+		Metadata   map[string]interface{} `json:"metadata,omitempty"`
+		Payload    []byte                 `json:"payload,omitempty"`
+	}{
+		ChunkCount: manifest.ChunkCount,
+		ChunkSize:  manifest.ChunkSize,
+		Metadata:   manifest.Metadata,
+		Payload:    manifest.Payload,
+	}
+	manifestJSON, err := json.Marshal(jsonFields)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK2: %v", err)
+	}
+	
+	manifestCHUNK2 := &core.CHUNK2{
+		Format:     manifest.Format,
+		HMACLen:    uint16(len(manifest.HMAC)),
+		HMAC:       manifest.HMAC,
+		Sequence:   0, // Unused for manifest
+		Total:      0, // 0 indicates manifest
+		DataLength: uint16(len(manifestJSON)),
+		Data:       manifestJSON,
+	}
+	chunk2s = append(chunk2s, manifestCHUNK2)
+	
+	// Create data CHUNK2 records (Total>0)
+	for _, chunk := range chunks {
+		chunk2 := &core.CHUNK2{
+			Format:     manifest.Format, // Store format from manifest (not 0)
+			HMACLen:    0, // No HMAC for data chunks
+			HMAC:       nil,
+			Sequence:   chunk.Sequence,
+			Total:      chunk.Total,
+			DataLength: uint16(len(chunk.Data)),
+			Data:       chunk.Data,
+		}
+		chunk2s = append(chunk2s, chunk2)
+	}
+
 	prepared := &preparedChunks{
 		manifest:  manifest,
 		chunks:    chunks,
+		chunk2s:   chunk2s,
 		checksum:  checksum,
 		timestamp: 0,
 	}

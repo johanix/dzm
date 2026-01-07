@@ -141,19 +141,17 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		return fmt.Errorf("failed to store node config: %v", err)
 	}
 
-	// Register KRS API routes using the registration API
+	// Register KRS API routes directly on the router
+	// Pass conf as map to avoid circular import, and pass ping handler
 	confMap := map[string]interface{}{
 		"ApiServer": map[string]interface{}{
 			"ApiKey":    conf.ApiServer.ApiKey,
 			"Addresses": conf.ApiServer.Addresses,
 		},
 	}
-	if err := tdns.RegisterAPIRoute(func(router *mux.Router) error {
-		krs.SetupKrsAPIRoutes(router, krsDB, &krsConf, confMap, tdns.APIping(conf))
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed to register KRS API routes: %v", err)
-	}
+	// Call SetupKrsAPIRoutes directly on the router (not via RegisterAPIRoute)
+	// because SetupAPIRouter has already been called and returned
+	krs.SetupKrsAPIRoutes(apirouter, krsDB, &krsConf, confMap, tdns.APIping(conf))
 
 	// Start API dispatcher
 	go func() {

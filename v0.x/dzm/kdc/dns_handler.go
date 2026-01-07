@@ -96,24 +96,34 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 		}
 		return err
 
-	case core.TypeJSONMANIFEST:
-		log.Printf("KDC: Handling JSONMANIFEST query")
-		err := handleJSONMANIFESTQuery(ctx, m, msg, qname, w, kdcDB, conf)
+	case core.TypeMANIFEST:
+		log.Printf("KDC: Handling MANIFEST query")
+		err := handleMANIFESTQuery(ctx, m, msg, qname, w, kdcDB, conf)
 		if err != nil {
-			log.Printf("KDC: Error handling JSONMANIFEST: %v", err)
+			log.Printf("KDC: Error handling MANIFEST: %v", err)
 		} else {
-			log.Printf("KDC: JSONMANIFEST query handled successfully")
+			log.Printf("KDC: MANIFEST query handled successfully")
 		}
 		// Don't return error - we've already sent the response (success or error)
 		return nil
 
-	case core.TypeJSONCHUNK:
-		log.Printf("KDC: Handling JSONCHUNK query")
-		err := handleJSONCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
+	case core.TypeCHUNK:
+		log.Printf("KDC: Handling CHUNK query")
+		err := handleCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
 		if err != nil {
-			log.Printf("KDC: Error handling JSONCHUNK: %v", err)
+			log.Printf("KDC: Error handling CHUNK: %v", err)
 		} else {
-			log.Printf("KDC: JSONCHUNK query handled successfully")
+			log.Printf("KDC: CHUNK query handled successfully")
+		}
+		return err
+
+	case core.TypeCHUNK2:
+		log.Printf("KDC: Handling CHUNK2 query")
+		err := handleCHUNK2Query(ctx, m, msg, qname, w, kdcDB, conf)
+		if err != nil {
+			log.Printf("KDC: Error handling CHUNK2: %v", err)
+		} else {
+			log.Printf("KDC: CHUNK2 query handled successfully")
 		}
 		return err
 
@@ -460,10 +470,10 @@ func extractEphemeralPubKey(msg *dns.Msg) ([]byte, error) {
 	return nil, fmt.Errorf("no ephemeral public key found in query")
 }
 
-// ParseQnameForJSONMANIFEST extracts nodeid and distributionID from JSONMANIFEST QNAME
+// ParseQnameForMANIFEST extracts nodeid and distributionID from MANIFEST QNAME
 // Format: <nodeid><distributionID>.<controlzone>
 // Node ID is an FQDN (with trailing dot), so distributionID is concatenated directly after it
-func ParseQnameForJSONMANIFEST(qname string, controlZone string) (nodeID, distributionID string, err error) {
+func ParseQnameForMANIFEST(qname string, controlZone string) (nodeID, distributionID string, err error) {
 	// Remove trailing dot if present
 	if len(qname) > 0 && qname[len(qname)-1] == '.' {
 		qname = qname[:len(qname)-1]
@@ -486,44 +496,51 @@ func ParseQnameForJSONMANIFEST(qname string, controlZone string) (nodeID, distri
 	}
 
 	// Remove control zone suffix to get <nodeid><distributionID>
+	// In DNS, labels are separated by dots, so the format is actually:
+	// <nodeid-labels>.<distributionID>.<controlzone>
+	// We need to split by dots and find the distribution ID label
 	prefix := qname[:len(qname)-len(controlZoneClean)-1] // -1 for the dot before control zone
-
-	// Find where distribution ID starts (it's hex, so we need to find the boundary)
-	// Distribution ID is typically 4 hex characters, but could be longer
-	// We'll try to find a valid hex string at the end of the prefix
-	// Start from the end and work backwards to find the longest valid hex string
-	maxDistIDLen := len(prefix)
-	if maxDistIDLen > 8 {
-		maxDistIDLen = 8 // Reasonable max for distribution ID
+	
+	// Split prefix into labels
+	labels := dns.SplitDomainName(prefix)
+	if len(labels) == 0 {
+		return "", "", fmt.Errorf("invalid MANIFEST QNAME format: %s (no labels found)", qname)
 	}
-
+	
+	// The distribution ID should be the last label (it's hex)
+	// Try the last label first, then work backwards if needed
 	found := false
-	for distIDLen := 4; distIDLen <= maxDistIDLen && distIDLen <= len(prefix); distIDLen++ {
-		candidateDistID := prefix[len(prefix)-distIDLen:]
-		if _, err := hex.DecodeString(candidateDistID); err == nil {
-			// Valid hex string found
-			distributionID = candidateDistID
-			nodeID = prefix[:len(prefix)-distIDLen]
-			// Ensure node ID is FQDN
-			if !strings.HasSuffix(nodeID, ".") {
-				nodeID = nodeID + "."
+	for i := len(labels) - 1; i >= 0 && !found; i-- {
+		candidateDistID := labels[i]
+		// Check if this label is a valid hex string (4-16 hex chars)
+		if len(candidateDistID) >= 4 && len(candidateDistID) <= 16 {
+			if _, err := hex.DecodeString(candidateDistID); err == nil {
+				// Valid hex string found - this is the distribution ID
+				distributionID = candidateDistID
+				// Node ID is all labels before this one
+				if i > 0 {
+					nodeID = strings.Join(labels[:i], ".") + "."
+				} else {
+					// Distribution ID is the only label (unusual but possible)
+					nodeID = "."
+				}
+				found = true
+				break
 			}
-			found = true
-			break
 		}
 	}
-
+	
 	if !found {
-		return "", "", fmt.Errorf("invalid JSONMANIFEST QNAME format: %s (could not find valid distribution ID)", qname)
+		return "", "", fmt.Errorf("invalid MANIFEST QNAME format: %s (could not find valid distribution ID in labels: %v)", qname, labels)
 	}
 
 	return nodeID, distributionID, nil
 }
 
-// ParseQnameForJSONCHUNK extracts chunkid, nodeid, and distributionID from JSONCHUNK QNAME
+// ParseQnameForCHUNK extracts chunkid, nodeid, and distributionID from CHUNK QNAME
 // Format: <chunkid>.<nodeid><distributionID>.<controlzone>
 // Node ID is an FQDN (with trailing dot), so distributionID is concatenated directly after it
-func ParseQnameForJSONCHUNK(qname string, controlZone string) (chunkID uint16, nodeID, distributionID string, err error) {
+func ParseQnameForCHUNK(qname string, controlZone string) (chunkID uint16, nodeID, distributionID string, err error) {
 	// Remove trailing dot if present
 	if len(qname) > 0 && qname[len(qname)-1] == '.' {
 		qname = qname[:len(qname)-1]
@@ -531,7 +548,7 @@ func ParseQnameForJSONCHUNK(qname string, controlZone string) (chunkID uint16, n
 
 	labels := dns.SplitDomainName(qname)
 	if len(labels) < 3 {
-		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (need at least chunkid.nodeid+distID.controlzone)", qname)
+		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (need at least chunkid.nodeid+distID.controlzone)", qname)
 	}
 
 	// Parse chunk ID (first label)
@@ -555,7 +572,7 @@ func ParseQnameForJSONCHUNK(qname string, controlZone string) (chunkID uint16, n
 	// Check that the last N labels match the control zone
 	controlStartIdx := len(labels) - len(controlLabels)
 	if controlStartIdx < 2 {
-		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (too few labels)", qname)
+		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (too few labels)", qname)
 	}
 
 	for i := 0; i < len(controlLabels); i++ {
@@ -564,54 +581,53 @@ func ParseQnameForJSONCHUNK(qname string, controlZone string) (chunkID uint16, n
 		}
 	}
 
-	// After removing control zone, we have: <chunkid>.<nodeid><distributionID>
-	// Labels from index 1 to controlStartIdx-1 contain <nodeid><distributionID>
-	// We need to combine them and find where distribution ID starts
+	// After removing control zone, we have: <chunkid>.<nodeid-labels>.<distributionID>
+	// Labels from index 1 to controlStartIdx-1 contain <nodeid-labels> and <distributionID>
+	// The distribution ID should be the last label (it's hex)
 	if controlStartIdx-1 < 1 {
-		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (missing node ID and distribution ID)", qname)
+		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (missing node ID and distribution ID)", qname)
 	}
 	prefixLabels := labels[1:controlStartIdx]
-	prefix := strings.Join(prefixLabels, ".")
-
-	// Find where distribution ID starts (it's hex, so we need to find the boundary)
-	// Distribution ID is typically 4 hex characters, but could be longer
-	maxDistIDLen := len(prefix)
-	if maxDistIDLen > 8 {
-		maxDistIDLen = 8 // Reasonable max for distribution ID
-	}
-
+	
+	// The distribution ID should be the last label in prefixLabels (it's hex)
+	// Try the last label first, then work backwards if needed
 	found := false
-	for distIDLen := 4; distIDLen <= maxDistIDLen && distIDLen <= len(prefix); distIDLen++ {
-		candidateDistID := prefix[len(prefix)-distIDLen:]
-		if _, err := hex.DecodeString(candidateDistID); err == nil {
-			// Valid hex string found
-			distributionID = candidateDistID
-			nodeID = prefix[:len(prefix)-distIDLen]
-			// Ensure node ID is FQDN
-			if !strings.HasSuffix(nodeID, ".") {
-				nodeID = nodeID + "."
+	for i := len(prefixLabels) - 1; i >= 0 && !found; i-- {
+		candidateDistID := prefixLabels[i]
+		// Check if this label is a valid hex string (4-16 hex chars)
+		if len(candidateDistID) >= 4 && len(candidateDistID) <= 16 {
+			if _, err := hex.DecodeString(candidateDistID); err == nil {
+				// Valid hex string found - this is the distribution ID
+				distributionID = candidateDistID
+				// Node ID is all labels before this one
+				if i > 0 {
+					nodeID = strings.Join(prefixLabels[:i], ".") + "."
+				} else {
+					// Distribution ID is the only label (unusual but possible)
+					nodeID = "."
+				}
+				found = true
+				break
 			}
-			found = true
-			break
 		}
 	}
-
+	
 	if !found {
-		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (could not find valid distribution ID in %s)", qname, prefix)
+		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (could not find valid distribution ID in labels: %v)", qname, prefixLabels)
 	}
 
 	return chunkID, nodeID, distributionID, nil
 }
 
-// handleJSONMANIFESTQuery processes JSONMANIFEST queries
+// handleMANIFESTQuery processes MANIFEST queries
 // QNAME format: <nodeid>.<distributionID>.<controlzone>
-func handleJSONMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	log.Printf("KDC: Processing JSONMANIFEST query for %s", qname)
+func handleMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	log.Printf("KDC: Processing MANIFEST query for %s", qname)
 
 	// Parse QNAME to extract node ID and distribution ID
-	nodeID, distributionID, err := ParseQnameForJSONMANIFEST(qname, conf.ControlZone)
+	nodeID, distributionID, err := ParseQnameForMANIFEST(qname, conf.ControlZone)
 	if err != nil {
-		log.Printf("KDC: Error parsing JSONMANIFEST QNAME %s: %v", qname, err)
+		log.Printf("KDC: Error parsing MANIFEST QNAME %s: %v", qname, err)
 		m.SetRcode(msg, dns.RcodeFormatError)
 		if writeErr := w.WriteMsg(m); writeErr != nil {
 			return writeErr
@@ -619,13 +635,26 @@ func handleJSONMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qnam
 		return fmt.Errorf("failed to parse QNAME: %v", err)
 	}
 
-	log.Printf("KDC: JSONMANIFEST node-id=%s, distribution-id=%s", nodeID, distributionID)
+	log.Printf("KDC: MANIFEST query: qname=%s, parsed node-id=%s, distribution-id=%s (length: %d)", qname, nodeID, distributionID, len(distributionID))
 
 	// Get manifest data for this node and distribution
 	manifest, err := kdcDB.GetManifestForNode(nodeID, distributionID, conf)
 	if err != nil {
 		log.Printf("KDC: Error getting manifest for node %s, distribution %s: %v", nodeID, distributionID, err)
-		m.SetRcode(msg, dns.RcodeServerFailure)
+		// Check if distribution records exist at all
+		records, checkErr := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
+		if checkErr == nil {
+			if len(records) == 0 {
+				log.Printf("KDC: No distribution records found for distribution %s (may have been purged after completion)", distributionID)
+				m.SetRcode(msg, dns.RcodeNameError)
+			} else {
+				log.Printf("KDC: Found %d distribution records for distribution %s, but failed to prepare manifest", len(records), distributionID)
+				m.SetRcode(msg, dns.RcodeServerFailure)
+			}
+		} else {
+			log.Printf("KDC: Failed to check distribution records: %v", checkErr)
+			m.SetRcode(msg, dns.RcodeServerFailure)
+		}
 		if writeErr := w.WriteMsg(m); writeErr != nil {
 			return writeErr
 		}
@@ -633,7 +662,7 @@ func handleJSONMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qnam
 	}
 
 	if manifest == nil {
-		log.Printf("KDC: No manifest found for node %s, distribution %s", nodeID, distributionID)
+		log.Printf("KDC: No manifest found for node %s, distribution %s (GetManifestForNode returned nil)", nodeID, distributionID)
 		m.SetRcode(msg, dns.RcodeNameError)
 		if writeErr := w.WriteMsg(m); writeErr != nil {
 			return writeErr
@@ -641,11 +670,11 @@ func handleJSONMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qnam
 		return fmt.Errorf("no manifest found for node %s, distribution %s", nodeID, distributionID)
 	}
 
-	// Create JSONMANIFEST RR
+	// Create MANIFEST RR
 	manifestRR := &dns.PrivateRR{
 		Hdr: dns.RR_Header{
 			Name:   qname,
-			Rrtype: core.TypeJSONMANIFEST,
+			Rrtype: core.TypeMANIFEST,
 			Class:  dns.ClassINET,
 			Ttl:    300,
 		},
@@ -661,24 +690,24 @@ func handleJSONMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qnam
 			content = c
 		}
 	}
-	log.Printf("KDC: Sending JSONMANIFEST response with content=%s, chunk_count=%d", content, manifest.ChunkCount)
+	log.Printf("KDC: Sending MANIFEST response with content=%s, chunk_count=%d", content, manifest.ChunkCount)
 	return w.WriteMsg(m)
 }
 
-// handleJSONCHUNKQuery processes JSONCHUNK queries
+// handleCHUNKQuery processes CHUNK queries
 // QNAME format: <chunkid>.<nodeid>.<distributionID>.<controlzone>
-func handleJSONCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	log.Printf("KDC: Processing JSONCHUNK query for %s", qname)
+func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	log.Printf("KDC: Processing CHUNK query for %s", qname)
 
 	// Parse QNAME to extract chunk ID, node ID, and distribution ID
-	chunkID, nodeID, distributionID, err := ParseQnameForJSONCHUNK(qname, conf.ControlZone)
+	chunkID, nodeID, distributionID, err := ParseQnameForCHUNK(qname, conf.ControlZone)
 	if err != nil {
-		log.Printf("KDC: Error parsing JSONCHUNK QNAME %s: %v", qname, err)
+		log.Printf("KDC: Error parsing CHUNK QNAME %s: %v", qname, err)
 		m.SetRcode(msg, dns.RcodeFormatError)
 		return w.WriteMsg(m)
 	}
 
-	log.Printf("KDC: JSONCHUNK chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
+	log.Printf("KDC: CHUNK chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
 
 	// Get chunk data for this node, distribution, and chunk ID
 	chunk, err := kdcDB.GetChunkForNode(nodeID, distributionID, chunkID, conf)
@@ -694,11 +723,11 @@ func handleJSONCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname s
 		return w.WriteMsg(m)
 	}
 
-	// Create JSONCHUNK RR
+	// Create CHUNK RR
 	chunkRR := &dns.PrivateRR{
 		Hdr: dns.RR_Header{
 			Name:   qname,
-			Rrtype: core.TypeJSONCHUNK,
+			Rrtype: core.TypeCHUNK,
 			Class:  dns.ClassINET,
 			Ttl:    300,
 		},
@@ -708,16 +737,112 @@ func handleJSONCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname s
 	m.Answer = append(m.Answer, chunkRR)
 	m.SetRcode(msg, dns.RcodeSuccess)
 
-	log.Printf("KDC: Sending JSONCHUNK response with sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
+	log.Printf("KDC: Sending CHUNK response with sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
 	return w.WriteMsg(m)
 }
 
-// handleConfirmationNotify handles NOTIFY(JSONMANIFEST) messages from KRS confirming receipt of keys
+// handleCHUNK2Query processes CHUNK2 queries
+// QNAME format for manifest: <nodeid>.<distributionID>.<controlzone> (chunkID=0 implied)
+// QNAME format for data chunks: <chunkid>.<nodeid>.<distributionID>.<controlzone>
+func handleCHUNK2Query(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	log.Printf("KDC: Processing CHUNK2 query for %s", qname)
+
+	// Try to parse as data chunk first (has chunk ID prefix)
+	// If that fails, try parsing as manifest (no chunk ID)
+	var chunkID uint16
+	var nodeID, distributionID string
+	var err error
+
+	// Check if QNAME starts with a number (chunk ID)
+	labels := dns.SplitDomainName(qname)
+	if len(labels) > 0 {
+		// Try to parse first label as chunk ID
+		if parsedChunkID, parseErr := strconv.ParseUint(labels[0], 10, 16); parseErr == nil {
+			// First label is a number - this is a data chunk query
+			chunkID = uint16(parsedChunkID)
+			chunkID, nodeID, distributionID, err = ParseQnameForCHUNK(qname, conf.ControlZone)
+			if err != nil {
+				log.Printf("KDC: Error parsing CHUNK2 data chunk QNAME %s: %v", qname, err)
+				m.SetRcode(msg, dns.RcodeFormatError)
+				return w.WriteMsg(m)
+			}
+			log.Printf("KDC: CHUNK2 data chunk query: chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
+		} else {
+			// First label is not a number - this is a manifest query
+			chunkID = 0
+			nodeID, distributionID, err = ParseQnameForMANIFEST(qname, conf.ControlZone)
+			if err != nil {
+				log.Printf("KDC: Error parsing CHUNK2 manifest QNAME %s: %v", qname, err)
+				m.SetRcode(msg, dns.RcodeFormatError)
+				return w.WriteMsg(m)
+			}
+			log.Printf("KDC: CHUNK2 manifest query: node-id=%s, distribution-id=%s", nodeID, distributionID)
+		}
+	} else {
+		log.Printf("KDC: Invalid CHUNK2 QNAME format: %s", qname)
+		m.SetRcode(msg, dns.RcodeFormatError)
+		return w.WriteMsg(m)
+	}
+
+	// Get CHUNK2 record
+	chunk2, err := kdcDB.GetCHUNK2ForNode(nodeID, distributionID, chunkID, conf)
+	if err != nil {
+		log.Printf("KDC: Error getting CHUNK2 %d for node %s, distribution %s: %v", chunkID, nodeID, distributionID, err)
+		// Check if distribution records exist at all
+		records, checkErr := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
+		if checkErr == nil {
+			if len(records) == 0 {
+				log.Printf("KDC: No distribution records found for distribution %s (may have been purged after completion)", distributionID)
+				m.SetRcode(msg, dns.RcodeNameError)
+			} else {
+				log.Printf("KDC: Found %d distribution records for distribution %s, but failed to prepare CHUNK2", len(records), distributionID)
+				m.SetRcode(msg, dns.RcodeServerFailure)
+			}
+		} else {
+			log.Printf("KDC: Failed to check distribution records: %v", checkErr)
+			m.SetRcode(msg, dns.RcodeServerFailure)
+		}
+		return w.WriteMsg(m)
+	}
+
+	if chunk2 == nil {
+		log.Printf("KDC: No CHUNK2 %d found for node %s, distribution %s", chunkID, nodeID, distributionID)
+		m.SetRcode(msg, dns.RcodeNameError)
+		return w.WriteMsg(m)
+	}
+
+	// Create CHUNK2 RR
+	chunk2RR := &dns.PrivateRR{
+		Hdr: dns.RR_Header{
+			Name:   qname,
+			Rrtype: core.TypeCHUNK2,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		Data: chunk2,
+	}
+
+	m.Answer = append(m.Answer, chunk2RR)
+	m.SetRcode(msg, dns.RcodeSuccess)
+
+	if chunk2.Total == 0 {
+		// Manifest chunk
+		log.Printf("KDC: Sending CHUNK2 manifest response (format=%d, hmac_len=%d, data_len=%d)", 
+			chunk2.Format, chunk2.HMACLen, len(chunk2.Data))
+	} else {
+		// Data chunk
+		log.Printf("KDC: Sending CHUNK2 data chunk response (sequence=%d, total=%d, data_len=%d)", 
+			chunk2.Sequence, chunk2.Total, len(chunk2.Data))
+	}
+	return w.WriteMsg(m)
+}
+
+// handleConfirmationNotify handles NOTIFY(MANIFEST) messages from KRS confirming receipt of keys
 // The NOTIFY QNAME format is: <distributionID>.<controlzone>
 func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, qtype uint16, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	// Only handle JSONMANIFEST NOTIFYs as confirmations
-	if qtype != core.TypeJSONMANIFEST {
-		log.Printf("KDC: Ignoring NOTIFY for non-JSONMANIFEST type %s", dns.TypeToString[qtype])
+	// Only handle MANIFEST NOTIFYs as confirmations
+	if qtype != core.TypeMANIFEST {
+		log.Printf("KDC: Ignoring NOTIFY for non-MANIFEST type %s", dns.TypeToString[qtype])
 		return nil
 	}
 
@@ -760,11 +885,6 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		return fmt.Errorf("no distribution records found for distribution %s", distributionID)
 	}
 
-	// Use the first record to get zone and key info (all records for same distribution have same zone/key)
-	record := records[0]
-	zoneName := record.ZoneName
-	keyID := record.KeyID
-
 	// For now, we'll identify the node by matching remote address to node notify addresses
 	// This is a temporary solution - in the future, we'll use SIG(0) to identify the node
 	remoteAddr := w.RemoteAddr().String()
@@ -800,73 +920,108 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 	if confirmedNodeID == "" {
 		log.Printf("KDC: Warning: Could not identify node from remote address %s, using first node from distribution records", remoteAddr)
 		// Fallback: use the node ID from the first distribution record if available
-		if record.NodeID != "" {
-			confirmedNodeID = record.NodeID
+		if records[0].NodeID != "" {
+			confirmedNodeID = records[0].NodeID
 		} else {
 			// If no node ID in record, we can't confirm - this shouldn't happen
 			return fmt.Errorf("could not identify confirming node")
 		}
 	}
 
-	log.Printf("KDC: Recording confirmation for distribution %s, zone %s, key %s, node %s", 
-		distributionID, zoneName, keyID, confirmedNodeID)
+	// TODO: Parse EDNS(0) option for failed keys list (when implemented)
+	// For now, assume all keys succeeded and confirm all keys in the distribution
+	// Extract failed keys from EDNS(0) option if present
+	failedKeys := make(map[string]bool) // Map of "zone:keyID" -> true
+	// TODO: Parse EDNS(0) option to get failed keys list
 
-	// Record the confirmation
-	if err := kdcDB.AddDistributionConfirmation(distributionID, zoneName, keyID, confirmedNodeID); err != nil {
-		return fmt.Errorf("failed to record confirmation: %v", err)
+	// Confirm all keys in the distribution (except those in failedKeys)
+	confirmedCount := 0
+	for _, record := range records {
+		// Skip if this key is in the failed list
+		keyKey := fmt.Sprintf("%s:%s", record.ZoneName, record.KeyID)
+		if failedKeys[keyKey] {
+			log.Printf("KDC: Skipping confirmation for failed key: zone %s, key %s", record.ZoneName, record.KeyID)
+			continue
+		}
+
+		log.Printf("KDC: Recording confirmation for distribution %s, zone %s, key %s, node %s", 
+			distributionID, record.ZoneName, record.KeyID, confirmedNodeID)
+
+		// Record the confirmation for this specific key
+		if err := kdcDB.AddDistributionConfirmation(distributionID, record.ZoneName, record.KeyID, confirmedNodeID); err != nil {
+			log.Printf("KDC: Warning: Failed to record confirmation for zone %s, key %s: %v", record.ZoneName, record.KeyID, err)
+			continue
+		}
+		confirmedCount++
 	}
 
-	// Check if all nodes have confirmed
-	allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, zoneName)
+	log.Printf("KDC: Confirmed %d/%d keys in distribution %s for node %s", confirmedCount, len(records), distributionID, confirmedNodeID)
+
+	// Check if all nodes have confirmed (use first record's zone for compatibility, but function doesn't actually need it)
+	allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, records[0].ZoneName)
 	if err != nil {
 		log.Printf("KDC: Error checking if all nodes confirmed: %v", err)
 		// Don't fail - we've recorded the confirmation
 	} else if allConfirmed {
-		// Get the key to check its type
-		key, err := kdcDB.GetDNSSECKeyByID(zoneName, keyID)
-		if err != nil {
-			log.Printf("KDC: Error getting key %s: %v", keyID, err)
-		} else {
+		// All nodes have confirmed - update state for each key in the distribution
+		// Collect unique zone/key pairs to avoid duplicate updates
+		processedKeys := make(map[string]bool) // Map of "zone:keyID" -> true
+		
+		for _, record := range records {
+			keyKey := fmt.Sprintf("%s:%s", record.ZoneName, record.KeyID)
+			if processedKeys[keyKey] {
+				continue // Already processed this key
+			}
+			processedKeys[keyKey] = true
+			
+			// Get the key to check its type
+			key, err := kdcDB.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
+			if err != nil {
+				log.Printf("KDC: Error getting key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
+				continue
+			}
+			
 			var newState KeyState
 			if key.KeyType == KeyTypeKSK {
 				// KSK transitions from active_dist to active_ce (all confirmations received)
 				// State flow: active -> active_dist -> active_ce
 				if key.State != KeyStateActiveDist {
-					log.Printf("KDC: Warning: KSK %s is in state '%s', expected 'active_dist' for confirmation", keyID, key.State)
+					log.Printf("KDC: Warning: KSK %s is in state '%s', expected 'active_dist' for confirmation", record.KeyID, key.State)
 				}
 				newState = KeyStateActiveCE
-				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning KSK %s state from 'active_dist' to 'active_ce'", 
-					distributionID, keyID)
+				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning KSK %s (zone %s) state from 'active_dist' to 'active_ce'", 
+					distributionID, record.KeyID, record.ZoneName)
 			} else {
 				// ZSK transitions from distributed to edgesigner
 				// State flow: standby -> distributed -> edgesigner
 				newState = KeyStateEdgeSigner
-				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning ZSK %s state from 'distributed' to 'edgesigner'", 
-					distributionID, keyID)
+				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning ZSK %s (zone %s) state from 'distributed' to 'edgesigner'", 
+					distributionID, record.KeyID, record.ZoneName)
 			}
 			
 			// Transition key state
-			if err := kdcDB.UpdateKeyState(zoneName, keyID, newState); err != nil {
-				log.Printf("KDC: Error transitioning key state: %v", err)
-				// Don't fail - the confirmation was recorded
-			} else {
-				log.Printf("KDC: Successfully transitioned key %s to '%s' state", keyID, newState)
-				
-				// Retire old keys in the same state for the same zone and key type
-				// This ensures only one key per zone/key-type is in edgesigner/active_dist state
-				if err := kdcDB.RetireOldKeysForZone(zoneName, key.KeyType, keyID, newState); err != nil {
-					log.Printf("KDC: Warning: Failed to retire old keys for zone %s: %v", zoneName, err)
-					// Don't fail - the new key was successfully transitioned
-				}
-				
-				// Mark distribution as complete
-				if err := kdcDB.MarkDistributionComplete(distributionID); err != nil {
-					log.Printf("KDC: Warning: Failed to mark distribution %s as complete: %v", distributionID, err)
-					// Don't fail - the key was successfully transitioned
-				} else {
-					log.Printf("KDC: Marked distribution %s as complete", distributionID)
-				}
+			if err := kdcDB.UpdateKeyState(record.ZoneName, record.KeyID, newState); err != nil {
+				log.Printf("KDC: Error transitioning key %s (zone %s) state: %v", record.KeyID, record.ZoneName, err)
+				// Don't fail - continue with other keys
+				continue
 			}
+			
+			log.Printf("KDC: Successfully transitioned key %s (zone %s) to '%s' state", record.KeyID, record.ZoneName, newState)
+			
+			// Retire old keys in the same state for the same zone and key type
+			// This ensures only one key per zone/key-type is in edgesigner/active_ce state
+			if err := kdcDB.RetireOldKeysForZone(record.ZoneName, key.KeyType, record.KeyID, newState); err != nil {
+				log.Printf("KDC: Warning: Failed to retire old keys for zone %s: %v", record.ZoneName, err)
+				// Don't fail - the new key was successfully transitioned
+			}
+		}
+		
+		// Mark distribution as complete (only once, after all keys are updated)
+		if err := kdcDB.MarkDistributionComplete(distributionID); err != nil {
+			log.Printf("KDC: Warning: Failed to mark distribution %s as complete: %v", distributionID, err)
+			// Don't fail - the keys were successfully transitioned
+		} else {
+			log.Printf("KDC: Marked distribution %s as complete", distributionID)
 		}
 	} else {
 		// Get list of confirmed nodes for logging

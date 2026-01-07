@@ -104,23 +104,22 @@ func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *KrsConf, tdnsConf
 		}
 	}
 	
-	// Create subrouter with API key requirement
-	var sr *mux.Router
+	// Register routes directly on the main router with full paths
+	// The router passed in already has /api/v1 routes set up via SetupAPIRouter.
+	// We register KRS-specific routes with the full path /api/v1/krs/* directly on the router.
+	// We use the same API key header requirement as the main /api/v1 routes.
 	if apikey != "" {
-		sr = router.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+		// Routes require API key header (same as main /api/v1 routes)
+		router.Path("/api/v1/krs/keys").Headers("X-API-Key", apikey).HandlerFunc(APIKrsKeys(krsDB)).Methods("POST")
+		router.Path("/api/v1/krs/config").Headers("X-API-Key", apikey).HandlerFunc(APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
+		router.Path("/api/v1/krs/query").Headers("X-API-Key", apikey).HandlerFunc(APIKrsQuery(krsDB, conf)).Methods("POST")
+		router.Path("/api/v1/krs/debug").Headers("X-API-Key", apikey).HandlerFunc(APIKrsDebug(krsDB, conf)).Methods("POST")
 	} else {
-		sr = router.PathPrefix("/api/v1").Subrouter()
+		router.Path("/api/v1/krs/keys").HandlerFunc(APIKrsKeys(krsDB)).Methods("POST")
+		router.Path("/api/v1/krs/config").HandlerFunc(APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
+		router.Path("/api/v1/krs/query").HandlerFunc(APIKrsQuery(krsDB, conf)).Methods("POST")
+		router.Path("/api/v1/krs/debug").HandlerFunc(APIKrsDebug(krsDB, conf)).Methods("POST")
 	}
-	
-	// Add ping endpoint
-	if pingHandler != nil {
-		sr.HandleFunc("/ping", pingHandler).Methods("POST")
-	}
-	
-	sr.HandleFunc("/krs/keys", APIKrsKeys(krsDB)).Methods("POST")
-	sr.HandleFunc("/krs/config", APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
-	sr.HandleFunc("/krs/query", APIKrsQuery(krsDB, conf)).Methods("POST")
-	sr.HandleFunc("/krs/debug", APIKrsDebug(krsDB, conf)).Methods("POST")
 }
 
 // APIKrsKeys handles key management endpoints

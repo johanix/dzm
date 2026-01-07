@@ -2241,7 +2241,7 @@ var kdcDebugDistribDeleteCmd = &cobra.Command{
 var kdcDebugSetChunkSizeCmd = &cobra.Command{
 	Use:   "set-chunk-size",
 	Short: "Set the maximum chunk size for new distributions",
-	Long:  `Sets the maximum chunk size (in bytes) for JSONCHUNK records. This only affects new distributions created after this change. Existing distributions are not affected.`,
+	Long:  `Sets the maximum chunk size (in bytes) for CHUNK records. This only affects new distributions created after this change. Existing distributions are not affected.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		api, err := getApiClient(true)
 		if err != nil {
@@ -2286,7 +2286,7 @@ var kdcDebugSetChunkSizeCmd = &cobra.Command{
 var kdcDebugGetChunkSizeCmd = &cobra.Command{
 	Use:   "get-chunk-size",
 	Short: "Get the current maximum chunk size",
-	Long:  `Gets the current maximum chunk size (in bytes) for JSONCHUNK records.`,
+	Long:  `Gets the current maximum chunk size (in bytes) for CHUNK records.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		api, err := getApiClient(true)
 		if err != nil {
@@ -3059,8 +3059,22 @@ var kdcDistribListCmd = &cobra.Command{
 				}
 			} else {
 				// Default mode: show tabular format
+				// Get control zone from config for building QNAMEs
+				controlZone := "kdc." // Default
+				configResp, configErr := sendKdcRequest(api, "/kdc/config", map[string]interface{}{"command": "get"})
+				if configErr == nil {
+					if config, ok := configResp["config"].(map[string]interface{}); ok {
+						if cz, ok := config["control_zone"].(string); ok && cz != "" {
+							controlZone = cz
+							if !strings.HasSuffix(controlZone, ".") {
+								controlZone = controlZone + "."
+							}
+						}
+					}
+				}
+				
 				var rows []string
-				rows = append(rows, "Id | State | Time | Node | Contents")
+				rows = append(rows, "Id | State | Time | Node | Contents | Query")
 				
 				for _, sRaw := range summariesRaw {
 					if s, ok := sRaw.(map[string]interface{}); ok {
@@ -3071,15 +3085,36 @@ var kdcDistribListCmd = &cobra.Command{
 						
 						// Get node
 						nodeStr := ""
+						nodeIDForQuery := ""
 						if nodes, ok := s["nodes"].([]interface{}); ok && len(nodes) > 0 {
 							nodeList := make([]string, len(nodes))
 							for i, n := range nodes {
 								nodeList[i] = fmt.Sprintf("%v", n)
 							}
 							nodeStr = nodeList[0]
+							nodeIDForQuery = nodeList[0]
 							if len(nodeList) > 1 {
 								nodeStr = fmt.Sprintf("%s (+%d)", nodeStr, len(nodeList)-1)
 							}
+						}
+						
+						// Build MANIFEST QNAME: <nodeid><distributionID>.<controlzone>
+						queryStr := ""
+						if nodeIDForQuery != "" && distID != "" {
+							// Ensure node ID is FQDN (with trailing dot)
+							nodeIDFQDN := nodeIDForQuery
+							if !strings.HasSuffix(nodeIDFQDN, ".") {
+								nodeIDFQDN = nodeIDFQDN + "."
+							}
+							// Ensure control zone has trailing dot
+							controlZoneFQDN := controlZone
+							if !strings.HasSuffix(controlZoneFQDN, ".") {
+								controlZoneFQDN = controlZoneFQDN + "."
+							}
+							// QNAME format: <nodeid><distributionID>.<controlzone>
+							// Remove trailing dot from control zone for concatenation, then add it back
+							controlZoneClean := strings.TrimSuffix(controlZoneFQDN, ".")
+							queryStr = fmt.Sprintf("%s%s.%s. MANIFEST", nodeIDFQDN, distID, controlZoneClean)
 						}
 						
 						// Get state and time
@@ -3145,7 +3180,7 @@ var kdcDistribListCmd = &cobra.Command{
 							contents = keyTypeStr + " keys"
 						}
 						
-						rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s", distID, state, timeStr, nodeStr, contents))
+						rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", distID, state, timeStr, nodeStr, contents, queryStr))
 					}
 				}
 				
@@ -3523,6 +3558,8 @@ func sendKdcRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 	}
 
 	if err := json.Unmarshal(buf, &result); err != nil {
+		fmt.Printf("Request: URL: %s, Body: %s\n", endpoint, string(bytebuf.Bytes()))
+		fmt.Printf("Response causing error: %s\n", string(buf))
 		return nil, fmt.Errorf("error unmarshaling response: %v", err)
 	}
 

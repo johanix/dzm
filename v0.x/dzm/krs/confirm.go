@@ -16,7 +16,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// SendConfirmationToKDC sends a NOTIFY(JSONMANIFEST) back to KDC to confirm receipt of keys
+// SendConfirmationToKDC sends a NOTIFY(MANIFEST) back to KDC to confirm receipt of keys
 // distributionID: The distribution ID that was received
 // controlZone: The control zone name (e.g., "kdc.example.com.")
 // kdcAddress: The KDC server address (IP:port)
@@ -29,12 +29,12 @@ func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string) error
 	}
 	notifyQname := distributionID + "." + controlZoneFQDN
 
-	// Send NOTIFY for JSONMANIFEST query type
-	notifyType := uint16(core.TypeJSONMANIFEST) // Use JSONMANIFEST RRtype (65013)
+	// Send NOTIFY for MANIFEST query type
+	notifyType := uint16(core.TypeMANIFEST) // Use MANIFEST RRtype (65013)
 
 	typeStr := dns.TypeToString[notifyType]
 	if typeStr == "" {
-		typeStr = fmt.Sprintf("JSONMANIFEST(%d)", notifyType)
+		typeStr = fmt.Sprintf("MANIFEST(%d)", notifyType)
 	}
 	log.Printf("KRS: Sending confirmation NOTIFY(%s) for distribution %s (QNAME: %s) to %s", typeStr, distributionID, notifyQname, kdcAddress)
 

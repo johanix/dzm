@@ -59,6 +59,7 @@ func main() {
 	}()
 
 	// Initialize KDC (replaces conf.StartKdc())
+	// Note: This will also register KDC API routes directly on apirouter
 	err = startKdc(ctx, conf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error starting KDC: %v", err))
@@ -94,7 +95,7 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 	conf.Internal.KdcDB = kdcDB
 
-	// Register KDC API routes using the registration API
+	// Register KDC API routes directly on the router
 	// Pass conf as map to avoid circular import, and pass ping handler
 	confMap := map[string]interface{}{
 		"ApiServer": map[string]interface{}{
@@ -106,12 +107,9 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		},
 		"KdcConf": &kdcConf,
 	}
-	if err := tdns.RegisterAPIRoute(func(router *mux.Router) error {
-		kdc.SetupKdcAPIRoutes(router, kdcDB, confMap, tdns.APIping(conf))
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed to register KDC API routes: %v", err)
-	}
+	// Call SetupKdcAPIRoutes directly on the router (not via RegisterAPIRoute)
+	// because SetupAPIRouter has already been called and returned
+	kdc.SetupKdcAPIRoutes(apirouter, kdcDB, confMap, tdns.APIping(conf))
 
 	// Start API dispatcher (this is a TDNS internal engine, not registered)
 	go func() {
@@ -155,13 +153,16 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	if err := tdns.RegisterQueryHandler(hpke.TypeKMCTRL, kdcQueryHandler); err != nil {
 		return fmt.Errorf("failed to register KMCTRL handler: %v", err)
 	}
-	if err := tdns.RegisterQueryHandler(core.TypeJSONMANIFEST, kdcQueryHandler); err != nil {
-		return fmt.Errorf("failed to register JSONMANIFEST handler: %v", err)
+	if err := tdns.RegisterQueryHandler(core.TypeMANIFEST, kdcQueryHandler); err != nil {
+		return fmt.Errorf("failed to register MANIFEST handler: %v", err)
 	}
-	if err := tdns.RegisterQueryHandler(core.TypeJSONCHUNK, kdcQueryHandler); err != nil {
-		return fmt.Errorf("failed to register JSONCHUNK handler: %v", err)
+	if err := tdns.RegisterQueryHandler(core.TypeCHUNK, kdcQueryHandler); err != nil {
+		return fmt.Errorf("failed to register CHUNK handler: %v", err)
 	}
-	log.Printf("KDC: Registered query handlers for KMREQ, KMCTRL, JSONMANIFEST, and JSONCHUNK")
+	if err := tdns.RegisterQueryHandler(core.TypeCHUNK2, kdcQueryHandler); err != nil {
+		return fmt.Errorf("failed to register CHUNK2 handler: %v", err)
+	}
+	log.Printf("KDC: Registered query handlers for KMREQ, KMCTRL, MANIFEST, CHUNK, and CHUNK2")
 
 	// Register debug NOTIFY handler FIRST (for all NOTIFYs) - logs all NOTIFYs before processing
 	// This is optional - only register if debug mode is enabled
@@ -173,7 +174,7 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 
 	// Register KDC NOTIFY handler (handles confirmation NOTIFYs from KRS)
-	// Only handles JSONMANIFEST NOTIFYs
+	// Only handles MANIFEST NOTIFYs
 	kdcNotifyHandler := func(ctx context.Context, dnr *tdns.DnsNotifyRequest) error {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: NotifyHandler callback invoked (qname=%s)", dnr.Qname)
@@ -181,8 +182,8 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		// Call KDC NOTIFY handler
 		return kdc.HandleKdcNotify(ctx, dnr.Msg, dnr.Qname, dnr.ResponseWriter, kdcDB, &kdcConf)
 	}
-	if err := tdns.RegisterNotifyHandler(core.TypeJSONMANIFEST, kdcNotifyHandler); err != nil {
-		return fmt.Errorf("failed to register JSONMANIFEST NOTIFY handler: %v", err)
+	if err := tdns.RegisterNotifyHandler(core.TypeMANIFEST, kdcNotifyHandler); err != nil {
+		return fmt.Errorf("failed to register MANIFEST NOTIFY handler: %v", err)
 	}
 	log.Printf("KDC: Registered NOTIFY handler for JSONMANIFEST")
 

@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * JSONMANIFEST and JSONCHUNK query handling for tdns-krs
+ * MANIFEST and CHUNK query handling for tdns-krs
  */
 
 package krs
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,13 +16,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
 )
 
-// QueryJSONMANIFEST queries the KDC for a JSONMANIFEST record
-func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (*core.JSONMANIFEST, error) {
+// QueryMANIFEST queries the KDC for a MANIFEST record
+func QueryMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (*core.MANIFEST, error) {
 	nodeConfig, err := krsDB.GetNodeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node config: %v", err)
@@ -51,64 +51,104 @@ func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID strin
 	}
 	qname := fmt.Sprintf("%s%s.%s", nodeIDFQDN, distributionID, controlZoneClean)
 
-	// Create JSONMANIFEST query
+	// Create MANIFEST query
 	msg := new(dns.Msg)
-	msg.SetQuestion(qname, core.TypeJSONMANIFEST)
+	msg.SetQuestion(qname, core.TypeMANIFEST)
 	msg.RecursionDesired = false
 
-	log.Printf("KRS: Querying JSONMANIFEST for node %s, distribution %s", nodeID, distributionID)
-	log.Printf("KRS: JSONMANIFEST query: QNAME=%s, QTYPE=JSONMANIFEST", qname)
+	log.Printf("KRS: Querying MANIFEST for node %s, distribution %s", nodeID, distributionID)
+	log.Printf("KRS: MANIFEST query: QNAME=%s, QTYPE=MANIFEST", qname)
 
 	// Send query to KDC (try UDP first, fallback to TCP if truncated)
 	udpClient := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
 	resp, _, err := udpClient.Exchange(msg, kdcAddress)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send JSONMANIFEST query: %v", err)
+		return nil, fmt.Errorf("failed to send MANIFEST query: %v", err)
 	}
 	
 	// Check for truncation and retry with TCP
 	if resp.Truncated {
-		log.Printf("KRS: JSONMANIFEST response truncated (TC=1), retrying with TCP")
+		log.Printf("KRS: MANIFEST response truncated (TC=1), retrying with TCP")
 		tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
 		resp, _, err = tcpClient.Exchange(msg, kdcAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send JSONMANIFEST query over TCP: %v", err)
+			return nil, fmt.Errorf("failed to send MANIFEST query over TCP: %v", err)
 		}
 	}
 
 	if resp.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("JSONMANIFEST query returned rcode %s", dns.RcodeToString[resp.Rcode])
+		return nil, fmt.Errorf("MANIFEST query returned rcode %s", dns.RcodeToString[resp.Rcode])
 	}
 
-	// Parse JSONMANIFEST from response
+	// Parse MANIFEST from response
 	if len(resp.Answer) == 0 {
-		return nil, fmt.Errorf("JSONMANIFEST response has no answer RRs")
+		return nil, fmt.Errorf("MANIFEST response has no answer RRs")
 	}
 
 	rr := resp.Answer[0]
-	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeJSONMANIFEST {
-		if manifest, ok := privRR.Data.(*core.JSONMANIFEST); ok {
-			log.Printf("KRS: Parsed JSONMANIFEST: chunk_count=%d, chunk_size=%d, checksum=%s", manifest.ChunkCount, manifest.ChunkSize, manifest.Checksum)
+	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeMANIFEST {
+		if manifest, ok := privRR.Data.(*core.MANIFEST); ok {
+			log.Printf("KRS: Parsed MANIFEST: format=%d, chunk_count=%d, chunk_size=%d", manifest.Format, manifest.ChunkCount, manifest.ChunkSize)
 			if manifest.Metadata != nil {
 				if content, ok := manifest.Metadata["content"].(string); ok {
-					log.Printf("KRS: JSONMANIFEST content type: %s", content)
+					log.Printf("KRS: MANIFEST content type: %s", content)
 				}
 			}
 			// If chunk size is specified and large, prefer TCP for chunk queries
 			if manifest.ChunkSize > 0 && manifest.ChunkSize > 1180 {
-				log.Printf("KRS: Manifest indicates large chunks (%d bytes), will use TCP for JSONCHUNK queries", manifest.ChunkSize)
+				log.Printf("KRS: Manifest indicates large chunks (%d bytes), will use TCP for CHUNK queries", manifest.ChunkSize)
 			}
 			return manifest, nil
 		}
 	}
 
-	return nil, fmt.Errorf("failed to parse JSONMANIFEST from response")
+	return nil, fmt.Errorf("failed to parse MANIFEST from response")
 }
 
-// QueryJSONCHUNK queries the KDC for a specific JSONCHUNK record
+// loadPrivateKey loads a private key from a file path
+// The file should contain a hex-encoded 32-byte HPKE private key
+func loadPrivateKey(keyPath string) ([]byte, error) {
+	if keyPath == "" {
+		return nil, fmt.Errorf("private key path is empty")
+	}
+
+	// Read key file
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read private key file %s: %v", keyPath, err)
+	}
+
+	// Parse key (skip comments, decode hex)
+	keyLines := strings.Split(string(keyData), "\n")
+	var keyHex string
+	for _, line := range keyLines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			keyHex += line
+		}
+	}
+
+	if keyHex == "" {
+		return nil, fmt.Errorf("could not find key in file %s", keyPath)
+	}
+
+	// Decode hex key
+	key, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hex key: %v", err)
+	}
+
+	if len(key) != 32 {
+		return nil, fmt.Errorf("private key must be 32 bytes (got %d)", len(key))
+	}
+
+	return key, nil
+}
+
+// QueryCHUNK queries the KDC for a specific CHUNK record
 // chunkSize is the expected chunk size from the manifest (0 if unknown)
 // If chunkSize > 1180 bytes, TCP is used directly (UDP max is ~1232 bytes including headers)
-func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chunkID uint16, chunkSize uint16) (*core.JSONCHUNK, error) {
+func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chunkID uint16, chunkSize uint16) (*core.CHUNK, error) {
 	nodeConfig, err := krsDB.GetNodeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node config: %v", err)
@@ -136,15 +176,15 @@ func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, 
 	}
 	qname := fmt.Sprintf("%d.%s%s.%s", chunkID, nodeIDFQDN, distributionID, controlZoneClean)
 
-	// Create JSONCHUNK query
+	// Create CHUNK query
 	msg := new(dns.Msg)
-	msg.SetQuestion(qname, core.TypeJSONCHUNK)
+	msg.SetQuestion(qname, core.TypeCHUNK)
 	msg.RecursionDesired = false
 	// Set EDNS0 to allow larger messages
 	msg.SetEdns0(dns.DefaultMsgSize, true)
 
-	log.Printf("KRS: Querying JSONCHUNK chunk %d for node %s, distribution %s", chunkID, nodeID, distributionID)
-	log.Printf("KRS: JSONCHUNK query: QNAME=%s, QTYPE=JSONCHUNK", qname)
+	log.Printf("KRS: Querying CHUNK chunk %d for node %s, distribution %s", chunkID, nodeID, distributionID)
+	log.Printf("KRS: CHUNK query: QNAME=%s, QTYPE=CHUNK", qname)
 	
 	// UDP DNS message max size is ~1232 bytes (with EDNS0), but we need to account for
 	// DNS header (~12 bytes) and QNAME (~50-100 bytes typically), leaving ~1180 bytes for payload
@@ -154,54 +194,54 @@ func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, 
 	var resp *dns.Msg
 	
 	if useTCP {
-		log.Printf("KRS: Using TCP for JSONCHUNK (chunk size %d > 1180 bytes)", chunkSize)
+		log.Printf("KRS: Using TCP for CHUNK (chunk size %d > 1180 bytes)", chunkSize)
 		tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
 		resp, _, err = tcpClient.Exchange(msg, kdcAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send JSONCHUNK query over TCP: %v", err)
+			return nil, fmt.Errorf("failed to send CHUNK query over TCP: %v", err)
 		}
 	} else {
 		// Try UDP first for smaller chunks, fallback to TCP if truncated
 		udpClient := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
 		resp, _, err = udpClient.Exchange(msg, kdcAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send JSONCHUNK query: %v", err)
+			return nil, fmt.Errorf("failed to send CHUNK query: %v", err)
 		}
 		
 		// Check for truncation and retry with TCP
 		if resp.Truncated {
-			log.Printf("KRS: JSONCHUNK response truncated (TC=1), retrying with TCP")
+			log.Printf("KRS: CHUNK response truncated (TC=1), retrying with TCP")
 			tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
 			resp, _, err = tcpClient.Exchange(msg, kdcAddress)
 			if err != nil {
-				return nil, fmt.Errorf("failed to send JSONCHUNK query over TCP: %v", err)
+				return nil, fmt.Errorf("failed to send CHUNK query over TCP: %v", err)
 			}
 		}
 	}
 
 	if resp.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("JSONCHUNK query returned rcode %s", dns.RcodeToString[resp.Rcode])
+		return nil, fmt.Errorf("CHUNK query returned rcode %s", dns.RcodeToString[resp.Rcode])
 	}
 
-	// Parse JSONCHUNK from response
+	// Parse CHUNK from response
 	if len(resp.Answer) == 0 {
-		return nil, fmt.Errorf("JSONCHUNK response has no answer RRs")
+		return nil, fmt.Errorf("CHUNK response has no answer RRs")
 	}
 
 	rr := resp.Answer[0]
-	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeJSONCHUNK {
-		if chunk, ok := privRR.Data.(*core.JSONCHUNK); ok {
-			log.Printf("KRS: Parsed JSONCHUNK: sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
+	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeCHUNK {
+		if chunk, ok := privRR.Data.(*core.CHUNK); ok {
+			log.Printf("KRS: Parsed CHUNK: sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
 			return chunk, nil
 		}
 	}
 
-	log.Printf("KRS: Failed to parse JSONCHUNK from response")
-	return nil, fmt.Errorf("failed to parse JSONCHUNK from response")
+	log.Printf("KRS: Failed to parse CHUNK from response")
+	return nil, fmt.Errorf("failed to parse CHUNK from response")
 }
 
 // ReassembleChunks reassembles chunks into the complete base64-encoded data
-func ReassembleChunks(chunks []*core.JSONCHUNK) ([]byte, error) {
+func ReassembleChunks(chunks []*core.CHUNK) ([]byte, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no chunks to reassemble")
 	}
@@ -212,7 +252,7 @@ func ReassembleChunks(chunks []*core.JSONCHUNK) ([]byte, error) {
 	}
 
 	// Sort chunks by sequence number
-	chunkMap := make(map[uint16]*core.JSONCHUNK)
+	chunkMap := make(map[uint16]*core.CHUNK)
 	for _, chunk := range chunks {
 		if int(chunk.Sequence) >= total {
 			return nil, fmt.Errorf("chunk sequence %d out of range (max %d)", chunk.Sequence, total-1)
@@ -247,10 +287,43 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 
 	log.Printf("KRS: Processing distribution %s for node %s", distributionID, nodeID)
 
-	// Query JSONMANIFEST
-	manifest, err := QueryJSONMANIFEST(krsDB, conf, nodeID, distributionID)
+	// Query MANIFEST
+	manifest, err := QueryMANIFEST(krsDB, conf, nodeID, distributionID)
 	if err != nil {
-		return fmt.Errorf("failed to query JSONMANIFEST: %v", err)
+		return fmt.Errorf("failed to query MANIFEST: %v", err)
+	}
+
+	// Verify MANIFEST Format
+	if manifest.Format != core.FormatJSON {
+		return fmt.Errorf("unsupported MANIFEST format: %d (expected FormatJSON=%d)", manifest.Format, core.FormatJSON)
+	}
+
+	// Verify MANIFEST HMAC using this node's long-term public key
+	// The HMAC was calculated by KDC using this node's public key
+	if conf.Node.LongTermPrivKey != "" {
+		// Load node's private key
+		privateKey, err := loadPrivateKey(conf.Node.LongTermPrivKey)
+		if err != nil {
+			return fmt.Errorf("failed to load node private key: %v", err)
+		}
+
+		// Derive public key from private key
+		publicKey, err := hpke.DerivePublicKey(privateKey)
+		if err != nil {
+			return fmt.Errorf("failed to derive public key from private key: %v", err)
+		}
+
+		// Verify HMAC using the public key
+		valid, err := manifest.VerifyHMAC(publicKey)
+		if err != nil {
+			return fmt.Errorf("failed to verify MANIFEST HMAC: %v", err)
+		}
+		if !valid {
+			return fmt.Errorf("MANIFEST HMAC verification failed - possible tampering or key mismatch")
+		}
+		log.Printf("KRS: MANIFEST HMAC verified successfully using node's public key")
+	} else {
+		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
 	}
 
 	// Extract content type, retire_time, timestamp, and distribution_ttl from metadata
@@ -294,7 +367,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	}
 
 	// Validate timestamp freshness (replay protection)
-	// Note: Real protection comes from DNSSEC (RRSIG on JSONMANIFEST), but we check freshness here
+	// Note: Real protection comes from DNSSEC (RRSIG on MANIFEST), but we check freshness here
 	now := time.Now()
 	distributionTime := time.Unix(distributionTimestamp, 0)
 	age := now.Sub(distributionTime)
@@ -315,15 +388,15 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		// Payload is inline, use it directly
 		reassembled = make([]byte, len(manifest.Payload))
 		copy(reassembled, manifest.Payload)
-		log.Printf("KRS: Using inline payload from JSONMANIFEST (%d bytes)", len(reassembled))
+		log.Printf("KRS: Using inline payload from MANIFEST (%d bytes)", len(reassembled))
 	} else if manifest.ChunkCount > 0 {
 		// Payload is chunked, fetch all chunks
-		// Pass chunk size from manifest to QueryJSONCHUNK so it can decide UDP vs TCP
-		var chunks []*core.JSONCHUNK
+		// Pass chunk size from manifest to QueryCHUNK so it can decide UDP vs TCP
+		var chunks []*core.CHUNK
 		for i := uint16(0); i < manifest.ChunkCount; i++ {
-			chunk, err := QueryJSONCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
+			chunk, err := QueryCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
 			if err != nil {
-				return fmt.Errorf("failed to query JSONCHUNK %d: %v", i, err)
+				return fmt.Errorf("failed to query CHUNK %d: %v", i, err)
 			}
 			chunks = append(chunks, chunk)
 			log.Printf("KRS: Fetched chunk %d/%d", i+1, manifest.ChunkCount)
@@ -341,15 +414,9 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		return fmt.Errorf("manifest has no payload and chunk_count is 0")
 	}
 
-	// Verify checksum if present
-	if manifest.Checksum != "" {
-		hash := sha256.Sum256(reassembled)
-		expectedChecksum := fmt.Sprintf("sha256:%x", hash)
-		if manifest.Checksum != expectedChecksum {
-			return fmt.Errorf("checksum mismatch: expected %s, got %s", manifest.Checksum, expectedChecksum)
-		}
-		log.Printf("KRS: Checksum verified successfully")
-	}
+	// Note: HMAC verification was already done above (line 318) using manifest.VerifyHMAC()
+	// The HMAC protects the manifest metadata (Format + JSON fields), not the payload itself.
+	// Payload integrity is protected through encryption (for encrypted_keys) or other mechanisms.
 
 	// Process based on content type
 	switch contentType {
@@ -564,38 +631,20 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 }
 
 // ProcessEncryptedKeys processes encrypted_keys content
-// Data is base64-encoded JSON containing an array of encrypted key entries
+// Data is base64-encoded encrypted payload containing the entire distribution (all keys in cleartext JSON)
+// The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
 // distributionID and retireTime are optional and can be passed from the manifest metadata
 func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string, retireTime string) error {
 	distID := distributionID
-	// Step 1: Decode base64 to get JSON
+	// Step 1: Decode base64 to get encrypted data
 	log.Printf("KRS: Processing encrypted_keys content (%d bytes base64)", len(data))
-	jsonData, err := base64.StdEncoding.DecodeString(string(data))
+	encryptedData, err := base64.StdEncoding.DecodeString(string(data))
 	if err != nil {
-		return fmt.Errorf("failed to decode base64 encrypted keys: %v", err)
+		return fmt.Errorf("failed to decode base64 encrypted payload: %v", err)
 	}
-	log.Printf("KRS: Decoded JSON data: %d bytes", len(jsonData))
+	log.Printf("KRS: Decoded encrypted data: %d bytes", len(encryptedData))
 
-	// Step 2: Parse JSON structure
-	type EncryptedKeyEntry struct {
-		ZoneName       string `json:"zone_name"`
-		KeyID          string `json:"key_id"`
-		KeyType        string `json:"key_type,omitempty"`
-		Algorithm      uint8  `json:"algorithm,omitempty"`
-		Flags          uint16 `json:"flags,omitempty"`
-		PublicKey      string `json:"public_key,omitempty"`
-		EncryptedKey   string `json:"encrypted_key"`   // base64-encoded
-		EphemeralPubKey string `json:"ephemeral_pub_key"` // base64-encoded (duplicate, for verification)
-	}
-
-	var entries []EncryptedKeyEntry
-	if err := json.Unmarshal(jsonData, &entries); err != nil {
-		return fmt.Errorf("failed to unmarshal encrypted keys JSON: %v", err)
-	}
-
-	log.Printf("KRS: Parsed %d encrypted key entries", len(entries))
-
-	// Step 3: Load node's private key
+	// Step 2: Load node's private key for decryption
 	if conf.Node.LongTermPrivKey == "" {
 		return fmt.Errorf("node long-term private key not configured")
 	}
@@ -630,37 +679,75 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 
 	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
 
-	// Step 4: Decrypt each key and store
+	// Step 3: Decrypt the entire payload
+	// Format from KDC: <ephemeral_pub_key (32 bytes)><ciphertext>
+	// Where ciphertext from hpke.Encrypt is: <encapsulated_key (32 bytes)><encrypted_data>
+	// Note: For X25519, ephemeralPub == encapsulated_key (they're the same)
+	// So the format is: <ephemeralPub (32 bytes)><encapsulated_key (32 bytes)><encrypted_data>
+	// We need to skip the first 32 bytes (duplicate) and pass the rest to hpke.Decrypt
+	if len(encryptedData) < 64 {
+		return fmt.Errorf("encrypted data too short: %d bytes (expected at least 64: 32 for ephemeral + 32 for encapsulated key)", len(encryptedData))
+	}
+
+	// Extract the actual ciphertext (skip first 32 bytes which is duplicate ephemeralPub)
+	// The ciphertext from hpke.Encrypt already includes the encapsulated key
+	actualCiphertext := encryptedData[32:]
+
+	log.Printf("KRS: Encrypted payload: total %d bytes, skipping first 32 bytes (duplicate ephemeralPub), ciphertext %d bytes", 
+		len(encryptedData), len(actualCiphertext))
+
+	// Decrypt using HPKE
+	// hpke.Decrypt expects: <encapsulated_key (32 bytes)><encrypted_data>
+	plaintextJSON, err := hpke.Decrypt(privateKey, nil, actualCiphertext)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt distribution payload: %v", err)
+	}
+
+	log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
+
+	// Step 4: Parse JSON structure (cleartext)
+	type KeyEntry struct {
+		ZoneName   string `json:"zone_name"`
+		KeyID      string `json:"key_id"`
+		KeyType    string `json:"key_type,omitempty"`
+		Algorithm  uint8  `json:"algorithm,omitempty"`
+		Flags      uint16 `json:"flags,omitempty"`
+		PublicKey  string `json:"public_key,omitempty"`
+		PrivateKey string `json:"private_key"` // Private key in cleartext
+	}
+
+	var entries []KeyEntry
+	if err := json.Unmarshal(plaintextJSON, &entries); err != nil {
+		return fmt.Errorf("failed to unmarshal decrypted keys JSON: %v", err)
+	}
+
+	log.Printf("KRS: Parsed %d key entries from decrypted payload", len(entries))
+
+	// Debug logging: log cleartext content (masking private keys)
+	if tdns.Globals.Debug {
+		// Create a copy for logging with masked private keys
+		logEntries := make([]map[string]interface{}, len(entries))
+		for i, entry := range entries {
+			logEntries[i] = map[string]interface{}{
+				"zone_name":   entry.ZoneName,
+				"key_id":      entry.KeyID,
+				"key_type":    entry.KeyType,
+				"algorithm":   entry.Algorithm,
+				"flags":      entry.Flags,
+				"public_key":  entry.PublicKey,
+				"private_key": "***MASKED***",
+			}
+		}
+		logJSON, _ := json.Marshal(logEntries)
+		log.Printf("KRS: DEBUG: Decrypted distribution payload (private keys masked): %s", string(logJSON))
+	}
+
+	// Step 5: Process each key entry and store
 	// Note: AddEdgesignerKeyWithRetirement handles retiring existing edgesigner keys atomically
 	successCount := 0
 	for i, entry := range entries {
 		log.Printf("KRS: Processing key entry %d/%d: zone=%s, key_id=%s", i+1, len(entries), entry.ZoneName, entry.KeyID)
 
-		// Decode encrypted key from base64
-		encryptedKeyBytes, err := base64.StdEncoding.DecodeString(entry.EncryptedKey)
-		if err != nil {
-			log.Printf("KRS: Error: Failed to decode encrypted_key for entry %d: %v", i+1, err)
-			continue
-		}
-
-		// The encrypted_key from EncryptKeyForNode is the full ciphertext from hpke.Encrypt()
-		// which already contains: <encapsulated_key (32 bytes)><encrypted_data>
-		// No duplicate ephemeralPub prepended (unlike ProcessEncryptedText which handles test text)
-		if len(encryptedKeyBytes) < 32 {
-			log.Printf("KRS: Error: Encrypted key too short for entry %d: %d bytes (expected at least 32 for encapsulated key)", i+1, len(encryptedKeyBytes))
-			continue
-		}
-
-		log.Printf("KRS: Encrypted key size: %d bytes (encapsulated key: first 32 bytes)", len(encryptedKeyBytes))
-
-		// Decrypt using HPKE (ciphertext already has the correct format)
-		plaintext, err := hpke.Decrypt(privateKey, nil, encryptedKeyBytes)
-		if err != nil {
-			log.Printf("KRS: Error: Failed to decrypt key for entry %d (zone=%s, key_id=%s): %v", i+1, entry.ZoneName, entry.KeyID, err)
-			continue
-		}
-
-		log.Printf("KRS: Successfully decrypted key for zone %s, key_id %s (%d bytes)", entry.ZoneName, entry.KeyID, len(plaintext))
 		log.Printf("KRS: Key entry details - ZoneName: %s, KeyID: %s, KeyType: '%s', Algorithm: %d, Flags: %d", 
 			entry.ZoneName, entry.KeyID, entry.KeyType, entry.Algorithm, entry.Flags)
 
@@ -673,6 +760,13 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 				log.Printf("KRS: Warning: Could not parse key_id '%s' as number, using 0", entry.KeyID)
 				keyID = 0
 			}
+		}
+
+		// Decode private key from base64 string
+		privateKeyBytes, err := base64.StdEncoding.DecodeString(entry.PrivateKey)
+		if err != nil {
+			log.Printf("KRS: Error: Failed to decode private_key for entry %d: %v", i+1, err)
+			continue
 		}
 
 		// Determine state based on key type
@@ -701,7 +795,7 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 			Algorithm:      entry.Algorithm,
 			Flags:          entry.Flags,
 			PublicKey:      entry.PublicKey,
-			PrivateKey:     plaintext,
+			PrivateKey:     privateKeyBytes, // Decoded from base64 string
 			State:          keyState,
 			ReceivedAt:     time.Now(),
 			DistributionID: distID,

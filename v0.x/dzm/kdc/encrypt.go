@@ -20,7 +20,8 @@ import (
 // Returns: encrypted key data, ephemeral public key used, distribution ID, error
 // This function also stores the distribution record in the database
 // kdcConf is optional - if provided, expires_at will be set based on DistributionTTL
-func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf) (encryptedKey []byte, ephemeralPubKey []byte, distributionID string, err error) {
+// distributionID is optional - if provided, uses that ID; otherwise generates one for this key
+func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf, distributionID ...string) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
 	if key == nil {
 		return nil, nil, "", fmt.Errorf("key is nil")
 	}
@@ -31,10 +32,14 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf
 		return nil, nil, "", fmt.Errorf("node long-term public key must be 32 bytes (got %d)", len(node.LongTermPubKey))
 	}
 
-	// Get or create a stable distribution ID for this key
-	distributionID, err = kdc.GetOrCreateDistributionID(key.ZoneName, key)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to get/create distribution ID: %v", err)
+	// Use provided distribution ID, or get/create one for this key
+	if len(distributionID) > 0 && distributionID[0] != "" {
+		distID = distributionID[0]
+	} else {
+		distID, err = kdc.GetOrCreateDistributionID(key.ZoneName, key)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("failed to get/create distribution ID: %v", err)
+		}
 	}
 
 	// Encrypt the private key using HPKE
@@ -72,7 +77,7 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf
 		CreatedAt:      time.Now(),
 		ExpiresAt:      expiresAt,
 		Status:         hpke.DistributionStatusPending,
-		DistributionID: distributionID,
+		DistributionID: distID,
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
@@ -81,6 +86,6 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf
 		fmt.Printf("Warning: Failed to store distribution record: %v\n", err)
 	}
 
-	return ciphertext, ephemeralPub, distributionID, nil
+	return ciphertext, ephemeralPub, distID, nil
 }
 
