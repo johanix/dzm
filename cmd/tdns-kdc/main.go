@@ -94,7 +94,7 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 	conf.Internal.KdcDB = kdcDB
 
-	// Setup KDC API routes
+	// Register KDC API routes using the registration API
 	// Pass conf as map to avoid circular import, and pass ping handler
 	confMap := map[string]interface{}{
 		"ApiServer": map[string]interface{}{
@@ -106,9 +106,14 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		},
 		"KdcConf": &kdcConf,
 	}
-	kdc.SetupKdcAPIRoutes(apirouter, kdcDB, confMap, tdns.APIping(conf))
+	if err := tdns.RegisterAPIRoute(func(router *mux.Router) error {
+		kdc.SetupKdcAPIRoutes(router, kdcDB, confMap, tdns.APIping(conf))
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to register KDC API routes: %v", err)
+	}
 
-	// Start API dispatcher
+	// Start API dispatcher (this is a TDNS internal engine, not registered)
 	go func() {
 		log.Printf("TDNS %s (%s): starting: APIdispatcher", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
 		if err := tdns.APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
@@ -181,23 +186,21 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 	log.Printf("KDC: Registered NOTIFY handler for JSONMANIFEST")
 
-	// Start DNS engine (listens on configured addresses and routes queries to DnsQueryQ channel)
-	go func() {
-		log.Printf("TDNS %s (%s): starting: DnsEngine", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
-		log.Printf("KDC: Starting DnsEngine")
-		if err := tdns.DnsEngine(ctx, conf); err != nil {
-			log.Printf("Error from DnsEngine: %v", err)
-		}
-	}()
+	// Register engines using the registration API
+	if err := tdns.RegisterEngine("DnsEngine", func(ctx context.Context) error {
+		return tdns.DnsEngine(ctx, conf)
+	}); err != nil {
+		return fmt.Errorf("failed to register DnsEngine: %v", err)
+	}
 
-	// Start key state worker for automatic transitions
-	go func() {
-		log.Printf("TDNS %s (%s): starting: KeyStateWorker", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
-		log.Printf("KDC: Starting KeyStateWorker")
-		if err := kdc.KeyStateWorker(ctx, kdcDB, &kdcConf); err != nil {
-			log.Printf("Error from KeyStateWorker: %v", err)
-		}
-	}()
+	if err := tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
+		return kdc.KeyStateWorker(ctx, kdcDB, &kdcConf)
+	}); err != nil {
+		return fmt.Errorf("failed to register KeyStateWorker: %v", err)
+	}
+
+	// Start all registered engines (including DnsEngine and KeyStateWorker)
+	tdns.StartRegisteredEngines(ctx)
 
 	log.Printf("TDNS %s (%s): KDC started successfully", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
 	return nil

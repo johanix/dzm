@@ -141,15 +141,19 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		return fmt.Errorf("failed to store node config: %v", err)
 	}
 
-	// Setup KRS API routes
-	// Pass conf as map to avoid circular import, and pass ping handler
+	// Register KRS API routes using the registration API
 	confMap := map[string]interface{}{
 		"ApiServer": map[string]interface{}{
 			"ApiKey":    conf.ApiServer.ApiKey,
 			"Addresses": conf.ApiServer.Addresses,
 		},
 	}
-	krs.SetupKrsAPIRoutes(apirouter, krsDB, &krsConf, confMap, tdns.APIping(conf))
+	if err := tdns.RegisterAPIRoute(func(router *mux.Router) error {
+		krs.SetupKrsAPIRoutes(router, krsDB, &krsConf, confMap, tdns.APIping(conf))
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to register KRS API routes: %v", err)
+	}
 
 	// Start API dispatcher
 	go func() {
@@ -159,28 +163,53 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		}
 	}()
 
-	// Start NOTIFY receiver
-	if len(krsConf.DnsEngine.Addresses) > 0 {
-		log.Printf("KRS: Starting NOTIFY receiver with %d addresses", len(krsConf.DnsEngine.Addresses))
-		go func() {
-			log.Printf("TDNS %s (%s): starting: NotifyReceiver", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
-			log.Printf("KRS: NotifyReceiver engine starting")
-			if err := krs.StartNotifyReceiver(ctx, krsDB, &krsConf); err != nil {
-				log.Printf("Error from NotifyReceiver engine: %v", err)
-			}
-		}()
-	} else {
-		log.Printf("KRS: WARNING: No DNS engine addresses configured, NOTIFY receiver not started")
+	// Register debug query handler FIRST (for all queries) - logs all queries before processing
+	// This is optional - only register if debug mode is enabled
+	if tdns.Globals.Debug {
+		if err := tdns.RegisterDebugQueryHandler(); err != nil {
+			return fmt.Errorf("failed to register debug query handler: %v", err)
+		}
+		log.Printf("KRS: Registered debug query handler")
 	}
 
-	// Start key state worker for automatic transitions
-	go func() {
-		log.Printf("TDNS %s (%s): starting: KeyStateWorker", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
-		log.Printf("KRS: Starting KeyStateWorker")
-		if err := krs.KeyStateWorker(ctx, krsDB); err != nil {
-			log.Printf("Error from KeyStateWorker: %v", err)
+	// Register debug NOTIFY handler FIRST (for all NOTIFYs) - logs all NOTIFYs before processing
+	// This is optional - only register if debug mode is enabled
+	if tdns.Globals.Debug {
+		if err := tdns.RegisterDebugNotifyHandler(); err != nil {
+			return fmt.Errorf("failed to register debug NOTIFY handler: %v", err)
 		}
-	}()
+		log.Printf("KRS: Registered debug NOTIFY handler")
+	}
+
+	// Register KRS NOTIFY handler (handles all NOTIFYs for control zone and distributions)
+	// KRS handles NOTIFYs for any qtype, so we register with qtype=0 (all NOTIFYs)
+	krsNotifyHandler := func(ctx context.Context, dnr *tdns.DnsNotifyRequest) error {
+		return krs.HandleKrsNotify(ctx, dnr, krsDB, &krsConf)
+	}
+	if err := tdns.RegisterNotifyHandler(0, krsNotifyHandler); err != nil {
+		return fmt.Errorf("failed to register KRS NOTIFY handler: %v", err)
+	}
+	log.Printf("KRS: Registered NOTIFY handler for all NOTIFYs")
+
+	// Register engines using the registration API
+	if len(krsConf.DnsEngine.Addresses) > 0 {
+		if err := tdns.RegisterEngine("DnsEngine", func(ctx context.Context) error {
+			return tdns.DnsEngine(ctx, conf)
+		}); err != nil {
+			return fmt.Errorf("failed to register DnsEngine: %v", err)
+		}
+	} else {
+		log.Printf("KRS: WARNING: No DNS engine addresses configured, DnsEngine not started")
+	}
+
+	if err := tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
+		return krs.KeyStateWorker(ctx, krsDB)
+	}); err != nil {
+		return fmt.Errorf("failed to register KeyStateWorker: %v", err)
+	}
+
+	// Start all registered engines (including DnsEngine and KeyStateWorker)
+	tdns.StartRegisteredEngines(ctx)
 
 	log.Printf("TDNS %s (%s): KRS started successfully", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
 	return nil
