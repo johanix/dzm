@@ -30,3 +30,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+cmd/tdns-kdc/tdns-kdc
+cmd/tdns-krs/tdns-krs
+cmd/kdc-cli/kdc-cli
+cmd/krs-cli/krs-cli
+cmd/*/version.go
+
