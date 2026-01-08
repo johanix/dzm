@@ -13,14 +13,17 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v0.x/tdns/core"
+	"github.com/johanix/tdns/v0.x/tdns/edns0"
 	"github.com/miekg/dns"
 )
 
-// SendConfirmationToKDC sends a NOTIFY(MANIFEST) back to KDC to confirm receipt of keys
+// SendConfirmationToKDC sends a NOTIFY(CHUNK) back to KDC to confirm receipt of keys
 // distributionID: The distribution ID that was received
 // controlZone: The control zone name (e.g., "kdc.example.com.")
 // kdcAddress: The KDC server address (IP:port)
-func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string) error {
+// successfulKeys: List of keys that were successfully installed
+// failedKeys: List of keys that failed to install
+func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string, successfulKeys, failedKeys []edns0.KeyStatusEntry) error {
 	// Construct NOTIFY QNAME: <distributionID>.<controlzone>
 	// Ensure controlZone is FQDN
 	controlZoneFQDN := controlZone
@@ -29,12 +32,12 @@ func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string) error
 	}
 	notifyQname := distributionID + "." + controlZoneFQDN
 
-	// Send NOTIFY for MANIFEST query type
-	notifyType := uint16(core.TypeMANIFEST) // Use MANIFEST RRtype (65013)
+	// Send NOTIFY for CHUNK query type
+	notifyType := uint16(core.TypeCHUNK) // Use CHUNK RRtype (65015)
 
 	typeStr := dns.TypeToString[notifyType]
 	if typeStr == "" {
-		typeStr = fmt.Sprintf("MANIFEST(%d)", notifyType)
+		typeStr = fmt.Sprintf("CHUNK(%d)", notifyType)
 	}
 	log.Printf("KRS: Sending confirmation NOTIFY(%s) for distribution %s (QNAME: %s) to %s", typeStr, distributionID, notifyQname, kdcAddress)
 
@@ -42,6 +45,20 @@ func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string) error
 	m.SetNotify(notifyQname)
 	m.Question = []dns.Question{
 		{Name: notifyQname, Qtype: notifyType, Qclass: dns.ClassINET},
+	}
+
+	// Add CHUNK EDNS(0) option with key status report if we have status information
+	if len(successfulKeys) > 0 || len(failedKeys) > 0 {
+		chunkOpt, err := edns0.CreateKeyStatusChunkOption(successfulKeys, failedKeys)
+		if err != nil {
+			log.Printf("KRS: Warning: Failed to create CHUNK EDNS option: %v", err)
+		} else {
+			if err := edns0.AddChunkOptionToMessage(m, chunkOpt); err != nil {
+				log.Printf("KRS: Warning: Failed to add CHUNK EDNS option to message: %v", err)
+			} else {
+				log.Printf("KRS: Added CHUNK EDNS option with %d successful and %d failed keys", len(successfulKeys), len(failedKeys))
+			}
+		}
 	}
 
 	// Create a DNS client with a reasonable timeout for NOTIFY

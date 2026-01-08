@@ -2,7 +2,7 @@
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
  * DNS query handler for tdns-kdc
- * Handles KMREQ, KMCTRL, and other queries
+ * Handles MANIFEST, OLDCHUNK, and CHUNK queries
  */
 
 package kdc
@@ -14,11 +14,10 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x/tdns/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -76,26 +75,6 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 
 	log.Printf("KDC: Processing query type %s (%d) for %s", dns.TypeToString[qtype], qtype, qname)
 	switch qtype {
-	case hpke.TypeKMREQ:
-		log.Printf("KDC: Handling KMREQ query")
-		err := handleKMREQQuery(ctx, m, msg, qname, w, kdcDB, conf, sig0SignerName, sig0KeyID)
-		if err != nil {
-			log.Printf("KDC: Error handling KMREQ: %v", err)
-		} else {
-			log.Printf("KDC: KMREQ query handled successfully")
-		}
-		return err
-
-	case hpke.TypeKMCTRL:
-		log.Printf("KDC: Handling KMCTRL query")
-		err := handleKMCTRLQuery(ctx, m, msg, qname, w, kdcDB, conf)
-		if err != nil {
-			log.Printf("KDC: Error handling KMCTRL: %v", err)
-		} else {
-			log.Printf("KDC: KMCTRL query handled successfully")
-		}
-		return err
-
 	case core.TypeMANIFEST:
 		log.Printf("KDC: Handling MANIFEST query")
 		err := handleMANIFESTQuery(ctx, m, msg, qname, w, kdcDB, conf)
@@ -107,6 +86,16 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 		// Don't return error - we've already sent the response (success or error)
 		return nil
 
+	case core.TypeOLDCHUNK:
+		log.Printf("KDC: Handling OLDCHUNK query")
+		err := handleOLDCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
+		if err != nil {
+			log.Printf("KDC: Error handling OLDCHUNK: %v", err)
+		} else {
+			log.Printf("KDC: OLDCHUNK query handled successfully")
+		}
+		return err
+
 	case core.TypeCHUNK:
 		log.Printf("KDC: Handling CHUNK query")
 		err := handleCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
@@ -117,357 +106,11 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 		}
 		return err
 
-	case core.TypeCHUNK2:
-		log.Printf("KDC: Handling CHUNK2 query")
-		err := handleCHUNK2Query(ctx, m, msg, qname, w, kdcDB, conf)
-		if err != nil {
-			log.Printf("KDC: Error handling CHUNK2: %v", err)
-		} else {
-			log.Printf("KDC: CHUNK2 query handled successfully")
-		}
-		return err
-
 	default:
 		// For other query types, return ErrNotHandled to allow fallthrough to default handler
 		log.Printf("KDC: Unsupported query type %s (%d) for %s - returning ErrNotHandled", dns.TypeToString[qtype], qtype, qname)
 		return tdns.ErrNotHandled
 	}
-}
-
-// handleKMREQQuery processes KMREQ queries
-// KMREQ format: QNAME = <distribution-id>.<zone>.<control-zone>
-// Ephemeral public key may be in EDNS(0) option or encoded in question
-func handleKMREQQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf, sig0SignerName string, sig0KeyID uint16) error {
-	log.Printf("KDC: Processing KMREQ query for %s", qname)
-
-	// Parse QNAME to extract distribution ID and zone
-	distributionID, zone, err := hpke.ParseQnameForKMREQ(qname, conf.ControlZone)
-	if err != nil {
-		log.Printf("KDC: Error parsing KMREQ QNAME %s: %v", qname, err)
-		m.SetRcode(msg, dns.RcodeFormatError)
-		return w.WriteMsg(m)
-	}
-
-	log.Printf("KDC: KMREQ distribution-id=%s, zone=%s", distributionID, zone)
-
-	// Extract ephemeral public key from EDNS(0) option or question
-	// TODO: EDNS(0) support for ephemeral key is not yet implemented
-	// For now, we'll generate a dummy key for testing, but this should be replaced with actual EDNS(0) extraction
-	ephemeralPubKey, err := extractEphemeralPubKey(msg)
-	if err != nil {
-		log.Printf("KDC: Warning: Ephemeral public key extraction not yet implemented (EDNS(0) support pending). Using placeholder for testing.")
-		log.Printf("KDC: Error extracting ephemeral public key: %v", err)
-		// For now, generate a dummy key to allow testing to proceed
-		// TODO: Remove this once EDNS(0) support is implemented
-		ephemeralPubKey = make([]byte, 32)
-		// Fill with zeros as placeholder (not secure, but allows testing)
-		log.Printf("KDC: Using placeholder ephemeral key (all zeros) for testing")
-	}
-
-	if len(ephemeralPubKey) != 32 {
-		log.Printf("KDC: Invalid ephemeral public key length: %d (expected 32)", len(ephemeralPubKey))
-		m.SetRcode(msg, dns.RcodeFormatError)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing FORMATERROR response: %v", err)
-		}
-		return err
-	}
-
-	// Log whether we're using a placeholder key
-	allZeros := true
-	if ephemeralPubKey != nil && len(ephemeralPubKey) == 32 {
-		for _, b := range ephemeralPubKey {
-			if b != 0 {
-				allZeros = false
-				break
-			}
-		}
-	}
-	if allZeros {
-		log.Printf("KDC: Using ephemeral public key (32 bytes) - PLACEHOLDER (all zeros - EDNS(0) not implemented)")
-	} else {
-		log.Printf("KDC: Using ephemeral public key (32 bytes) - extracted from query")
-	}
-
-	// Find the zone
-	zoneObj, err := kdcDB.GetZone(zone)
-	if err != nil {
-		log.Printf("KDC: Zone %s not found: %v", zone, err)
-		m.SetRcode(msg, dns.RcodeNameError)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing NXDOMAIN response: %v", err)
-		}
-		return err
-	}
-
-	if !zoneObj.Active {
-		log.Printf("KDC: Zone %s is not active", zone)
-		m.SetRcode(msg, dns.RcodeRefused)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing REFUSED response: %v", err)
-		}
-		return err
-	}
-
-	// Find node by SIG(0) signer name (if provided) or use default node selection
-	// For now, we'll get all nodes and encrypt for each
-	// TODO: Implement proper node identification from SIG(0) signature
-	var nodes []*Node
-	if sig0SignerName != "" {
-		// Try to find node by signer name (future: map signer name to node)
-		log.Printf("KDC: SIG(0) signer: %s (not yet used for node identification)", sig0SignerName)
-	}
-
-	// Get nodes that serve this zone (via components)
-	// Only distribute keys for edgesign_* zones
-	signingMode, err := kdcDB.GetZoneSigningMode(zone)
-	if err != nil {
-		log.Printf("KDC: Failed to get signing mode for zone %s: %v", zone, err)
-		m.SetRcode(msg, dns.RcodeRefused)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing REFUSED response: %v", err)
-		}
-		return err
-	}
-	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
-		log.Printf("KDC: Zone %s has signing_mode=%s, not distributing keys via KMREQ (only edgesign_* modes support key distribution)", zone, signingMode)
-		m.SetRcode(msg, dns.RcodeRefused)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing REFUSED response: %v", err)
-		}
-		return err
-	}
-
-	nodes, err = kdcDB.GetActiveNodesForZone(zone)
-	if err != nil {
-		log.Printf("KDC: Error getting nodes for zone: %v", err)
-		m.SetRcode(msg, dns.RcodeServerFailure)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing SERVFAIL response: %v", err)
-		}
-		return err
-	}
-
-	if len(nodes) == 0 {
-		log.Printf("KDC: No active nodes serve zone %s", zone)
-		m.SetRcode(msg, dns.RcodeServerFailure)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing SERVFAIL response: %v", err)
-		}
-		return err
-	}
-
-	// Get ZSK keys for the zone that are in "published" or "active" state
-	keys, err := kdcDB.GetDNSSECKeysForZone(zone)
-	if err != nil {
-		log.Printf("KDC: Error getting keys for zone %s: %v", zone, err)
-		m.SetRcode(msg, dns.RcodeServerFailure)
-		return w.WriteMsg(m)
-	}
-
-	// Filter to ZSK keys that are published or active
-	var zskKeys []*DNSSECKey
-	for _, key := range keys {
-		if key.KeyType == KeyTypeZSK && (key.State == KeyStatePublished || key.State == KeyStateActive) {
-			zskKeys = append(zskKeys, key)
-		}
-	}
-
-	if len(zskKeys) == 0 {
-		log.Printf("KDC: No ZSK keys found for zone %s", zone)
-		m.SetRcode(msg, dns.RcodeNameError)
-		err := w.WriteMsg(m)
-		if err != nil {
-			log.Printf("KDC: Error writing NXDOMAIN response: %v", err)
-		}
-		return err
-	}
-
-	// Encrypt keys for each node and create KMPKG records
-	// For now, we'll encrypt for the first node (or use a default node selection)
-	// TODO: Implement proper node selection based on SIG(0) signature
-	// Use first online node for now
-	node := nodes[0]
-	log.Printf("KDC: Encrypting keys for node %s (%s)", node.ID, node.Name)
-
-	// Encrypt each ZSK key
-	for _, key := range zskKeys {
-		// Encrypt using HPKE with node's long-term public key and ephemeral public key
-		// Note: HPKE Base mode uses ephemeral key internally, but we need to use the provided one
-		// For now, we'll use the standard EncryptKeyForNode which generates its own ephemeral
-		// TODO: Modify encryption to use provided ephemeral key
-		encryptedKey, _, distributionID, err := kdcDB.EncryptKeyForNode(key, node, conf)
-		if err != nil {
-			log.Printf("KDC: Error encrypting key %s for node %s: %v", key.ID, node.ID, err)
-			continue
-		}
-		
-		// TODO: Use distributionID
-		_ = distributionID
-
-		// Create KMPKG record
-		kmpkg := &hpke.KMPKG{
-			EncryptedData: encryptedKey,
-			Sequence:      0,
-			Total:         1,
-		}
-
-		// Convert to DNS RR
-		kmpkgRR := &dns.PrivateRR{
-			Hdr: dns.RR_Header{
-				Name:   qname,
-				Rrtype: hpke.TypeKMPKG,
-				Class:  dns.ClassINET,
-				Ttl:    300,
-			},
-			Data: kmpkg,
-		}
-
-		m.Answer = append(m.Answer, kmpkgRR)
-		log.Printf("KDC: Added KMPKG record for key %s (keyid %d)", key.ID, key.KeyID)
-	}
-
-	// Add SOA record in Authority section (if we have a control zone)
-	if conf.ControlZone != "" {
-		soaRR, err := dns.NewRR(fmt.Sprintf("%s. SOA %s. hostmaster.%s. %d 3600 1800 604800 300", conf.ControlZone, conf.ControlZone, conf.ControlZone, time.Now().Unix()))
-		if err == nil {
-			m.Ns = append(m.Ns, soaRR)
-		}
-	}
-
-	m.SetRcode(msg, dns.RcodeSuccess)
-	log.Printf("KDC: Sending KMREQ response with %d answer RRs, %d authority RRs", len(m.Answer), len(m.Ns))
-	err = w.WriteMsg(m)
-	if err != nil {
-		log.Printf("KDC: Error writing KMREQ response: %v", err)
-	} else {
-		log.Printf("KDC: KMREQ response sent successfully")
-	}
-	return err
-}
-
-// handleKMCTRLQuery processes KMCTRL queries for control zone information
-// The qname should be the control zone name (e.g., "kdc.example.com.")
-func handleKMCTRLQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	log.Printf("KDC: Processing KMCTRL query for %s (control zone: %s)", qname, conf.ControlZone)
-	
-	// Normalize qname to FQDN for comparison
-	qnameFQDN := dns.Fqdn(qname)
-	controlZoneFQDN := dns.Fqdn(conf.ControlZone)
-	
-	// Check if query is for the control zone (informational only - we process all KMCTRL queries)
-	if qnameFQDN != controlZoneFQDN {
-		log.Printf("KDC: KMCTRL query qname %s does not match control zone %s (still processing)", qnameFQDN, controlZoneFQDN)
-	}
-
-	// Get all zones
-	zones, err := kdcDB.GetAllZones()
-	if err != nil {
-		log.Printf("KDC: Error getting zones: %v", err)
-		m.SetRcode(msg, dns.RcodeServerFailure)
-		return w.WriteMsg(m)
-	}
-
-	log.Printf("KDC: Found %d zones", len(zones))
-
-	// For each zone, get published/active ZSK keys and create KMCTRL records
-	for _, zone := range zones {
-		if !zone.Active {
-			log.Printf("KDC: Skipping inactive zone %s", zone.Name)
-			continue
-		}
-
-		log.Printf("KDC: Processing active zone %s", zone.Name)
-
-		keys, err := kdcDB.GetDNSSECKeysForZone(zone.Name)
-		if err != nil {
-			log.Printf("KDC: Error getting keys for zone %s: %v", zone.Name, err)
-			continue
-		}
-
-		log.Printf("KDC: Found %d keys for zone %s", len(keys), zone.Name)
-
-		for _, key := range keys {
-			// KMCTRL shows only keys that are currently being distributed (distributed state)
-			if key.KeyType == KeyTypeZSK && key.State == KeyStateDistributed {
-				log.Printf("KDC: Processing ZSK key %s (keytag %d, state %s) for zone %s", key.ID, key.KeyID, key.State, zone.Name)
-
-				// Get or create a stable distribution ID for this key
-				distributionID, err := kdcDB.GetOrCreateDistributionID(zone.Name, key)
-				if err != nil {
-					log.Printf("KDC: Error getting distribution ID for key %s: %v", key.ID, err)
-					continue
-				}
-
-				log.Printf("KDC: Using distribution ID %s for key %s (keytag %d)", distributionID, key.ID, key.KeyID)
-
-				kmctrl := &hpke.KMCTRL{
-					DistributionID: distributionID,
-					KeyID:          key.KeyID,
-					State:          hpke.KeyState(key.State),
-					Timestamp:      uint64(time.Now().Unix()),
-					Zone:           zone.Name,
-				}
-
-				// Convert to DNS RR
-				kmctrlRR := &dns.PrivateRR{
-					Hdr: dns.RR_Header{
-						Name:   qname,
-						Rrtype: hpke.TypeKMCTRL,
-						Class:  dns.ClassINET,
-						Ttl:    300,
-					},
-					Data: kmctrl,
-				}
-
-				m.Answer = append(m.Answer, kmctrlRR)
-				log.Printf("KDC: Added KMCTRL record for zone %s, key %d (keytag), distribution ID %s, state %s", zone.Name, key.KeyID, distributionID, key.State)
-			} else {
-				log.Printf("KDC: Skipping key %s (type %s, state %s) - not a distributed ZSK", key.ID, key.KeyType, key.State)
-			}
-		}
-	}
-
-	log.Printf("KDC: KMCTRL query result: %d answer RRs", len(m.Answer))
-	if len(m.Answer) == 0 {
-		log.Printf("KDC: No KMCTRL records returned - this means there are no ZSK keys in 'distributed' state")
-		log.Printf("KDC: (KMCTRL only shows keys that are currently being distributed, not standby keys)")
-	}
-
-	// Add SOA record in Authority section
-	if conf.ControlZone != "" {
-		soaRR, err := dns.NewRR(fmt.Sprintf("%s. SOA %s. hostmaster.%s. %d 3600 1800 604800 300", conf.ControlZone, conf.ControlZone, conf.ControlZone, time.Now().Unix()))
-		if err == nil {
-			m.Ns = append(m.Ns, soaRR)
-		}
-	}
-
-	m.SetRcode(msg, dns.RcodeSuccess)
-	return w.WriteMsg(m)
-}
-
-// extractEphemeralPubKey extracts the ephemeral public key from a DNS message
-// It checks EDNS(0) options first, then falls back to the question section
-func extractEphemeralPubKey(msg *dns.Msg) ([]byte, error) {
-	// TODO: Check EDNS(0) options for ephemeral public key
-	// For now, check if there's a KMREQ RR in the question section
-	if len(msg.Question) > 0 {
-		q := msg.Question[0]
-		if q.Qtype == hpke.TypeKMREQ {
-			// The ephemeral key might be encoded in the QNAME or we need to extract it differently
-			// For now, return an error indicating we need EDNS(0) support
-			return nil, fmt.Errorf("ephemeral public key extraction from EDNS(0) not yet implemented")
-		}
-	}
-
-	return nil, fmt.Errorf("no ephemeral public key found in query")
 }
 
 // ParseQnameForMANIFEST extracts nodeid and distributionID from MANIFEST QNAME
@@ -537,10 +180,10 @@ func ParseQnameForMANIFEST(qname string, controlZone string) (nodeID, distributi
 	return nodeID, distributionID, nil
 }
 
-// ParseQnameForCHUNK extracts chunkid, nodeid, and distributionID from CHUNK QNAME
+// ParseQnameForOLDCHUNK extracts chunkid, nodeid, and distributionID from OLDCHUNK QNAME
 // Format: <chunkid>.<nodeid><distributionID>.<controlzone>
 // Node ID is an FQDN (with trailing dot), so distributionID is concatenated directly after it
-func ParseQnameForCHUNK(qname string, controlZone string) (chunkID uint16, nodeID, distributionID string, err error) {
+func ParseQnameForOLDCHUNK(qname string, controlZone string) (chunkID uint16, nodeID, distributionID string, err error) {
 	// Remove trailing dot if present
 	if len(qname) > 0 && qname[len(qname)-1] == '.' {
 		qname = qname[:len(qname)-1]
@@ -548,7 +191,7 @@ func ParseQnameForCHUNK(qname string, controlZone string) (chunkID uint16, nodeI
 
 	labels := dns.SplitDomainName(qname)
 	if len(labels) < 3 {
-		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (need at least chunkid.nodeid+distID.controlzone)", qname)
+		return 0, "", "", fmt.Errorf("invalid OLDCHUNK QNAME format: %s (need at least chunkid.nodeid+distID.controlzone)", qname)
 	}
 
 	// Parse chunk ID (first label)
@@ -572,7 +215,7 @@ func ParseQnameForCHUNK(qname string, controlZone string) (chunkID uint16, nodeI
 	// Check that the last N labels match the control zone
 	controlStartIdx := len(labels) - len(controlLabels)
 	if controlStartIdx < 2 {
-		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (too few labels)", qname)
+		return 0, "", "", fmt.Errorf("invalid OLDCHUNK QNAME format: %s (too few labels)", qname)
 	}
 
 	for i := 0; i < len(controlLabels); i++ {
@@ -585,7 +228,7 @@ func ParseQnameForCHUNK(qname string, controlZone string) (chunkID uint16, nodeI
 	// Labels from index 1 to controlStartIdx-1 contain <nodeid-labels> and <distributionID>
 	// The distribution ID should be the last label (it's hex)
 	if controlStartIdx-1 < 1 {
-		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (missing node ID and distribution ID)", qname)
+		return 0, "", "", fmt.Errorf("invalid OLDCHUNK QNAME format: %s (missing node ID and distribution ID)", qname)
 	}
 	prefixLabels := labels[1:controlStartIdx]
 	
@@ -613,7 +256,7 @@ func ParseQnameForCHUNK(qname string, controlZone string) (chunkID uint16, nodeI
 	}
 	
 	if !found {
-		return 0, "", "", fmt.Errorf("invalid CHUNK QNAME format: %s (could not find valid distribution ID in labels: %v)", qname, prefixLabels)
+		return 0, "", "", fmt.Errorf("invalid OLDCHUNK QNAME format: %s (could not find valid distribution ID in labels: %v)", qname, prefixLabels)
 	}
 
 	return chunkID, nodeID, distributionID, nil
@@ -694,20 +337,20 @@ func handleMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname st
 	return w.WriteMsg(m)
 }
 
-// handleCHUNKQuery processes CHUNK queries
+// handleOLDCHUNKQuery processes OLDCHUNK queries
 // QNAME format: <chunkid>.<nodeid>.<distributionID>.<controlzone>
-func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	log.Printf("KDC: Processing CHUNK query for %s", qname)
+func handleOLDCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	log.Printf("KDC: Processing OLDCHUNK query for %s", qname)
 
 	// Parse QNAME to extract chunk ID, node ID, and distribution ID
-	chunkID, nodeID, distributionID, err := ParseQnameForCHUNK(qname, conf.ControlZone)
+	chunkID, nodeID, distributionID, err := ParseQnameForOLDCHUNK(qname, conf.ControlZone)
 	if err != nil {
-		log.Printf("KDC: Error parsing CHUNK QNAME %s: %v", qname, err)
+		log.Printf("KDC: Error parsing OLDCHUNK QNAME %s: %v", qname, err)
 		m.SetRcode(msg, dns.RcodeFormatError)
 		return w.WriteMsg(m)
 	}
 
-	log.Printf("KDC: CHUNK chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
+	log.Printf("KDC: OLDCHUNK chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
 
 	// Get chunk data for this node, distribution, and chunk ID
 	chunk, err := kdcDB.GetChunkForNode(nodeID, distributionID, chunkID, conf)
@@ -719,6 +362,112 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 
 	if chunk == nil {
 		log.Printf("KDC: No chunk %d found for node %s, distribution %s", chunkID, nodeID, distributionID)
+		m.SetRcode(msg, dns.RcodeNameError)
+		return w.WriteMsg(m)
+	}
+
+	// Create OLDCHUNK RR
+	chunkRR := &dns.PrivateRR{
+		Hdr: dns.RR_Header{
+			Name:   qname,
+			Rrtype: core.TypeOLDCHUNK,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		Data: chunk,
+	}
+
+	m.Answer = append(m.Answer, chunkRR)
+	m.SetRcode(msg, dns.RcodeSuccess)
+
+	log.Printf("KDC: Sending OLDCHUNK response with sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
+	return w.WriteMsg(m)
+}
+
+// handleCHUNKQuery processes CHUNK queries
+// QNAME format for manifest: <nodeid>.<distributionID>.<controlzone> (chunkID=0 implied)
+// QNAME format for data chunks: <chunkid>.<nodeid>.<distributionID>.<controlzone>
+func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	log.Printf("KDC: Processing CHUNK query for %s", qname)
+
+	// Try to parse as data chunk first (has chunk ID prefix)
+	// If that fails, try parsing as manifest (no chunk ID)
+	var chunkID uint16
+	var nodeID, distributionID string
+	var err error
+
+	// Check if QNAME starts with a number (chunk ID)
+	labels := dns.SplitDomainName(qname)
+	if len(labels) > 0 {
+		// Try to parse first label as chunk ID
+		if parsedChunkID, parseErr := strconv.ParseUint(labels[0], 10, 16); parseErr == nil {
+			// First label is a number - this is a data chunk query
+			chunkID = uint16(parsedChunkID)
+			chunkID, nodeID, distributionID, err = ParseQnameForOLDCHUNK(qname, conf.ControlZone)
+			if err != nil {
+				log.Printf("KDC: Error parsing CHUNK data chunk QNAME %s: %v", qname, err)
+				m.SetRcode(msg, dns.RcodeFormatError)
+				return w.WriteMsg(m)
+			}
+			log.Printf("KDC: CHUNK data chunk query: chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
+		} else {
+			// First label is not a number - this is a manifest query
+			chunkID = 0
+			nodeID, distributionID, err = ParseQnameForMANIFEST(qname, conf.ControlZone)
+			if err != nil {
+				log.Printf("KDC: Error parsing CHUNK manifest QNAME %s: %v", qname, err)
+				m.SetRcode(msg, dns.RcodeFormatError)
+				return w.WriteMsg(m)
+			}
+			log.Printf("KDC: CHUNK manifest query: node-id=%s, distribution-id=%s", nodeID, distributionID)
+		}
+	} else {
+		log.Printf("KDC: Invalid CHUNK QNAME format: %s", qname)
+		m.SetRcode(msg, dns.RcodeFormatError)
+		return w.WriteMsg(m)
+	}
+
+	// Get CHUNK record
+	chunk, err := kdcDB.GetCHUNKForNode(nodeID, distributionID, chunkID, conf)
+	if err != nil {
+		log.Printf("KDC: Error getting CHUNK %d for node %s, distribution %s: %v", chunkID, nodeID, distributionID, err)
+		
+		errStr := err.Error()
+		
+		// Check if this is an "out of range" error (chunk doesn't exist)
+		if strings.Contains(errStr, "out of range") {
+			log.Printf("KDC: CHUNK %d is out of range for distribution %s - returning NXDOMAIN", chunkID, distributionID)
+			m.SetRcode(msg, dns.RcodeNameError)
+			return w.WriteMsg(m)
+		}
+		
+		// Check if this is a "node not found" error (invalid node ID)
+		if strings.Contains(errStr, "node not found") {
+			log.Printf("KDC: Node %s not found for distribution %s - returning NXDOMAIN", nodeID, distributionID)
+			m.SetRcode(msg, dns.RcodeNameError)
+			return w.WriteMsg(m)
+		}
+		
+		// Check if distribution records exist at all
+		records, checkErr := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
+		if checkErr == nil {
+			if len(records) == 0 {
+				log.Printf("KDC: No distribution records found for distribution %s (may have been purged after completion)", distributionID)
+				m.SetRcode(msg, dns.RcodeNameError)
+			} else {
+				// Distribution exists but failed to prepare CHUNK - this is a server error
+				log.Printf("KDC: Found %d distribution records for distribution %s, but failed to prepare CHUNK: %v", len(records), distributionID, err)
+				m.SetRcode(msg, dns.RcodeServerFailure)
+			}
+		} else {
+			log.Printf("KDC: Failed to check distribution records: %v", checkErr)
+			m.SetRcode(msg, dns.RcodeServerFailure)
+		}
+		return w.WriteMsg(m)
+	}
+
+	if chunk == nil {
+		log.Printf("KDC: No CHUNK %d found for node %s, distribution %s", chunkID, nodeID, distributionID)
 		m.SetRcode(msg, dns.RcodeNameError)
 		return w.WriteMsg(m)
 	}
@@ -737,112 +486,24 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 	m.Answer = append(m.Answer, chunkRR)
 	m.SetRcode(msg, dns.RcodeSuccess)
 
-	log.Printf("KDC: Sending CHUNK response with sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
-	return w.WriteMsg(m)
-}
-
-// handleCHUNK2Query processes CHUNK2 queries
-// QNAME format for manifest: <nodeid>.<distributionID>.<controlzone> (chunkID=0 implied)
-// QNAME format for data chunks: <chunkid>.<nodeid>.<distributionID>.<controlzone>
-func handleCHUNK2Query(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	log.Printf("KDC: Processing CHUNK2 query for %s", qname)
-
-	// Try to parse as data chunk first (has chunk ID prefix)
-	// If that fails, try parsing as manifest (no chunk ID)
-	var chunkID uint16
-	var nodeID, distributionID string
-	var err error
-
-	// Check if QNAME starts with a number (chunk ID)
-	labels := dns.SplitDomainName(qname)
-	if len(labels) > 0 {
-		// Try to parse first label as chunk ID
-		if parsedChunkID, parseErr := strconv.ParseUint(labels[0], 10, 16); parseErr == nil {
-			// First label is a number - this is a data chunk query
-			chunkID = uint16(parsedChunkID)
-			chunkID, nodeID, distributionID, err = ParseQnameForCHUNK(qname, conf.ControlZone)
-			if err != nil {
-				log.Printf("KDC: Error parsing CHUNK2 data chunk QNAME %s: %v", qname, err)
-				m.SetRcode(msg, dns.RcodeFormatError)
-				return w.WriteMsg(m)
-			}
-			log.Printf("KDC: CHUNK2 data chunk query: chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
-		} else {
-			// First label is not a number - this is a manifest query
-			chunkID = 0
-			nodeID, distributionID, err = ParseQnameForMANIFEST(qname, conf.ControlZone)
-			if err != nil {
-				log.Printf("KDC: Error parsing CHUNK2 manifest QNAME %s: %v", qname, err)
-				m.SetRcode(msg, dns.RcodeFormatError)
-				return w.WriteMsg(m)
-			}
-			log.Printf("KDC: CHUNK2 manifest query: node-id=%s, distribution-id=%s", nodeID, distributionID)
-		}
-	} else {
-		log.Printf("KDC: Invalid CHUNK2 QNAME format: %s", qname)
-		m.SetRcode(msg, dns.RcodeFormatError)
-		return w.WriteMsg(m)
-	}
-
-	// Get CHUNK2 record
-	chunk2, err := kdcDB.GetCHUNK2ForNode(nodeID, distributionID, chunkID, conf)
-	if err != nil {
-		log.Printf("KDC: Error getting CHUNK2 %d for node %s, distribution %s: %v", chunkID, nodeID, distributionID, err)
-		// Check if distribution records exist at all
-		records, checkErr := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
-		if checkErr == nil {
-			if len(records) == 0 {
-				log.Printf("KDC: No distribution records found for distribution %s (may have been purged after completion)", distributionID)
-				m.SetRcode(msg, dns.RcodeNameError)
-			} else {
-				log.Printf("KDC: Found %d distribution records for distribution %s, but failed to prepare CHUNK2", len(records), distributionID)
-				m.SetRcode(msg, dns.RcodeServerFailure)
-			}
-		} else {
-			log.Printf("KDC: Failed to check distribution records: %v", checkErr)
-			m.SetRcode(msg, dns.RcodeServerFailure)
-		}
-		return w.WriteMsg(m)
-	}
-
-	if chunk2 == nil {
-		log.Printf("KDC: No CHUNK2 %d found for node %s, distribution %s", chunkID, nodeID, distributionID)
-		m.SetRcode(msg, dns.RcodeNameError)
-		return w.WriteMsg(m)
-	}
-
-	// Create CHUNK2 RR
-	chunk2RR := &dns.PrivateRR{
-		Hdr: dns.RR_Header{
-			Name:   qname,
-			Rrtype: core.TypeCHUNK2,
-			Class:  dns.ClassINET,
-			Ttl:    300,
-		},
-		Data: chunk2,
-	}
-
-	m.Answer = append(m.Answer, chunk2RR)
-	m.SetRcode(msg, dns.RcodeSuccess)
-
-	if chunk2.Total == 0 {
+	if chunk.Total == 0 {
 		// Manifest chunk
-		log.Printf("KDC: Sending CHUNK2 manifest response (format=%d, hmac_len=%d, data_len=%d)", 
-			chunk2.Format, chunk2.HMACLen, len(chunk2.Data))
+		log.Printf("KDC: Sending CHUNK manifest response (format=%d, hmac_len=%d, data_len=%d)", 
+			chunk.Format, chunk.HMACLen, len(chunk.Data))
 	} else {
 		// Data chunk
-		log.Printf("KDC: Sending CHUNK2 data chunk response (sequence=%d, total=%d, data_len=%d)", 
-			chunk2.Sequence, chunk2.Total, len(chunk2.Data))
+		log.Printf("KDC: Sending CHUNK data chunk response (sequence=%d, total=%d, data_len=%d)", 
+			chunk.Sequence, chunk.Total, len(chunk.Data))
 	}
 	return w.WriteMsg(m)
 }
 
-// handleConfirmationNotify handles NOTIFY(MANIFEST) messages from KRS confirming receipt of keys
+// handleConfirmationNotify handles NOTIFY(CHUNK) messages from KRS confirming receipt of keys
 // The NOTIFY QNAME format is: <distributionID>.<controlzone>
 func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, qtype uint16, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	// Only handle MANIFEST NOTIFYs as confirmations
-	if qtype != core.TypeMANIFEST {
-		log.Printf("KDC: Ignoring NOTIFY for non-MANIFEST type %s", dns.TypeToString[qtype])
+	// Only handle CHUNK NOTIFYs as confirmations
+	if qtype != core.TypeCHUNK {
+		log.Printf("KDC: Ignoring NOTIFY for non-CHUNK type %s", dns.TypeToString[qtype])
 		return nil
 	}
 
@@ -928,11 +589,44 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		}
 	}
 
-	// TODO: Parse EDNS(0) option for failed keys list (when implemented)
-	// For now, assume all keys succeeded and confirm all keys in the distribution
-	// Extract failed keys from EDNS(0) option if present
+	// Extract failed keys from CHUNK EDNS(0) option if present
 	failedKeys := make(map[string]bool) // Map of "zone:keyID" -> true
-	// TODO: Parse EDNS(0) option to get failed keys list
+	
+	// Check for CHUNK EDNS(0) option in the NOTIFY message
+	opt := msg.IsEdns0()
+	if opt != nil {
+		chunkOpt, found := edns0.ExtractChunkOption(opt)
+		if found {
+			log.Printf("KDC: Found CHUNK EDNS option in confirmation NOTIFY")
+			
+			// Parse key status report from CHUNK option
+			contentType, report, err := edns0.ParseKeyStatusReport(chunkOpt)
+			if err != nil {
+				log.Printf("KDC: Warning: Failed to parse key status report from CHUNK option: %v", err)
+			} else if contentType == edns0.CHUNKContentTypeKeyStatus && report != nil {
+				log.Printf("KDC: Parsed key status report: %d successful, %d failed keys", 
+					len(report.SuccessfulKeys), len(report.FailedKeys))
+				
+				// Build failed keys map
+				for _, failedKey := range report.FailedKeys {
+					keyKey := fmt.Sprintf("%s:%s", failedKey.ZoneName, failedKey.KeyID)
+					failedKeys[keyKey] = true
+					log.Printf("KDC: Key %s (zone %s) failed to install: %s", failedKey.KeyID, failedKey.ZoneName, failedKey.Error)
+				}
+				
+				// Log successful keys for debugging
+				for _, successKey := range report.SuccessfulKeys {
+					log.Printf("KDC: Key %s (zone %s) successfully installed", successKey.KeyID, successKey.ZoneName)
+				}
+			} else {
+				log.Printf("KDC: CHUNK option has unsupported content type: %d", contentType)
+			}
+		} else {
+			log.Printf("KDC: No CHUNK EDNS option in confirmation NOTIFY (assuming all keys succeeded)")
+		}
+	} else {
+		log.Printf("KDC: No EDNS(0) in confirmation NOTIFY (assuming all keys succeeded)")
+	}
 
 	// Confirm all keys in the distribution (except those in failedKeys)
 	confirmedCount := 0

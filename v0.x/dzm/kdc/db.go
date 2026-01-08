@@ -1592,6 +1592,36 @@ func (kdc *KdcDB) PurgeCompletedDistributions() (int, error) {
 		log.Printf("KDC: Warning: Failed to clean up orphaned confirmations: %v", err)
 	}
 	
+	// Transition keys in "distributed" state to "removed" if they have no remaining distribution records
+	// This handles keys that were part of failed distributions that were purged
+	rows, err := kdc.DB.Query(
+		`SELECT zone_name, id FROM dnssec_keys 
+		 WHERE state = ? 
+		 AND id NOT IN (SELECT DISTINCT key_id FROM distribution_records)`,
+		KeyStateDistributed,
+	)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to query distributed keys without distribution records: %v", err)
+	} else {
+		defer rows.Close()
+		transitionedCount := 0
+		for rows.Next() {
+			var zoneName, keyID string
+			if err := rows.Scan(&zoneName, &keyID); err != nil {
+				log.Printf("KDC: Warning: Failed to scan key: %v", err)
+				continue
+			}
+			if err := kdc.UpdateKeyState(zoneName, keyID, KeyStateRemoved); err != nil {
+				log.Printf("KDC: Warning: Failed to transition key %s/%s from distributed to removed: %v", zoneName, keyID, err)
+			} else {
+				transitionedCount++
+			}
+		}
+		if transitionedCount > 0 {
+			log.Printf("KDC: Transitioned %d key(s) from distributed to removed state", transitionedCount)
+		}
+	}
+	
 	return int(deleted), nil
 }
 

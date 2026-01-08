@@ -10,8 +10,9 @@ package krs
 type KrsConf struct {
 	Database    DatabaseConf `yaml:"database" mapstructure:"database"`
 	Node        NodeConf     `yaml:"node" mapstructure:"node"`
-	ControlZone string       `yaml:"control_zone" mapstructure:"control_zone"` // DNS zone for KMCTRL records
+	ControlZone string       `yaml:"control_zone" mapstructure:"control_zone"` // DNS zone for distribution events
 	DnsEngine   DnsEngineConf `yaml:"dnsengine" mapstructure:"dnsengine"`       // DNS engine config for NOTIFY
+	UseChunk    bool         `yaml:"use_chunk" mapstructure:"use_chunk"`     // If true, use CHUNK format instead of MANIFEST+OLDCHUNK
 }
 
 // DatabaseConf represents database configuration (SQLite only for edge nodes)

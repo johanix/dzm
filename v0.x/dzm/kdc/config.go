@@ -13,14 +13,14 @@ import (
 // KdcConf represents the KDC configuration
 type KdcConf struct {
 	Database DatabaseConf `yaml:"database" mapstructure:"database"`
-	ControlZone string    `yaml:"control_zone" mapstructure:"control_zone"` // DNS zone for KMCTRL records
+	ControlZone string    `yaml:"control_zone" mapstructure:"control_zone"` // DNS zone for distribution events
 	DefaultAlgorithm uint8 `yaml:"default_algorithm" mapstructure:"default_algorithm"` // Default DNSSEC algorithm (e.g., 15 for ED25519)
 	KeyRotationInterval time.Duration `yaml:"key_rotation_interval" mapstructure:"key_rotation_interval"` // How often to rotate ZSKs
 	StandbyKeyCount int `yaml:"standby_key_count" mapstructure:"standby_key_count"` // Number of standby ZSKs to maintain
 	PublishTime time.Duration `yaml:"publish_time" mapstructure:"publish_time"` // Time to wait before published -> standby
 	RetireTime time.Duration `yaml:"retire_time" mapstructure:"retire_time"` // Time to wait before retired -> removed
 	DistributionTTL time.Duration `yaml:"distribution_ttl" mapstructure:"distribution_ttl"` // TTL for distributions (default: 5 minutes, like TSIG)
-	JsonchunkMaxSize int `yaml:"jsonchunk_max_size" mapstructure:"jsonchunk_max_size"` // Maximum RDATA size per CHUNK (bytes, default: 60000)
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"` // Maximum RDATA size per OLDCHUNK (bytes, default: 60000)
 }
 
 // DatabaseConf represents database configuration
@@ -29,12 +29,12 @@ type DatabaseConf struct {
 	DSN  string `yaml:"dsn" mapstructure:"dsn" validate:"required"`                        // DSN: SQLite file path or MariaDB "user:password@tcp(host:port)/dbname"
 }
 
-// GetJsonchunkMaxSize returns the configured chunk size, or default (60000) if not set
-func (conf *KdcConf) GetJsonchunkMaxSize() int {
-	if conf.JsonchunkMaxSize <= 0 {
+// GetChunkMaxSize returns the configured chunk size, or default (60000) if not set
+func (conf *KdcConf) GetChunkMaxSize() int {
+	if conf.ChunkMaxSize <= 0 {
 		return 60000 // Default: 60KB
 	}
-	return conf.JsonchunkMaxSize
+	return conf.ChunkMaxSize
 }
 
 // GetDistributionTTL returns the configured distribution TTL, or default (5 minutes) if not set

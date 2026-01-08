@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * MANIFEST and CHUNK query handling for tdns-krs
+ * MANIFEST and OLDCHUNK query handling for tdns-krs
  */
 
 package krs
@@ -18,6 +18,7 @@ import (
 
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
+	"github.com/johanix/tdns/v0.x/tdns/edns0"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
 )
@@ -96,7 +97,7 @@ func QueryMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (
 			}
 			// If chunk size is specified and large, prefer TCP for chunk queries
 			if manifest.ChunkSize > 0 && manifest.ChunkSize > 1180 {
-				log.Printf("KRS: Manifest indicates large chunks (%d bytes), will use TCP for CHUNK queries", manifest.ChunkSize)
+				log.Printf("KRS: Manifest indicates large chunks (%d bytes), will use TCP for OLDCHUNK queries", manifest.ChunkSize)
 			}
 			return manifest, nil
 		}
@@ -145,10 +146,10 @@ func loadPrivateKey(keyPath string) ([]byte, error) {
 	return key, nil
 }
 
-// QueryCHUNK queries the KDC for a specific CHUNK record
+// QueryOLDCHUNK queries the KDC for a specific OLDCHUNK record
 // chunkSize is the expected chunk size from the manifest (0 if unknown)
 // If chunkSize > 1180 bytes, TCP is used directly (UDP max is ~1232 bytes including headers)
-func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chunkID uint16, chunkSize uint16) (*core.CHUNK, error) {
+func QueryOLDCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chunkID uint16, chunkSize uint16) (*core.OLDCHUNK, error) {
 	nodeConfig, err := krsDB.GetNodeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node config: %v", err)
@@ -176,15 +177,15 @@ func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chun
 	}
 	qname := fmt.Sprintf("%d.%s%s.%s", chunkID, nodeIDFQDN, distributionID, controlZoneClean)
 
-	// Create CHUNK query
+	// Create OLDCHUNK query
 	msg := new(dns.Msg)
-	msg.SetQuestion(qname, core.TypeCHUNK)
+	msg.SetQuestion(qname, core.TypeOLDCHUNK)
 	msg.RecursionDesired = false
 	// Set EDNS0 to allow larger messages
 	msg.SetEdns0(dns.DefaultMsgSize, true)
 
-	log.Printf("KRS: Querying CHUNK chunk %d for node %s, distribution %s", chunkID, nodeID, distributionID)
-	log.Printf("KRS: CHUNK query: QNAME=%s, QTYPE=CHUNK", qname)
+	log.Printf("KRS: Querying OLDCHUNK chunk %d for node %s, distribution %s", chunkID, nodeID, distributionID)
+	log.Printf("KRS: OLDCHUNK query: QNAME=%s, QTYPE=OLDCHUNK", qname)
 	
 	// UDP DNS message max size is ~1232 bytes (with EDNS0), but we need to account for
 	// DNS header (~12 bytes) and QNAME (~50-100 bytes typically), leaving ~1180 bytes for payload
@@ -194,54 +195,54 @@ func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chun
 	var resp *dns.Msg
 	
 	if useTCP {
-		log.Printf("KRS: Using TCP for CHUNK (chunk size %d > 1180 bytes)", chunkSize)
+		log.Printf("KRS: Using TCP for OLDCHUNK (chunk size %d > 1180 bytes)", chunkSize)
 		tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
 		resp, _, err = tcpClient.Exchange(msg, kdcAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send CHUNK query over TCP: %v", err)
+			return nil, fmt.Errorf("failed to send OLDCHUNK query over TCP: %v", err)
 		}
 	} else {
 		// Try UDP first for smaller chunks, fallback to TCP if truncated
 		udpClient := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
 		resp, _, err = udpClient.Exchange(msg, kdcAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send CHUNK query: %v", err)
+			return nil, fmt.Errorf("failed to send OLDCHUNK query: %v", err)
 		}
 		
 		// Check for truncation and retry with TCP
 		if resp.Truncated {
-			log.Printf("KRS: CHUNK response truncated (TC=1), retrying with TCP")
+			log.Printf("KRS: OLDCHUNK response truncated (TC=1), retrying with TCP")
 			tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
 			resp, _, err = tcpClient.Exchange(msg, kdcAddress)
 			if err != nil {
-				return nil, fmt.Errorf("failed to send CHUNK query over TCP: %v", err)
+				return nil, fmt.Errorf("failed to send OLDCHUNK query over TCP: %v", err)
 			}
 		}
 	}
 
 	if resp.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("CHUNK query returned rcode %s", dns.RcodeToString[resp.Rcode])
+		return nil, fmt.Errorf("OLDCHUNK query returned rcode %s", dns.RcodeToString[resp.Rcode])
 	}
 
-	// Parse CHUNK from response
+	// Parse OLDCHUNK from response
 	if len(resp.Answer) == 0 {
-		return nil, fmt.Errorf("CHUNK response has no answer RRs")
+		return nil, fmt.Errorf("OLDCHUNK response has no answer RRs")
 	}
 
 	rr := resp.Answer[0]
-	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeCHUNK {
-		if chunk, ok := privRR.Data.(*core.CHUNK); ok {
-			log.Printf("KRS: Parsed CHUNK: sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
+	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeOLDCHUNK {
+		if chunk, ok := privRR.Data.(*core.OLDCHUNK); ok {
+			log.Printf("KRS: Parsed OLDCHUNK: sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
 			return chunk, nil
 		}
 	}
 
-	log.Printf("KRS: Failed to parse CHUNK from response")
-	return nil, fmt.Errorf("failed to parse CHUNK from response")
+	log.Printf("KRS: Failed to parse OLDCHUNK from response")
+	return nil, fmt.Errorf("failed to parse OLDCHUNK from response")
 }
 
 // ReassembleChunks reassembles chunks into the complete base64-encoded data
-func ReassembleChunks(chunks []*core.CHUNK) ([]byte, error) {
+func ReassembleChunks(chunks []*core.OLDCHUNK) ([]byte, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no chunks to reassemble")
 	}
@@ -252,7 +253,7 @@ func ReassembleChunks(chunks []*core.CHUNK) ([]byte, error) {
 	}
 
 	// Sort chunks by sequence number
-	chunkMap := make(map[uint16]*core.CHUNK)
+	chunkMap := make(map[uint16]*core.OLDCHUNK)
 	for _, chunk := range chunks {
 		if int(chunk.Sequence) >= total {
 			return nil, fmt.Errorf("chunk sequence %d out of range (max %d)", chunk.Sequence, total-1)
@@ -287,7 +288,12 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 
 	log.Printf("KRS: Processing distribution %s for node %s", distributionID, nodeID)
 
-	// Query MANIFEST
+	// Check if we should use CHUNK format
+	if conf.UseChunk {
+		return ProcessDistributionCHUNK(krsDB, conf, distributionID, processTextResult)
+	}
+
+	// Query MANIFEST (legacy MANIFEST+OLDCHUNK format)
 	manifest, err := QueryMANIFEST(krsDB, conf, nodeID, distributionID)
 	if err != nil {
 		return fmt.Errorf("failed to query MANIFEST: %v", err)
@@ -391,12 +397,12 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		log.Printf("KRS: Using inline payload from MANIFEST (%d bytes)", len(reassembled))
 	} else if manifest.ChunkCount > 0 {
 		// Payload is chunked, fetch all chunks
-		// Pass chunk size from manifest to QueryCHUNK so it can decide UDP vs TCP
-		var chunks []*core.CHUNK
+		// Pass chunk size from manifest to QueryOLDCHUNK so it can decide UDP vs TCP
+		var chunks []*core.OLDCHUNK
 		for i := uint16(0); i < manifest.ChunkCount; i++ {
-			chunk, err := QueryCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
+			chunk, err := QueryOLDCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
 			if err != nil {
-				return fmt.Errorf("failed to query CHUNK %d: %v", i, err)
+				return fmt.Errorf("failed to query OLDCHUNK %d: %v", i, err)
 			}
 			chunks = append(chunks, chunk)
 			log.Printf("KRS: Fetched chunk %d/%d", i+1, manifest.ChunkCount)
@@ -626,7 +632,7 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 		log.Printf("KRS:   - %s", zone)
 	}
 
-	// TODO: Process zone list (e.g., trigger KMREQ queries for each zone)
+		// TODO: Process zone list
 	return nil
 }
 
@@ -745,6 +751,9 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 	// Step 5: Process each key entry and store
 	// Note: AddEdgesignerKeyWithRetirement handles retiring existing edgesigner keys atomically
 	successCount := 0
+	var successfulKeys []edns0.KeyStatusEntry
+	var failedKeys []edns0.KeyStatusEntry
+	
 	for i, entry := range entries {
 		log.Printf("KRS: Processing key entry %d/%d: zone=%s, key_id=%s", i+1, len(entries), entry.ZoneName, entry.KeyID)
 
@@ -766,6 +775,11 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		privateKeyBytes, err := base64.StdEncoding.DecodeString(entry.PrivateKey)
 		if err != nil {
 			log.Printf("KRS: Error: Failed to decode private_key for entry %d: %v", i+1, err)
+			failedKeys = append(failedKeys, edns0.KeyStatusEntry{
+				ZoneName: entry.ZoneName,
+				KeyID:    entry.KeyID,
+				Error:    fmt.Sprintf("Failed to decode private_key: %v", err),
+			})
 			continue
 		}
 
@@ -806,25 +820,42 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		// Store in database atomically
 		// For ZSKs: retires existing edgesigner keys and adds new one (ensures only one ZSK per zone in edgesigner state)
 		// For KSKs: retires existing active KSKs and adds new one (ensures only one KSK per zone in active state)
+		var storeErr error
 		if isKSK {
 			// Ensure KeyType is set correctly for KSK
 			receivedKey.KeyType = "KSK"
-			if err := krsDB.AddActiveKeyWithRetirement(receivedKey); err != nil {
-				log.Printf("KRS: Error: Failed to store KSK for entry %d: %v", i+1, err)
+			storeErr = krsDB.AddActiveKeyWithRetirement(receivedKey)
+			if storeErr != nil {
+				log.Printf("KRS: Error: Failed to store KSK for entry %d: %v", i+1, storeErr)
+				failedKeys = append(failedKeys, edns0.KeyStatusEntry{
+					ZoneName: entry.ZoneName,
+					KeyID:    entry.KeyID,
+					Error:    storeErr.Error(),
+				})
 				continue
 			}
 			log.Printf("KRS: Successfully stored KSK (key_id %d) in 'active' state for zone %s", keyID, entry.ZoneName)
 		} else {
 			// Ensure KeyType is set correctly for ZSK
 			receivedKey.KeyType = "ZSK"
-			if err := krsDB.AddEdgesignerKeyWithRetirement(receivedKey); err != nil {
-				log.Printf("KRS: Error: Failed to store ZSK for entry %d: %v", i+1, err)
+			storeErr = krsDB.AddEdgesignerKeyWithRetirement(receivedKey)
+			if storeErr != nil {
+				log.Printf("KRS: Error: Failed to store ZSK for entry %d: %v", i+1, storeErr)
+				failedKeys = append(failedKeys, edns0.KeyStatusEntry{
+					ZoneName: entry.ZoneName,
+					KeyID:    entry.KeyID,
+					Error:    storeErr.Error(),
+				})
 				continue
 			}
 			log.Printf("KRS: Successfully stored ZSK (key_id %d) in 'edgesigner' state for zone %s", keyID, entry.ZoneName)
 		}
 
 		successCount++
+		successfulKeys = append(successfulKeys, edns0.KeyStatusEntry{
+			ZoneName: entry.ZoneName,
+			KeyID:    entry.KeyID,
+		})
 		log.Printf("KRS: Stored key for zone %s, key_id %s (keytag %d)", entry.ZoneName, entry.KeyID, keyID)
 	}
 
@@ -846,10 +877,12 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 
 	if kdcAddress != "" && distID != "" {
 		// Send confirmation asynchronously (don't block on network I/O)
-		// Capture distID in closure
+		// Capture distID and key status in closure
 		distIDCopy := distID
+		successfulKeysCopy := successfulKeys
+		failedKeysCopy := failedKeys
 		go func() {
-			if err := SendConfirmationToKDC(distIDCopy, conf.ControlZone, kdcAddress); err != nil {
+			if err := SendConfirmationToKDC(distIDCopy, conf.ControlZone, kdcAddress, successfulKeysCopy, failedKeysCopy); err != nil {
 				log.Printf("KRS: Warning: Failed to send confirmation NOTIFY: %v", err)
 			} else {
 				log.Printf("KRS: Successfully sent confirmation NOTIFY for distribution %s", distIDCopy)
