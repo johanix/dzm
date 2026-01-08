@@ -135,7 +135,7 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				resp.ErrorMsg = "chunk_size must be greater than 0"
 			} else {
 				// Update config at runtime (only affects new distributions)
-				kdcConf.JsonchunkMaxSize = req.ChunkSize
+				kdcConf.ChunkMaxSize = req.ChunkSize
 				resp.Msg = fmt.Sprintf("Chunk size updated to %d bytes (affects new distributions only)", req.ChunkSize)
 				resp.ChunkSize = req.ChunkSize
 				log.Printf("KDC Debug: Updated chunk size to %d bytes", req.ChunkSize)
@@ -143,7 +143,7 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 
 		case "get-chunk-size":
 			resp.Msg = "Current chunk size"
-			resp.ChunkSize = kdcConf.GetJsonchunkMaxSize()
+			resp.ChunkSize = kdcConf.GetChunkMaxSize()
 			log.Printf("KDC Debug: Current chunk size: %d bytes", resp.ChunkSize)
 
 		default:

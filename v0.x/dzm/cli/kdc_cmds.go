@@ -381,7 +381,7 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 		}
 
 		var lines []string
-		lines = append(lines, "Zone | Key ID | Type | Algorithm | State | Flags | Comment")
+		lines = append(lines, "Zone | Key ID | Type | Algorithm | State | Timestamp | Event")
 
 		for i, k := range keys {
 			if tdns.Globals.Verbose {
@@ -399,7 +399,6 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 			keyID := getString(key, "id", "ID")
 			keyType := getString(key, "key_type", "KeyType")
 			state := getString(key, "state", "State")
-			flags := getString(key, "flags", "Flags")
 			comment := getString(key, "comment", "Comment")
 
 			// Get algorithm (may be number from JSON or string)
@@ -423,7 +422,26 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 				algStr = "?"
 			}
 
-			line := fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s", zoneID, keyID, keyType, algStr, state, flags, comment)
+			// Parse comment into timestamp and event
+			// Format is typically "event at timestamp" or just "event"
+			var timestamp, event string
+			if comment != "" {
+				// Try to parse "event at YYYY-MM-DD HH:MM:SS" format
+				parts := strings.Split(comment, " at ")
+				if len(parts) == 2 {
+					event = parts[0]
+					timestamp = parts[1]
+				} else {
+					// No timestamp found, use the whole comment as event
+					event = comment
+					timestamp = ""
+				}
+			} else {
+				event = ""
+				timestamp = ""
+			}
+
+			line := fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s", zoneID, keyID, keyType, algStr, state, timestamp, event)
 			lines = append(lines, line)
 		}
 
@@ -2241,7 +2259,7 @@ var kdcDebugDistribDeleteCmd = &cobra.Command{
 var kdcDebugSetChunkSizeCmd = &cobra.Command{
 	Use:   "set-chunk-size",
 	Short: "Set the maximum chunk size for new distributions",
-	Long:  `Sets the maximum chunk size (in bytes) for CHUNK records. This only affects new distributions created after this change. Existing distributions are not affected.`,
+	Long:  `Sets the maximum chunk size (in bytes) for OLDCHUNK records. This only affects new distributions created after this change. Existing distributions are not affected.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		api, err := getApiClient(true)
 		if err != nil {
@@ -2286,7 +2304,7 @@ var kdcDebugSetChunkSizeCmd = &cobra.Command{
 var kdcDebugGetChunkSizeCmd = &cobra.Command{
 	Use:   "get-chunk-size",
 	Short: "Get the current maximum chunk size",
-	Long:  `Gets the current maximum chunk size (in bytes) for CHUNK records.`,
+	Long:  `Gets the current maximum chunk size (in bytes) for OLDCHUNK records.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		api, err := getApiClient(true)
 		if err != nil {
@@ -2908,15 +2926,18 @@ var kdcZoneDnssecDeleteCmd = &cobra.Command{
 }
 
 var kdcZoneDnssecPurgeCmd = &cobra.Command{
-	Use:   "purge [--zone <zone-id>]",
+	Use:   "purge [--zone <zone-id>] [--force]",
 	Short: "Delete all DNSSEC keys in 'removed' state",
-	Long:  `Delete all DNSSEC keys that are in the 'removed' state. If --zone is specified, only keys for that zone are purged. Otherwise, keys for all zones are purged.`,
+	Long:  `Delete all DNSSEC keys that are in the 'removed' state. If --zone is specified, only keys for that zone are purged. Otherwise, keys for all zones are purged. Use --force to also delete keys in 'distributed' state.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Zone is optional - if provided, normalize it
 		zoneName := ""
 		if tdns.Globals.Zonename != "" {
 			zoneName = dns.Fqdn(tdns.Globals.Zonename)
 		}
+
+		// Check for --force flag
+		force, _ := cmd.Flags().GetBool("force")
 
 		api, err := getApiClient(true)
 		if err != nil {
@@ -2925,6 +2946,7 @@ var kdcZoneDnssecPurgeCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "purge-keys",
+			"force":   force,
 		}
 		if zoneName != "" {
 			req["zone_name"] = zoneName
@@ -2941,6 +2963,10 @@ var kdcZoneDnssecPurgeCmd = &cobra.Command{
 
 		fmt.Printf("%s\n", resp["msg"])
 	},
+}
+
+func init() {
+	kdcZoneDnssecPurgeCmd.Flags().Bool("force", false, "Also delete keys in 'distributed' state")
 }
 
 var kdcDistribListCmd = &cobra.Command{

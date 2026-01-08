@@ -38,6 +38,7 @@ type KdcZonePost struct {
 	Comment       string   `json:"comment,omitempty"`        // For generate-key: optional comment
 	NewState      string   `json:"new_state,omitempty"`      // For setstate: target state
 	Zones         []string `json:"zones,omitempty"`           // For distrib-multi: list of zone names
+	Force         bool     `json:"force,omitempty"`          // For purge-keys: also delete distributed keys
 }
 
 // DistributionResult represents the result of distributing a key for a zone
@@ -721,17 +722,42 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 
 		case "purge-keys":
-			// Purge keys in "removed" state
+			// Purge keys in "removed" state (and "distributed" if force=true)
 			// zone_name is optional - if provided, only purge keys for that zone
-			deletedCount, err := kdcDB.DeleteKeysByState(KeyStateRemoved, req.ZoneName)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
+			var deletedCount int64
+			var err error
+			var states []KeyState
+			
+			if req.Force {
+				// Delete both removed and distributed keys
+				states = []KeyState{KeyStateRemoved, KeyStateDistributed}
 			} else {
-				if req.ZoneName != "" {
-					resp.Msg = fmt.Sprintf("Deleted %d key(s) in 'removed' state for zone %s", deletedCount, req.ZoneName)
+				// Only delete removed keys
+				states = []KeyState{KeyStateRemoved}
+			}
+			
+			totalDeleted := int64(0)
+			for _, state := range states {
+				deletedCount, err = kdcDB.DeleteKeysByState(state, req.ZoneName)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+					break
+				}
+				totalDeleted += deletedCount
+			}
+			
+			if !resp.Error {
+				var stateDesc string
+				if req.Force {
+					stateDesc = "'removed' and 'distributed'"
 				} else {
-					resp.Msg = fmt.Sprintf("Deleted %d key(s) in 'removed' state (all zones)", deletedCount)
+					stateDesc = "'removed'"
+				}
+				if req.ZoneName != "" {
+					resp.Msg = fmt.Sprintf("Deleted %d key(s) in %s state for zone %s", totalDeleted, stateDesc, req.ZoneName)
+				} else {
+					resp.Msg = fmt.Sprintf("Deleted %d key(s) in %s state (all zones)", totalDeleted, stateDesc)
 				}
 			}
 
@@ -1260,7 +1286,7 @@ func APIKdcConfig(kdcConf *KdcConf, tdnsConf interface{}) http.HandlerFunc {
 				"default_algorithm":   kdcConf.DefaultAlgorithm,
 				"key_rotation_interval": kdcConf.KeyRotationInterval.String(),
 				"standby_key_count":   kdcConf.StandbyKeyCount,
-				"jsonchunk_max_size":  kdcConf.GetJsonchunkMaxSize(),
+				"chunk_max_size":  kdcConf.GetChunkMaxSize(),
 				"dns_addresses":       dnsAddresses,
 				"api_addresses":        apiAddresses,
 			}

@@ -7,7 +7,6 @@
 package krs
 
 import (
-	"encoding/base64"
 	"fmt"
 	"log"
 	"time"
@@ -15,7 +14,7 @@ import (
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 )
 
-// DecryptAndStoreKey decrypts a KMPKG record and stores the key in the database
+// DecryptAndStoreKey decrypts encrypted key data and stores the key in the database
 func DecryptAndStoreKey(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []byte, longTermPrivKey []byte, distributionID, zoneID string) error {
 	// Decrypt using HPKE
 	// The encryptedKey contains the encapsulated key + ciphertext
@@ -29,7 +28,7 @@ func DecryptAndStoreKey(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []by
 	// For now, we'll store it as-is
 	log.Printf("KRS: Successfully decrypted key for distribution %s, zone %s (size: %d bytes)", distributionID, zoneID, len(plaintext))
 
-	// TODO: Extract key metadata from the KMPKG or from a separate metadata query
+	// TODO: Extract key metadata from the distribution or from a separate metadata query
 	// For now, create a basic ReceivedKey structure
 	key := &ReceivedKey{
 		ID:             distributionID,
@@ -53,39 +52,3 @@ func DecryptAndStoreKey(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []by
 	log.Printf("KRS: Stored key for distribution %s, zone %s", distributionID, zoneID)
 	return nil
 }
-
-// ProcessKMPKG processes KMPKG records from a DNS response
-func ProcessKMPKG(krsDB *KrsDB, kmpkgRecords []*hpke.KMPKG, ephemeralPrivKey []byte, longTermPrivKey []byte, distributionID, zoneID string) error {
-	// KMPKG records may be split across multiple records
-	// Combine them if necessary
-	var encryptedData []byte
-	for _, kmpkg := range kmpkgRecords {
-		if kmpkg.Sequence == 0 && kmpkg.Total == 1 {
-			// Single record
-			encryptedData = kmpkg.EncryptedData
-			break
-		} else {
-			// Multiple records - combine them
-			encryptedData = append(encryptedData, kmpkg.EncryptedData...)
-		}
-	}
-
-	if len(encryptedData) == 0 {
-		return fmt.Errorf("no encrypted data found in KMPKG records")
-	}
-
-	// Decode base64 if needed (KMPKG stores data as base64 in wire format)
-	// Actually, KMPKG stores binary data, so encryptedData is already binary
-	// But the API might send it as base64, so check
-	if len(encryptedData) > 0 && encryptedData[0] != 0x00 {
-		// Might be base64-encoded
-		decoded, err := base64.StdEncoding.DecodeString(string(encryptedData))
-		if err == nil {
-			encryptedData = decoded
-		}
-	}
-
-	// Decrypt and store
-	return DecryptAndStoreKey(krsDB, encryptedData, ephemeralPrivKey, longTermPrivKey, distributionID, zoneID)
-}
-

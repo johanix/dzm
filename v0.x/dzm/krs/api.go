@@ -289,7 +289,7 @@ func APIKrsConfig(krsDB *KrsDB, conf *KrsConf, tdnsConf interface{}) http.Handle
 	}
 }
 
-// APIKrsQuery handles KMREQ query endpoints (forces a query to KDC)
+// APIKrsQuery handles query endpoints (deprecated - kept for compatibility)
 func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req KrsQueryPost
@@ -303,26 +303,9 @@ func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 			Time: time.Now(),
 		}
 
-		switch req.Command {
-		case "query-kmreq":
-			if req.DistributionID == "" || req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "distribution_id and zone_id are required for query-kmreq command")
-				return
-			}
-
-			// Trigger KMREQ query
-			err := QueryKMREQ(krsDB, conf, req.DistributionID, req.ZoneID)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-			} else {
-				resp.Msg = fmt.Sprintf("KMREQ query initiated for distribution %s, zone %s", req.DistributionID, req.ZoneID)
-			}
-
-		default:
-			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
-			return
-		}
+		// All query commands are obsolete (KMREQ/KMCTRL are no longer used)
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("Query command '%s' is obsolete - keys are now distributed via NOTIFY + MANIFEST/OLDCHUNK/CHUNK", req.Command)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)

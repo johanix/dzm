@@ -18,7 +18,6 @@ import (
 	"github.com/johanix/dzm/v0.x/dzm/kdc"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
@@ -147,22 +146,16 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 
 	// Register handlers for each qtype that KDC handles
-	if err := tdns.RegisterQueryHandler(hpke.TypeKMREQ, kdcQueryHandler); err != nil {
-		return fmt.Errorf("failed to register KMREQ handler: %v", err)
-	}
-	if err := tdns.RegisterQueryHandler(hpke.TypeKMCTRL, kdcQueryHandler); err != nil {
-		return fmt.Errorf("failed to register KMCTRL handler: %v", err)
-	}
 	if err := tdns.RegisterQueryHandler(core.TypeMANIFEST, kdcQueryHandler); err != nil {
 		return fmt.Errorf("failed to register MANIFEST handler: %v", err)
+	}
+	if err := tdns.RegisterQueryHandler(core.TypeOLDCHUNK, kdcQueryHandler); err != nil {
+		return fmt.Errorf("failed to register OLDCHUNK handler: %v", err)
 	}
 	if err := tdns.RegisterQueryHandler(core.TypeCHUNK, kdcQueryHandler); err != nil {
 		return fmt.Errorf("failed to register CHUNK handler: %v", err)
 	}
-	if err := tdns.RegisterQueryHandler(core.TypeCHUNK2, kdcQueryHandler); err != nil {
-		return fmt.Errorf("failed to register CHUNK2 handler: %v", err)
-	}
-	log.Printf("KDC: Registered query handlers for KMREQ, KMCTRL, MANIFEST, CHUNK, and CHUNK2")
+	log.Printf("KDC: Registered query handlers for MANIFEST, OLDCHUNK, and CHUNK")
 
 	// Register debug NOTIFY handler FIRST (for all NOTIFYs) - logs all NOTIFYs before processing
 	// This is optional - only register if debug mode is enabled
@@ -182,10 +175,10 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		// Call KDC NOTIFY handler
 		return kdc.HandleKdcNotify(ctx, dnr.Msg, dnr.Qname, dnr.ResponseWriter, kdcDB, &kdcConf)
 	}
-	if err := tdns.RegisterNotifyHandler(core.TypeMANIFEST, kdcNotifyHandler); err != nil {
-		return fmt.Errorf("failed to register MANIFEST NOTIFY handler: %v", err)
+	if err := tdns.RegisterNotifyHandler(core.TypeCHUNK, kdcNotifyHandler); err != nil {
+		return fmt.Errorf("failed to register CHUNK NOTIFY handler: %v", err)
 	}
-	log.Printf("KDC: Registered NOTIFY handler for JSONMANIFEST")
+	log.Printf("KDC: Registered NOTIFY handler for CHUNK")
 
 	// Register engines using the registration API
 	if err := tdns.RegisterEngine("DnsEngine", func(ctx context.Context) error {

@@ -68,24 +68,7 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 		controlZoneFQDN += "."
 	}
 
-	if notifyZone == controlZoneFQDN {
-		// NOTIFY for control zone - query KMCTRL (legacy flow)
-		log.Printf("KRS: NOTIFY received for control zone %s, triggering KMCTRL query", notifyZone)
-		
-		// Query KMCTRL records asynchronously (don't block the NOTIFY response)
-		go func() {
-			kmctrlRecords, err := QueryKMCTRL(krsDB, conf)
-			if err != nil {
-				log.Printf("KRS: Error querying KMCTRL: %v", err)
-				return
-			}
-			
-			// Process KMCTRL records and trigger KMREQ queries for new keys
-			if err := ProcessKMCTRL(krsDB, conf, kmctrlRecords); err != nil {
-				log.Printf("KRS: Error processing KMCTRL records: %v", err)
-			}
-		}()
-	} else if strings.HasSuffix(notifyZone, controlZoneFQDN) {
+	if strings.HasSuffix(notifyZone, controlZoneFQDN) {
 		// NOTIFY for distribution event: <distributionID>.<controlzone>
 		// Extract distributionID
 		suffixLen := len(controlZoneFQDN)
@@ -192,24 +175,7 @@ func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *KrsConf) er
 			controlZoneFQDN += "."
 		}
 
-		if notifyZone == controlZoneFQDN {
-			// NOTIFY for control zone - query KMCTRL (legacy flow)
-			log.Printf("KRS: NOTIFY received for control zone %s, triggering KMCTRL query", notifyZone)
-			
-			// Query KMCTRL records asynchronously (don't block the NOTIFY response)
-			go func() {
-				kmctrlRecords, err := QueryKMCTRL(krsDB, conf)
-				if err != nil {
-					log.Printf("KRS: Error querying KMCTRL: %v", err)
-					return
-				}
-				
-				// Process KMCTRL records and trigger KMREQ queries for new keys
-				if err := ProcessKMCTRL(krsDB, conf, kmctrlRecords); err != nil {
-					log.Printf("KRS: Error processing KMCTRL records: %v", err)
-				}
-			}()
-		} else if strings.HasSuffix(notifyZone, controlZoneFQDN) {
+		if strings.HasSuffix(notifyZone, controlZoneFQDN) {
 			// NOTIFY for distribution event: <distributionID>.<controlzone>
 			// Extract distributionID
 			suffixLen := len(controlZoneFQDN)

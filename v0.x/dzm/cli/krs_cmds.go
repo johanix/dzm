@@ -502,7 +502,7 @@ var krsQueryKmreqCmd = &cobra.Command{
 var krsDebugDistribFetchCmd = &cobra.Command{
 	Use:   "fetch --id <id>",
 	Short: "Fetch and process a distribution from KDC",
-	Long:  `Fetches a distribution by querying MANIFEST and CHUNK records from the KDC, reassembles the chunks, and processes the content. For clear_text distributions, displays the text. For encrypted_text distributions, displays base64 transport, ciphertext, and decrypted cleartext.`,
+	Long:  `Fetches a distribution by querying MANIFEST and OLDCHUNK records from the KDC, reassembles the chunks, and processes the content. For clear_text distributions, displays the text. For encrypted_text distributions, displays base64 transport, ciphertext, and decrypted cleartext.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		distributionID := cmd.Flag("id").Value.String()
 

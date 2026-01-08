@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * Chunk preparation and retrieval for MANIFEST and CHUNK queries
+ * Chunk preparation and retrieval for MANIFEST and OLDCHUNK queries
  */
 
 package kdc
@@ -33,8 +33,8 @@ type chunkCache struct {
 
 type preparedChunks struct {
 	manifest  *core.MANIFEST
-	chunks    []*core.CHUNK
-	chunk2s   []*core.CHUNK2 // CHUNK2 records (unified manifest/chunk)
+	chunks    []*core.OLDCHUNK
+	unifiedChunks []*core.CHUNK // CHUNK records (unified manifest/chunk)
 	checksum  string
 	timestamp int64
 }
@@ -269,7 +269,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
 
-	var chunks []*core.CHUNK
+	var chunks []*core.OLDCHUNK
 	var chunkSize uint16
 	var chunkCount uint16
 
@@ -281,7 +281,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
-		chunkSizeInt := conf.GetJsonchunkMaxSize()
+		chunkSizeInt := conf.GetChunkMaxSize()
 		chunks = splitIntoChunks([]byte(base64Data), chunkSizeInt)
 		chunkCount = uint16(len(chunks))
 		chunkSize = uint16(chunkSizeInt)
@@ -309,10 +309,10 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	}
 	log.Printf("KDC: Calculated HMAC for MANIFEST using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
 
-	// Create CHUNK2 records (unified manifest/chunk format)
-	chunk2s := make([]*core.CHUNK2, 0)
+	// Create CHUNK records (unified manifest/chunk format)
+	unifiedChunks := make([]*core.CHUNK, 0)
 	
-	// Create manifest CHUNK2 (Total=0)
+	// Create manifest CHUNK (Total=0)
 	// First, marshal the manifest JSON data (same as MANIFEST payload)
 	jsonFields := struct {
 		ChunkCount uint16                 `json:"chunk_count"`
@@ -327,10 +327,10 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	}
 	manifestJSON, err := json.Marshal(jsonFields)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK2: %v", err)
+		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK: %v", err)
 	}
 	
-	manifestCHUNK2 := &core.CHUNK2{
+	manifestCHUNK := &core.CHUNK{
 		Format:     manifest.Format,
 		HMACLen:    uint16(len(manifest.HMAC)),
 		HMAC:       manifest.HMAC,
@@ -339,26 +339,29 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		DataLength: uint16(len(manifestJSON)),
 		Data:       manifestJSON,
 	}
-	chunk2s = append(chunk2s, manifestCHUNK2)
+	unifiedChunks = append(unifiedChunks, manifestCHUNK)
 	
-	// Create data CHUNK2 records (Total>0)
-	for _, chunk := range chunks {
-		chunk2 := &core.CHUNK2{
+	// Create data CHUNK records (Total>0)
+		// Note: OLDCHUNK uses 0-based sequence (0, 1, 2, ..., N-1), but CHUNK uses 1-based sequence
+	// to match chunkID in QNAME (chunkID 0 = manifest, chunkID 1+ = data chunks)
+	// So unifiedChunks[0] = manifest (chunkID 0), unifiedChunks[1] = data chunk 1 (chunkID 1), etc.
+	for i, oldchunk := range chunks {
+		chunk := &core.CHUNK{
 			Format:     manifest.Format, // Store format from manifest (not 0)
 			HMACLen:    0, // No HMAC for data chunks
 			HMAC:       nil,
-			Sequence:   chunk.Sequence,
-			Total:      chunk.Total,
-			DataLength: uint16(len(chunk.Data)),
-			Data:       chunk.Data,
+			Sequence:   uint16(i + 1), // 1-based: chunkID 1, 2, 3, ..., N
+			Total:      oldchunk.Total,   // Total number of data chunks
+			DataLength: uint16(len(oldchunk.Data)),
+			Data:       oldchunk.Data,
 		}
-		chunk2s = append(chunk2s, chunk2)
+		unifiedChunks = append(unifiedChunks, chunk)
 	}
 
 	prepared := &preparedChunks{
-		manifest:  manifest,
-		chunks:    chunks,
-		chunk2s:   chunk2s,
+		manifest:      manifest,
+		chunks:        chunks,
+		unifiedChunks: unifiedChunks,
 		checksum:  checksum,
 		timestamp: 0, // TODO: add timestamp
 	}
@@ -368,18 +371,18 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	globalChunkCache.cache[cacheKey] = prepared
 	globalChunkCache.mu.Unlock()
 
-	log.Printf("KDC: Prepared %d chunks (MANIFEST/CHUNK) and %d CHUNK2 records for node %s, distribution %s", 
-		len(chunks), len(chunk2s), nodeID, distributionID)
+	log.Printf("KDC: Prepared %d chunks (MANIFEST/OLDCHUNK) and %d CHUNK records for node %s, distribution %s", 
+		len(chunks), len(unifiedChunks), nodeID, distributionID)
 	return prepared, nil
 }
 
 // splitIntoChunks splits data into chunks of specified size
-func splitIntoChunks(data []byte, chunkSize int) []*core.CHUNK {
+func splitIntoChunks(data []byte, chunkSize int) []*core.OLDCHUNK {
 	if chunkSize <= 0 {
 		chunkSize = 60000 // Default
 	}
 
-	var chunks []*core.CHUNK
+	var chunks []*core.OLDCHUNK
 	total := len(data)
 	numChunks := (total + chunkSize - 1) / chunkSize // Ceiling division
 
@@ -393,7 +396,7 @@ func splitIntoChunks(data []byte, chunkSize int) []*core.CHUNK {
 		chunkData := make([]byte, end-start)
 		copy(chunkData, data[start:end])
 
-		chunk := &core.CHUNK{
+		chunk := &core.OLDCHUNK{
 			Sequence: uint16(i),
 			Total:    uint16(numChunks),
 			Data:     chunkData,
@@ -414,7 +417,7 @@ func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcCon
 }
 
 // GetChunkForNode retrieves a specific chunk for a node's distribution event
-func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.CHUNK, error) {
+func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.OLDCHUNK, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
 		return nil, err
@@ -427,19 +430,19 @@ func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16,
 	return prepared.chunks[chunkID], nil
 }
 
-// GetCHUNK2ForNode retrieves a CHUNK2 record for a node's distribution event
-// chunkID 0 returns the manifest CHUNK2 (Total=0), chunkID > 0 returns data CHUNK2 (Total>0)
-func (kdc *KdcDB) GetCHUNK2ForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.CHUNK2, error) {
+// GetCHUNKForNode retrieves a CHUNK record for a node's distribution event
+// chunkID 0 returns the manifest CHUNK (Total=0), chunkID > 0 returns data CHUNK (Total>0)
+func (kdc *KdcDB) GetCHUNKForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.CHUNK, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
 		return nil, err
 	}
 
-	if int(chunkID) >= len(prepared.chunk2s) {
-		return nil, fmt.Errorf("CHUNK2 ID %d out of range (max %d)", chunkID, len(prepared.chunk2s)-1)
+	if int(chunkID) >= len(prepared.unifiedChunks) {
+		return nil, fmt.Errorf("CHUNK ID %d out of range (max %d)", chunkID, len(prepared.unifiedChunks)-1)
 	}
 
-	return prepared.chunk2s[chunkID], nil
+	return prepared.unifiedChunks[chunkID], nil
 }
 
 // GetDistributionRecordsForDistributionID gets all distribution records for a distribution ID
@@ -691,7 +694,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
 
-	var chunks []*core.CHUNK
+	var chunks []*core.OLDCHUNK
 	var chunkSize uint16
 	var chunkCount uint16
 
@@ -703,7 +706,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
-		chunkSizeInt := conf.GetJsonchunkMaxSize()
+		chunkSizeInt := conf.GetChunkMaxSize()
 		chunks = splitIntoChunks(dataToChunk, chunkSizeInt)
 		chunkCount = uint16(len(chunks))
 		chunkSize = uint16(chunkSizeInt)
@@ -737,10 +740,10 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	}
 	log.Printf("KDC: Calculated HMAC for MANIFEST using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
 
-	// Create CHUNK2 records (unified manifest/chunk format)
-	chunk2s := make([]*core.CHUNK2, 0)
+	// Create CHUNK records (unified manifest/chunk format)
+	unifiedChunks := make([]*core.CHUNK, 0)
 	
-	// Create manifest CHUNK2 (Total=0)
+	// Create manifest CHUNK (Total=0)
 	jsonFields := struct {
 		ChunkCount uint16                 `json:"chunk_count"`
 		ChunkSize  uint16                 `json:"chunk_size,omitempty"`
@@ -754,10 +757,10 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	}
 	manifestJSON, err := json.Marshal(jsonFields)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK2: %v", err)
+		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK: %v", err)
 	}
 	
-	manifestCHUNK2 := &core.CHUNK2{
+	manifestCHUNK := &core.CHUNK{
 		Format:     manifest.Format,
 		HMACLen:    uint16(len(manifest.HMAC)),
 		HMAC:       manifest.HMAC,
@@ -766,26 +769,29 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		DataLength: uint16(len(manifestJSON)),
 		Data:       manifestJSON,
 	}
-	chunk2s = append(chunk2s, manifestCHUNK2)
+	unifiedChunks = append(unifiedChunks, manifestCHUNK)
 	
-	// Create data CHUNK2 records (Total>0)
-	for _, chunk := range chunks {
-		chunk2 := &core.CHUNK2{
+	// Create data CHUNK records (Total>0)
+		// Note: OLDCHUNK uses 0-based sequence (0, 1, 2, ..., N-1), but CHUNK uses 1-based sequence
+	// to match chunkID in QNAME (chunkID 0 = manifest, chunkID 1+ = data chunks)
+	// So unifiedChunks[0] = manifest (chunkID 0), unifiedChunks[1] = data chunk 1 (chunkID 1), etc.
+	for i, oldchunk := range chunks {
+		chunk := &core.CHUNK{
 			Format:     manifest.Format, // Store format from manifest (not 0)
 			HMACLen:    0, // No HMAC for data chunks
 			HMAC:       nil,
-			Sequence:   chunk.Sequence,
-			Total:      chunk.Total,
-			DataLength: uint16(len(chunk.Data)),
-			Data:       chunk.Data,
+			Sequence:   uint16(i + 1), // 1-based: chunkID 1, 2, 3, ..., N
+			Total:      oldchunk.Total,   // Total number of data chunks
+			DataLength: uint16(len(oldchunk.Data)),
+			Data:       oldchunk.Data,
 		}
-		chunk2s = append(chunk2s, chunk2)
+		unifiedChunks = append(unifiedChunks, chunk)
 	}
 
 	prepared := &preparedChunks{
-		manifest:  manifest,
-		chunks:    chunks,
-		chunk2s:   chunk2s,
+		manifest:      manifest,
+		chunks:        chunks,
+		unifiedChunks: unifiedChunks,
 		checksum:  checksum,
 		timestamp: 0,
 	}
