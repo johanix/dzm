@@ -92,15 +92,80 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		return nil, fmt.Errorf("no distribution records found for node %s, distribution %s (distribution exists but not for this node)", nodeID, distributionID)
 	}
 
-	// Determine content type: use "encrypted_keys" if we have keys, otherwise "zonelist"
-	// For now, we'll use "encrypted_keys" mode which sends the encrypted keys directly
+	// Determine content type based on distribution records
+	// Check if this is a node_components distribution (zone_name == "_node_components")
+	// Otherwise, use "encrypted_keys" for key distributions
 	contentType := "encrypted_keys"
+	if len(nodeRecords) > 0 && nodeRecords[0].ZoneName == "_node_components" {
+		contentType = "node_components"
+	}
 	
 	var base64Data []byte
 	var zoneCount int
 	var keyCount int
 
-	if contentType == "encrypted_keys" {
+	if contentType == "node_components" {
+		// Prepare JSON structure with component IDs
+		// For node_components distributions, we get the current component list directly from the database
+		// rather than decrypting from the distribution record, to ensure we always have the latest list
+		if len(nodeRecords) != 1 {
+			return nil, fmt.Errorf("node_components distribution should have exactly one record, got %d", len(nodeRecords))
+		}
+		
+		// Get the current component list from the database
+		components, err := kdc.GetComponentsForNode(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get components for node %s: %v", nodeID, err)
+		}
+		
+		// Sort components for consistent output
+		sort.Strings(components)
+		
+		// Prepare JSON structure
+		type ComponentEntry struct {
+			ComponentID string `json:"component_id"`
+		}
+		
+		entries := make([]ComponentEntry, 0, len(components))
+		for _, componentID := range components {
+			entries = append(entries, ComponentEntry{
+				ComponentID: componentID,
+			})
+		}
+		
+		componentCount := len(entries)
+		
+		if componentCount == 0 {
+			return nil, fmt.Errorf("no components found for node %s, distribution %s", nodeID, distributionID)
+		}
+		
+		// Marshal to JSON (cleartext)
+		componentsJSON, err := json.Marshal(entries)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal components JSON: %v", err)
+		}
+		
+		log.Printf("KDC: Prepared components JSON: %d components, JSON size: %d bytes", 
+			componentCount, len(componentsJSON))
+		
+		// Encrypt the entire JSON payload using HPKE
+		ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
+		}
+		
+		// Combine ephemeral public key and ciphertext for transport
+		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
+		encryptedData := append(ephemeralPub, ciphertext...)
+		
+		// Base64 encode the encrypted data
+		base64Data = []byte(base64.StdEncoding.EncodeToString(encryptedData))
+		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> encrypted %d bytes -> base64 %d bytes", 
+			len(componentsJSON), len(encryptedData), len(base64Data))
+		
+		zoneCount = 0 // node_components doesn't have zones
+		keyCount = 0  // node_components doesn't have keys
+	} else if contentType == "encrypted_keys" {
 		// Prepare JSON structure with all key data (including private keys in cleartext)
 		// The entire JSON will be encrypted using HPKE
 		type KeyEntry struct {
@@ -225,11 +290,16 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		"content":         contentType,
 		"distribution_id": distributionID,
 		"node_id":         nodeID,
-		"zone_count":      zoneCount,
 		"timestamp":       now.Unix(), // Unix timestamp for replay protection (validated by KRS)
 	}
 	if contentType == "encrypted_keys" {
+		metadata["zone_count"] = zoneCount
 		metadata["key_count"] = keyCount
+	} else if contentType == "node_components" {
+		// Get component count from the data we prepared
+		if components, err := kdc.GetComponentsForNode(nodeID); err == nil {
+			metadata["component_count"] = len(components)
+		}
 	}
 	// Add retire_time from config if available
 	if conf != nil && conf.RetireTime > 0 {

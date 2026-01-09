@@ -12,11 +12,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/johanix/dzm/v0.x/dzm/krs"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
@@ -50,6 +52,133 @@ var KrsDebugDistribCmd = &cobra.Command{
 	Use:   "distrib",
 	Short: "Manage test distributions",
 	Long:  `Commands for fetching and processing distributions.`,
+}
+
+// Components command group
+var KrsComponentsCmd = &cobra.Command{
+	Use:   "components",
+	Short: "Manage node component assignments",
+}
+
+var krsComponentsListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all component IDs assigned to this node",
+	Long:  `List all component IDs that this node is assigned to serve. Components are received via encrypted distributions from the KDC.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		api, err := getApiClient(true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "list",
+		}
+
+		resp, err := sendKrsRequest(api, "/krs/components", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+
+		componentsRaw, ok := resp["components"]
+		if !ok {
+			fmt.Printf("Error: 'components' key not found in response\n")
+			return
+		}
+
+		components, ok := componentsRaw.([]interface{})
+		if !ok {
+			fmt.Printf("Error: 'components' is not an array (got %T)\n", componentsRaw)
+			return
+		}
+
+		if len(components) == 0 {
+			fmt.Println("No components assigned to this node")
+			return
+		}
+
+		// Convert to string slice and sort
+		componentIDs := make([]string, 0, len(components))
+		for _, comp := range components {
+			if compStr, ok := comp.(string); ok {
+				componentIDs = append(componentIDs, compStr)
+			}
+		}
+		sort.Strings(componentIDs)
+
+		// Print components
+		fmt.Printf("Components assigned to this node (%d):\n", len(componentIDs))
+		for _, componentID := range componentIDs {
+			fmt.Printf("  - %s\n", componentID)
+		}
+	},
+}
+
+// Enrollment command
+var KrsEnrollCmd = &cobra.Command{
+	Use:   "enroll",
+	Short: "Enroll KRS node from enrollment blob",
+	Long: `Enroll a KRS node by reading an enrollment blob file, generating keypairs,
+sending an enrollment UPDATE to the KDC, and creating the KRS configuration file.
+
+This command:
+1. Parses the enrollment blob file
+2. Generates HPKE and SIG(0) keypairs
+3. Creates and sends an encrypted enrollment UPDATE to the KDC
+4. Processes the enrollment confirmation
+5. Writes configuration file and key files to the config directory
+
+The default config directory is /etc/tdns. Use --configdir to specify a different directory.
+
+The --notify-address flag is required and specifies the IP:port address where the KDC
+should send NOTIFY messages. This should match the address where the KRS DNS engine
+will listen (typically the same as the DNS engine address in the generated config).
+
+This command does not require a config file and will skip config initialization.`,
+	// Override PersistentPreRun to skip config initialization
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Only set up CLI logging, skip config and API initialization
+		tdns.SetupCliLogging()
+	},
+	Run: func(cmd *cobra.Command, args []string) {
+		packageFile, _ := cmd.Flags().GetString("package")
+		if packageFile == "" {
+			log.Fatalf("Error: --package flag is required")
+		}
+
+		configDir, _ := cmd.Flags().GetString("configdir")
+		if configDir == "" {
+			configDir = "/etc/tdns"
+		}
+
+		notifyAddress, _ := cmd.Flags().GetString("notify-address")
+		if notifyAddress == "" {
+			log.Fatalf("Error: --notify-address flag is required")
+		}
+
+		// Validate notify address format (IP:port)
+		if _, _, err := net.SplitHostPort(notifyAddress); err != nil {
+			log.Fatalf("Error: invalid notify address format '%s': %v (expected format: IP:port or hostname:port)", notifyAddress, err)
+		}
+
+		// Verify config directory exists
+		if info, err := os.Stat(configDir); err != nil {
+			if os.IsNotExist(err) {
+				log.Fatalf("Error: config directory does not exist: %s", configDir)
+			}
+			log.Fatalf("Error: failed to stat config directory: %v", err)
+		} else if !info.IsDir() {
+			log.Fatalf("Error: config directory path is not a directory: %s", configDir)
+		}
+
+		// Call enrollment function from krs package
+		if err := krs.RunEnroll(packageFile, configDir, notifyAddress); err != nil {
+			log.Fatalf("Enrollment failed: %v", err)
+		}
+	},
 }
 
 // Key commands
@@ -738,6 +867,7 @@ func init() {
 	KrsDebugDistribCmd.AddCommand(krsDebugDistribFetchCmd)
 	KrsDebugHpkeCmd.AddCommand(krsDebugHpkeGenerateCmd, krsDebugHpkeDecryptCmd)
 	KrsDebugCmd.AddCommand(KrsDebugDistribCmd, KrsDebugHpkeCmd)
+	KrsComponentsCmd.AddCommand(krsComponentsListCmd)
 	// Commands are added directly to root in main.go, not via KrsCmd
 
 	krsKeysGetCmd.Flags().StringP("keyid", "k", "", "Key ID")
@@ -762,6 +892,13 @@ func init() {
 	krsDebugHpkeDecryptCmd.Flags().StringP("private-key-file", "p", "", "File containing node's HPKE private key (hex)")
 	krsDebugHpkeDecryptCmd.MarkFlagRequired("encrypted-file")
 	krsDebugHpkeDecryptCmd.MarkFlagRequired("private-key-file")
+
+	// Bootstrap command flags
+	KrsEnrollCmd.Flags().String("package", "", "Path to enrollment blob file (required)")
+	KrsEnrollCmd.MarkFlagRequired("package")
+	KrsEnrollCmd.Flags().String("configdir", "", "Config directory (default: /etc/tdns)")
+	KrsEnrollCmd.Flags().String("notify-address", "", "Notify address (IP:port) where KDC should send NOTIFY messages (required)")
+	KrsEnrollCmd.MarkFlagRequired("notify-address")
 }
 
 // formatDateTime formats an ISO 8601 datetime string to "year-mo-dy hr:min:sec"

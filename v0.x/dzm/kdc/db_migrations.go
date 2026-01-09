@@ -458,3 +458,291 @@ func (kdc *KdcDB) markOldCompletedDistributions() {
 	}
 }
 
+// migrateAddSig0PubkeyToNodes adds the sig0_pubkey column to nodes table if it doesn't exist
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateAddSig0PubkeyToNodes() error {
+	var columnExists bool
+	
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if column exists using pragma
+		var count int
+		err := kdc.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='sig0_pubkey'").Scan(&count)
+		columnExists = (err == nil && count > 0)
+	} else {
+		// MySQL/MariaDB: Check if column exists by querying information_schema
+		var count int
+		err := kdc.DB.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'nodes' AND COLUMN_NAME = 'sig0_pubkey'",
+		).Scan(&count)
+		columnExists = (err == nil && count > 0)
+	}
+	
+	if columnExists {
+		// Column already exists, nothing to do
+		return nil
+	}
+	
+	// Column doesn't exist, add it
+	var alterStmt string
+	if kdc.DBType == "sqlite" {
+		alterStmt = "ALTER TABLE nodes ADD COLUMN sig0_pubkey TEXT"
+	} else {
+		alterStmt = "ALTER TABLE nodes ADD COLUMN sig0_pubkey TEXT"
+	}
+	
+	_, err := kdc.DB.Exec(alterStmt)
+	if err != nil {
+		// Check if error is "duplicate column" (column already exists - race condition)
+		if strings.Contains(err.Error(), "duplicate column") || 
+		   strings.Contains(err.Error(), "already exists") ||
+		   strings.Contains(err.Error(), "Duplicate column name") {
+			return nil // Column already exists, that's fine
+		}
+		return fmt.Errorf("failed to add sig0_pubkey column: %v", err)
+	}
+	log.Printf("KDC: Added sig0_pubkey column to nodes table")
+	return nil
+}
+
+// MigrateBootstrapTokensTable creates the bootstrap_tokens table if it doesn't exist
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) MigrateBootstrapTokensTable() error {
+	log.Printf("KDC: Checking if bootstrap_tokens table exists...")
+	var tableExists bool
+	
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if table exists
+		var count int
+		err := kdc.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='bootstrap_tokens'").Scan(&count)
+		if err != nil {
+			log.Printf("KDC: Error checking for bootstrap_tokens table: %v", err)
+		}
+		tableExists = (err == nil && count > 0)
+		log.Printf("KDC: bootstrap_tokens table exists check: %v (count=%d)", tableExists, count)
+	} else {
+		// MySQL/MariaDB: Check if table exists
+		var count int
+		err := kdc.DB.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bootstrap_tokens'",
+		).Scan(&count)
+		if err != nil {
+			log.Printf("KDC: Error checking for bootstrap_tokens table: %v", err)
+		}
+		tableExists = (err == nil && count > 0)
+		log.Printf("KDC: bootstrap_tokens table exists check: %v (count=%d)", tableExists, count)
+	}
+	
+	if tableExists {
+		// Table already exists, nothing to do
+		log.Printf("KDC: bootstrap_tokens table already exists, skipping migration")
+		return nil
+	}
+	
+	log.Printf("KDC: bootstrap_tokens table does not exist, creating it...")
+	
+	// Table doesn't exist, create it
+	var createStmt string
+	if kdc.DBType == "sqlite" {
+		// Note: No FOREIGN KEY constraint - bootstrap tokens are created BEFORE nodes exist
+		createStmt = `CREATE TABLE IF NOT EXISTS bootstrap_tokens (
+			token_id TEXT PRIMARY KEY,
+			token_value TEXT NOT NULL UNIQUE,
+			node_id TEXT NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			activated_at DATETIME,
+			expires_at DATETIME,
+			activated INTEGER NOT NULL DEFAULT 0,
+			used INTEGER NOT NULL DEFAULT 0,
+			used_at DATETIME,
+			created_by TEXT,
+			comment TEXT
+		)`
+	} else {
+		// Note: No FOREIGN KEY constraint - bootstrap tokens are created BEFORE nodes exist
+		createStmt = `CREATE TABLE IF NOT EXISTS bootstrap_tokens (
+			token_id VARCHAR(255) PRIMARY KEY,
+			token_value VARCHAR(255) NOT NULL UNIQUE,
+			node_id VARCHAR(255) NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			activated_at TIMESTAMP NULL,
+			expires_at TIMESTAMP NULL,
+			activated BOOLEAN NOT NULL DEFAULT FALSE,
+			used BOOLEAN NOT NULL DEFAULT FALSE,
+			used_at TIMESTAMP NULL,
+			created_by VARCHAR(255),
+			comment TEXT,
+			INDEX idx_token_value (token_value),
+			INDEX idx_node_id (node_id),
+			INDEX idx_expires_at (expires_at),
+			INDEX idx_activated (activated),
+			INDEX idx_used (used)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+	}
+	
+	// For SQLite, ensure foreign keys are enabled before creating table with FK constraint
+	if kdc.DBType == "sqlite" {
+		log.Printf("KDC: Enabling foreign keys for SQLite...")
+		if _, err := kdc.DB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+			log.Printf("KDC: Warning: Failed to enable foreign keys: %v", err)
+		} else {
+			log.Printf("KDC: Foreign keys enabled successfully")
+		}
+	}
+	
+	log.Printf("KDC: Executing CREATE TABLE statement for bootstrap_tokens...")
+	_, err := kdc.DB.Exec(createStmt)
+	if err != nil {
+		log.Printf("KDC: ERROR: Failed to create bootstrap_tokens table: %v", err)
+		return fmt.Errorf("failed to create bootstrap_tokens table: %v", err)
+	}
+	log.Printf("KDC: Successfully created bootstrap_tokens table")
+	
+	// Verify table was created
+	log.Printf("KDC: Verifying bootstrap_tokens table was created...")
+	var verifyCount int
+	if kdc.DBType == "sqlite" {
+		err = kdc.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='bootstrap_tokens'").Scan(&verifyCount)
+	} else {
+		err = kdc.DB.QueryRow("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bootstrap_tokens'").Scan(&verifyCount)
+	}
+	if err != nil {
+		log.Printf("KDC: WARNING: Could not verify table creation: %v", err)
+	} else if verifyCount == 0 {
+		log.Printf("KDC: ERROR: Table verification failed - table still does not exist after creation attempt!")
+		return fmt.Errorf("table verification failed - bootstrap_tokens table was not created")
+	} else {
+		log.Printf("KDC: Table verification successful - bootstrap_tokens table exists")
+	}
+	
+	// Create indexes for SQLite (MySQL indexes are in CREATE TABLE)
+	if kdc.DBType == "sqlite" {
+		indexes := []string{
+			"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_token_value ON bootstrap_tokens(token_value)",
+			"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_node_id ON bootstrap_tokens(node_id)",
+			"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_expires_at ON bootstrap_tokens(expires_at)",
+			"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_activated ON bootstrap_tokens(activated)",
+			"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_used ON bootstrap_tokens(used)",
+		}
+		for _, idxStmt := range indexes {
+			if _, err := kdc.DB.Exec(idxStmt); err != nil {
+				log.Printf("KDC: Warning: Failed to create index: %v", err)
+			}
+		}
+	}
+	
+	// Migrate: Remove FK constraint if it exists (bootstrap tokens are created before nodes exist)
+	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
+	}
+	
+	return nil
+}
+
+// migrateRemoveBootstrapTokensFK removes the foreign key constraint from bootstrap_tokens table
+// This is needed because bootstrap tokens are created BEFORE nodes exist
+func (kdc *KdcDB) migrateRemoveBootstrapTokensFK() error {
+	if kdc.DBType == "sqlite" {
+		// SQLite doesn't support dropping FK constraints directly
+		// Check if table exists and has FK constraint by checking schema
+		var sqlSchema string
+		err := kdc.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='bootstrap_tokens'").Scan(&sqlSchema)
+		if err != nil {
+			// Table doesn't exist or error - nothing to do
+			return nil
+		}
+		
+		// Check if FK constraint exists in schema
+		if strings.Contains(sqlSchema, "FOREIGN KEY") {
+			log.Printf("KDC: Found FK constraint in bootstrap_tokens table, recreating without FK...")
+			
+			// Check if table has data
+			var rowCount int
+			kdc.DB.QueryRow("SELECT COUNT(*) FROM bootstrap_tokens").Scan(&rowCount)
+			if rowCount > 0 {
+				log.Printf("KDC: WARNING: bootstrap_tokens table has %d rows - cannot safely remove FK constraint", rowCount)
+				return fmt.Errorf("cannot remove FK constraint: table has existing data")
+			}
+			
+			// Recreate table without FK constraint
+			// SQLite: Drop and recreate
+			if _, err := kdc.DB.Exec("DROP TABLE bootstrap_tokens"); err != nil {
+				return fmt.Errorf("failed to drop bootstrap_tokens table: %v", err)
+			}
+			
+			createStmt := `CREATE TABLE bootstrap_tokens (
+				token_id TEXT PRIMARY KEY,
+				token_value TEXT NOT NULL UNIQUE,
+				node_id TEXT NOT NULL,
+				created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				activated_at DATETIME,
+				expires_at DATETIME,
+				activated INTEGER NOT NULL DEFAULT 0,
+				used INTEGER NOT NULL DEFAULT 0,
+				used_at DATETIME,
+				created_by TEXT,
+				comment TEXT
+			)`
+			
+			if _, err := kdc.DB.Exec(createStmt); err != nil {
+				return fmt.Errorf("failed to recreate bootstrap_tokens table: %v", err)
+			}
+			
+			// Recreate indexes
+			indexes := []string{
+				"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_token_value ON bootstrap_tokens(token_value)",
+				"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_node_id ON bootstrap_tokens(node_id)",
+				"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_expires_at ON bootstrap_tokens(expires_at)",
+				"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_activated ON bootstrap_tokens(activated)",
+				"CREATE INDEX IF NOT EXISTS idx_bootstrap_tokens_used ON bootstrap_tokens(used)",
+			}
+			for _, idxStmt := range indexes {
+				if _, err := kdc.DB.Exec(idxStmt); err != nil {
+					log.Printf("KDC: Warning: Failed to create index: %v", err)
+				}
+			}
+			
+			log.Printf("KDC: Successfully recreated bootstrap_tokens table without FK constraint")
+		}
+	} else {
+		// MySQL/MariaDB: Check if FK constraint exists and drop it
+		var fkExists bool
+		err := kdc.DB.QueryRow(`
+			SELECT COUNT(*) > 0 
+			FROM information_schema.KEY_COLUMN_USAGE 
+			WHERE TABLE_SCHEMA = DATABASE() 
+			AND TABLE_NAME = 'bootstrap_tokens' 
+			AND REFERENCED_TABLE_NAME = 'nodes'
+		`).Scan(&fkExists)
+		
+		if err != nil {
+			// Error checking - assume FK doesn't exist
+			return nil
+		}
+		
+		if fkExists {
+			log.Printf("KDC: Found FK constraint in bootstrap_tokens table, dropping it...")
+			
+			// Find the constraint name
+			var constraintName string
+			err := kdc.DB.QueryRow(`
+				SELECT CONSTRAINT_NAME 
+				FROM information_schema.KEY_COLUMN_USAGE 
+				WHERE TABLE_SCHEMA = DATABASE() 
+				AND TABLE_NAME = 'bootstrap_tokens' 
+				AND REFERENCED_TABLE_NAME = 'nodes'
+				LIMIT 1
+			`).Scan(&constraintName)
+			
+			if err == nil && constraintName != "" {
+				dropStmt := fmt.Sprintf("ALTER TABLE bootstrap_tokens DROP FOREIGN KEY %s", constraintName)
+				if _, err := kdc.DB.Exec(dropStmt); err != nil {
+					return fmt.Errorf("failed to drop FK constraint: %v", err)
+				}
+				log.Printf("KDC: Successfully dropped FK constraint %s from bootstrap_tokens table", constraintName)
+			}
+		}
+	}
+	
+	return nil
+}
+

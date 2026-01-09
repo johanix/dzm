@@ -95,12 +95,28 @@ type Node struct {
 	ID              string    `json:"id"`              // Unique identifier for the node
 	Name            string    `json:"name"`            // Human-readable name
 	LongTermPubKey  []byte    `json:"long_term_pub_key"` // HPKE long-term public key (32 bytes, X25519)
+	Sig0PubKey     string    `json:"sig0_pub_key,omitempty"` // SIG(0) public key (DNSKEY RR format string)
 	NotifyAddress   string    `json:"notify_address"`  // Address:port for sending NOTIFY messages (e.g., "192.0.2.1:53")
 	RegisteredAt    time.Time `json:"registered_at"`
 	LastSeen        time.Time `json:"last_seen"`
 	State           NodeState `json:"state"`
 	Comment         string    `json:"comment"`         // Optional comment/description
 	Zones           []string  `json:"zones"`           // List of zone names this node serves (for future use)
+}
+
+// BootstrapToken represents a bootstrap token for node registration
+type BootstrapToken struct {
+	TokenID     string     `json:"token_id"`     // Unique token identifier
+	TokenValue  string     `json:"token_value"`  // Token value (cryptographically random)
+	NodeID      string     `json:"node_id"`      // Assigned node ID
+	CreatedAt   time.Time  `json:"created_at"`  // When token was created
+	ActivatedAt *time.Time `json:"activated_at,omitempty"` // When token was activated (nil until activated)
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`   // When token expires (nil until activated)
+	Activated   bool       `json:"activated"`   // Whether token is activated
+	Used        bool       `json:"used"`        // Whether token has been used
+	UsedAt      *time.Time `json:"used_at,omitempty"`      // When token was used (nil until used)
+	CreatedBy   string     `json:"created_by,omitempty"`   // Admin user/identifier
+	Comment     string     `json:"comment,omitempty"`      // Optional comment
 }
 
 // KeyType represents the type of DNSSEC key

@@ -13,15 +13,18 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/johanix/dzm/v0.x/dzm/kdc"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var nodeid, nodename, pubkeyfile string
@@ -57,6 +60,111 @@ var KdcServiceCmd = &cobra.Command{
 var KdcComponentCmd = &cobra.Command{
 	Use:   "component",
 	Short: "Manage components in KDC",
+}
+
+var KdcNodeEnrollCmd = &cobra.Command{
+	Use:   "enroll",
+	Short: "Manage enrollment tokens and blobs",
+	Long:  `Commands for managing enrollment tokens and generating enrollment blobs for node registration.`,
+}
+
+var KdcHpkeCmd = &cobra.Command{
+	Use:   "hpke",
+	Short: "Manage KDC HPKE keypair",
+	Long:  `Commands for generating and managing the KDC's HPKE (Hybrid Public Key Encryption) keypair.
+The HPKE keypair is required for:
+  - Encrypting bootstrap confirmations sent to KRS nodes
+  - Decrypting bootstrap requests from KRS nodes
+
+The keypair must be configured in the KDC config file as kdc_hpke_priv_key.`,
+}
+
+var kdcHpkeGenerateCmd = &cobra.Command{
+	Use:   "generate --outfile <path>",
+	Short: "Generate a new HPKE keypair for the KDC",
+	Long: `Generate a new HPKE (X25519) keypair for the KDC and save it to a file.
+
+The generated key file will contain:
+  - The private key (hex encoded)
+  - The public key (for reference)
+  - Comments with generation timestamp and usage instructions
+
+The file will be created with permissions 0600 (readable/writable by owner only).
+
+After generating the keypair:
+  1. Add the following to your KDC config file (under 'kdc:' section):
+     kdc_hpke_priv_key: <path-to-key-file>
+  2. Restart the KDC
+
+WARNING: If you generate a NEW keypair, you must regenerate all enrollment blobs
+that were created with the old public key, as they will no longer be decryptable.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		outFile, _ := cmd.Flags().GetString("outfile")
+		if outFile == "" {
+			log.Fatalf("Error: --outfile is required")
+		}
+
+		// Check if file already exists
+		if _, err := os.Stat(outFile); err == nil {
+			log.Fatalf("Error: File already exists: %s\nUse a different path or remove the existing file first.", outFile)
+		}
+
+		// Generate HPKE keypair
+		pubKey, privKey, err := hpke.GenerateKeyPair()
+		if err != nil {
+			log.Fatalf("Error generating HPKE keypair: %v", err)
+		}
+
+		// Format key file content
+		pubKeyHex := hex.EncodeToString(pubKey)
+		privKeyHex := hex.EncodeToString(privKey)
+		generatedAt := time.Now().Format(time.RFC3339)
+
+		keyContent := fmt.Sprintf(`# KDC HPKE Private Key (X25519)
+# Generated: %s
+# Algorithm: X25519 (HPKE KEM)
+# Key Size: 32 bytes (256 bits)
+# Format: Hexadecimal
+# 
+# WARNING: This is a PRIVATE KEY. Keep it secret and secure!
+# Do not share this key with anyone. Anyone with access to this key can decrypt
+# data encrypted with the corresponding public key.
+# This key is used by KDC to decrypt bootstrap requests and encrypt bootstrap confirmations.
+#
+# Public Key: %s
+#
+# To use this keypair:
+# 1. Add the following to your KDC config file (under 'kdc:' section):
+#    kdc_hpke_priv_key: %s
+# 2. Restart the KDC
+#
+# WARNING: If you generate a NEW keypair, you must regenerate all enrollment blobs
+# that were created with the old public key, as they will no longer be decryptable.
+#
+%s
+`, generatedAt, pubKeyHex, outFile, privKeyHex)
+
+		// Write key file with secure permissions
+		if err := os.WriteFile(outFile, []byte(keyContent), 0600); err != nil {
+			log.Fatalf("Error writing key file: %v", err)
+		}
+
+		// Get absolute path for display
+		absPath, err := filepath.Abs(outFile)
+		if err != nil {
+			absPath = outFile
+		}
+
+		fmt.Printf("HPKE keypair generated successfully!\n\n")
+		fmt.Printf("Key file: %s\n", absPath)
+		fmt.Printf("Public key: %s\n\n", pubKeyHex)
+		fmt.Printf("Next steps:\n")
+		fmt.Printf("  1. Add the following to your KDC config file (under 'kdc:' section):\n")
+		fmt.Printf("     kdc_hpke_priv_key: %s\n", absPath)
+		fmt.Printf("  2. Restart the KDC\n\n")
+		fmt.Printf("WARNING: If you generate a NEW keypair, you must regenerate all enrollment blobs\n")
+		fmt.Printf("that were created with the old public key, as they will no longer be decryptable.\n")
+	},
 }
 
 var KdcServiceComponentCmd = &cobra.Command{
@@ -595,8 +703,9 @@ var kdcNodeListCmd = &cobra.Command{
 				fmt.Println("No nodes configured")
 				return
 			}
-			fmt.Printf("%-30s %-30s %-25s %-15s %s\n", "ID", "Name", "Notify Address", "State", "Comment")
-			fmt.Println(strings.Repeat("-", 120))
+			
+			// Build table rows for columnize
+			lines := []string{"ID | Name | Notify Address | State | Comment"}
 			for _, n := range nodes {
 				if node, ok := n.(map[string]interface{}); ok {
 					id := fmt.Sprintf("%v", node["id"])
@@ -607,9 +716,11 @@ var kdcNodeListCmd = &cobra.Command{
 					}
 					state := fmt.Sprintf("%v", node["state"])
 					comment := fmt.Sprintf("%v", node["comment"])
-					fmt.Printf("%-30s %-30s %-25s %-15s %s\n", id, name, notifyAddr, state, comment)
+					lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s", id, name, notifyAddr, state, comment))
 				}
 			}
+			
+			fmt.Println(columnize.SimpleFormat(lines))
 		} else {
 			fmt.Printf("Response: %+v\n", resp)
 		}
@@ -781,9 +892,9 @@ var kdcNodeSetStateCmd = &cobra.Command{
 }
 
 var kdcNodeDeleteCmd = &cobra.Command{
-	Use:   "delete [node-id]",
+	Use:   "delete",
 	Short: "Delete a node from KDC",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs(cmd, "nodeid")
 		nodeid := cmd.Flag("nodeid").Value.String()
@@ -843,6 +954,60 @@ var kdcZoneServiceCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+// Zone catalog command
+var KdcZoneCatalogCmd = &cobra.Command{
+	Use:   "catalog",
+	Short: "Manage catalog zone",
+	Long:  `Commands for generating and managing the catalog zone used for automatic zone configuration on edge nodes.`,
+}
+
+var kdcZoneCatalogGenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Generate catalog zone from zone/service/component data",
+	Long: `Generate a catalog zone that lists all zones managed by the KDC with their component groups.
+The catalog zone is registered with the DnsEngine and can be served via zone transfers (AXFR/IXFR).
+
+Each zone in the catalog includes:
+- NS record mapping a unique identifier to the actual zone name
+- TXT records with "group={component_id}" for each component in the zone's service
+
+The catalog zone name must be configured in the KDC config file as 'kdc.catalog_zone'.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Call API to generate catalog zone (must be done in daemon process)
+		api, err := getApiClient(true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "generate",
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/catalog", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+
+		catalogZoneName := getString(resp, "zone_name")
+		serial := getInt(resp, "serial")
+		msg := getString(resp, "msg")
+
+		if msg != "" {
+			fmt.Printf("%s\n", msg)
+		} else {
+			fmt.Printf("✓ Catalog zone '%s' generated successfully\n", catalogZoneName)
+		}
+		if serial > 0 {
+			fmt.Printf("  Serial: %d\n", serial)
+		}
+		fmt.Printf("  Registered with DnsEngine: ready to serve via zone transfers\n")
 	},
 }
 
@@ -1211,8 +1376,9 @@ var kdcComponentListCmd = &cobra.Command{
 			return
 		}
 
-		fmt.Printf("%-30s %-30s %-8s %s\n", "ID", "Name", "Active", "Comment")
-		fmt.Println(strings.Repeat("-", 100))
+		// Build table rows for columnize
+		var lines []string
+		lines = append(lines, "ID | Name | Active | Comment")
 
 		for _, c := range components {
 			component, ok := c.(map[string]interface{})
@@ -1227,8 +1393,10 @@ var kdcComponentListCmd = &cobra.Command{
 			if !active {
 				activeStr = "no"
 			}
-			fmt.Printf("%-30s %-30s %-8s %s\n", id, name, activeStr, comment)
+			lines = append(lines, fmt.Sprintf("%s | %s | %s | %s", id, name, activeStr, comment))
 		}
+
+		fmt.Println(columnize.SimpleFormat(lines))
 	},
 }
 
@@ -3388,12 +3556,726 @@ var kdcZoneSetStateCmd = &cobra.Command{
 	},
 }
 
+// Helper function to get KDC config file path from CLI config
+func getKdcConfigPath() (string, error) {
+	clientKey := getClientKey()
+	if clientKey == "" {
+		return "", fmt.Errorf("no client key set")
+	}
+	
+	// Get API details for this client
+	apiDetails := getApiDetailsByClientKey(clientKey)
+	if apiDetails == nil {
+		return "", fmt.Errorf("API details not found for %s", clientKey)
+	}
+	
+	var configPath string
+	var source string
+	
+	// Check if config path is specified
+	if path, ok := apiDetails["config"].(string); ok && path != "" {
+		configPath = path
+		source = "CLI config"
+	} else {
+		// Fallback: try default KDC config file location
+		defaultPath := tdns.DefaultKdcCfgFile
+		if _, err := os.Stat(defaultPath); err == nil {
+			configPath = defaultPath
+			source = "default location"
+		} else {
+			return "", fmt.Errorf("KDC config file not specified in CLI config and default path %s not found", defaultPath)
+		}
+	}
+	
+	// Log config file usage in debug mode
+	if tdns.Globals.Debug || tdns.Globals.Verbose {
+		fmt.Fprintf(os.Stderr, "Using KDC config file (%s): %s\n", source, configPath)
+	}
+	
+	return configPath, nil
+}
+
+// Helper function to load KDC config from file
+func loadKdcConfigFromFile(configPath string) (*kdc.KdcConf, error) {
+	// Read config file
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read KDC config file %s: %v", configPath, err)
+	}
+	
+	// The KDC config file has the kdc section nested, so we need to unmarshal into a wrapper
+	type KdcConfigWrapper struct {
+		Kdc kdc.KdcConf `yaml:"kdc"`
+	}
+	
+	var wrapper KdcConfigWrapper
+	if err := yaml.Unmarshal(configData, &wrapper); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal KDC config: %v", err)
+	}
+	
+	kdcConf := wrapper.Kdc
+	
+	// Validate that database config is present
+	if kdcConf.Database.Type == "" {
+		return nil, fmt.Errorf("database type not specified in KDC config file %s (expected under 'kdc.database.type')", configPath)
+	}
+	if kdcConf.Database.DSN == "" {
+		return nil, fmt.Errorf("database DSN not specified in KDC config file %s (expected under 'kdc.database.dsn')", configPath)
+	}
+	
+	if tdns.Globals.Debug {
+		fmt.Fprintf(os.Stderr, "KDC config loaded: database type=%s, control_zone=%s\n", 
+			kdcConf.Database.Type, kdcConf.ControlZone)
+	}
+	
+	return &kdcConf, nil
+}
+
+// Helper function to get KDC database connection from config (fallback only)
+// This is used when API is unavailable. Normal operations should use the API.
+func getKdcDB() (*kdc.KdcDB, error) {
+	// Get config file path
+	configPath, err := getKdcConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	
+	// Load KDC config from file
+	kdcConf, err := loadKdcConfigFromFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Create database connection
+	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to KDC database: %v", err)
+	}
+	
+	return kdcDB, nil
+}
+
+// Helper function to call enrollment API with fallback to direct DB access
+func callEnrollAPI(command string, reqData map[string]interface{}) (map[string]interface{}, error) {
+	// Try API first
+	api, err := getApiClient(false) // Don't die on error, we'll fallback
+	if err == nil && api != nil {
+		if tdns.Globals.Debug {
+			fmt.Fprintf(os.Stderr, "Attempting enrollment API call: %s\n", command)
+		}
+		resp, err := sendKdcRequest(api, "/kdc/bootstrap", reqData)
+		if err == nil {
+			if tdns.Globals.Debug {
+				fmt.Fprintf(os.Stderr, "Enrollment API call successful\n")
+			}
+			return resp, nil
+		}
+		// API failed, fallback to direct DB
+		if tdns.Globals.Verbose || tdns.Globals.Debug {
+			fmt.Fprintf(os.Stderr, "Warning: API call failed (%v), falling back to direct database access\n", err)
+		}
+	} else {
+		if tdns.Globals.Verbose || tdns.Globals.Debug {
+			fmt.Fprintf(os.Stderr, "Warning: API client unavailable (%v), using direct database access\n", err)
+		}
+	}
+	
+	// Fallback: direct database access
+	if tdns.Globals.Debug {
+		fmt.Fprintf(os.Stderr, "Using direct database access for enrollment operation: %s\n", command)
+	}
+	return callEnrollDB(command, reqData)
+}
+
+// Helper function to call enrollment operations via direct database access
+func callEnrollDB(command string, reqData map[string]interface{}) (map[string]interface{}, error) {
+	// Get KDC config path and load config (for debug output)
+	configPath, err := getKdcConfigPath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get KDC config path: %v", err)
+	}
+	
+	// Load KDC config from file
+	kdcConf, err := loadKdcConfigFromFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load KDC config: %v", err)
+	}
+	
+	// Create database connection
+	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %v", err)
+	}
+	defer kdcDB.DB.Close()
+	
+	result := make(map[string]interface{})
+	result["time"] = time.Now()
+	
+	switch command {
+	case "generate":
+		nodeID, _ := reqData["node_id"].(string)
+		if nodeID == "" {
+			result["error"] = true
+			result["error_msg"] = "node_id is required"
+			return result, nil
+		}
+		
+		// Check if node already exists and is active
+		existingNode, err := kdcDB.GetNode(nodeID)
+		if err == nil {
+			// Node exists - check if it's in an active state
+			if existingNode.State == kdc.NodeStateOnline {
+				result["error"] = true
+				result["error_msg"] = fmt.Sprintf("Node %s already exists and is online. Cannot generate enrollment blob for an active node. Delete the node first (kdc-cli node delete --nodeid %s) or set it to a non-active state (suspended/offline) before re-enrolling.", nodeID, nodeID)
+				return result, nil
+			}
+			// Node exists but is not online (offline, suspended, compromised) - allow re-enrollment
+			// This is intentional - nodes in these states may need to re-enroll
+		}
+		// If node doesn't exist (err != nil), that's fine - it's a new node
+		
+		// Check if token already exists
+		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		if status != "not_found" {
+			result["error"] = true
+			result["error_msg"] = fmt.Sprintf("Enrollment token already exists for node %s (status: %s)", nodeID, status)
+			return result, nil
+		}
+		
+		// Generate token
+		token, err := kdcDB.GenerateBootstrapToken(nodeID)
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		
+		result["token"] = token
+		result["msg"] = fmt.Sprintf("Enrollment token generated for node: %s", nodeID)
+		
+		// Generate enrollment blob content (CLI will write the file)
+		kdcConf, err := getKdcConfig()
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = fmt.Sprintf("Failed to load KDC config: %v", err)
+			return result, nil
+		}
+		
+		blobContent, err := kdc.GenerateBootstrapBlobContent(nodeID, token, kdcConf)
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		
+		result["blob_content"] = blobContent
+		
+	case "activate":
+		nodeID, _ := reqData["node_id"].(string)
+		if nodeID == "" {
+			result["error"] = true
+			result["error_msg"] = "node_id is required"
+			return result, nil
+		}
+		
+		expirationStr, _ := reqData["expiration_window"].(string)
+		expirationWindow := 5 * time.Minute
+		if expirationStr != "" {
+			var err error
+			expirationWindow, err = time.ParseDuration(expirationStr)
+			if err != nil {
+				result["error"] = true
+				result["error_msg"] = fmt.Sprintf("Invalid expiration_window format: %v", err)
+				return result, nil
+			}
+		}
+		
+		// Check token status
+		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		if status == "not_found" {
+			result["error"] = true
+			result["error_msg"] = fmt.Sprintf("No enrollment token found for node %s", nodeID)
+			return result, nil
+		}
+		if status == "active" {
+			result["error"] = true
+			result["error_msg"] = fmt.Sprintf("Enrollment token for node %s is already activated", nodeID)
+			return result, nil
+		}
+		if status == "completed" {
+			result["error"] = true
+			result["error_msg"] = fmt.Sprintf("Enrollment token for node %s has already been used", nodeID)
+			return result, nil
+		}
+		
+		err = kdcDB.ActivateBootstrapToken(nodeID, expirationWindow)
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		
+		result["msg"] = fmt.Sprintf("Enrollment token activated for node: %s", nodeID)
+		
+	case "list":
+		tokens, err := kdcDB.ListBootstrapTokens()
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		result["tokens"] = tokens
+		result["msg"] = fmt.Sprintf("Found %d bootstrap token(s)", len(tokens))
+		
+	case "status":
+		nodeID, _ := reqData["node_id"].(string)
+		if nodeID == "" {
+			result["error"] = true
+			result["error_msg"] = "node_id is required"
+			return result, nil
+		}
+		
+		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		
+		result["status"] = status
+		if status != "not_found" {
+			tokens, err := kdcDB.ListBootstrapTokens()
+			if err == nil {
+				for _, t := range tokens {
+					if t.NodeID == nodeID {
+						result["token"] = t
+						break
+					}
+				}
+			}
+		}
+		
+	case "purge":
+		deleteFiles, _ := reqData["delete_files"].(bool)
+		count, err := kdcDB.PurgeBootstrapTokens()
+		if err != nil {
+			result["error"] = true
+			result["error_msg"] = err.Error()
+			return result, nil
+		}
+		
+		result["count"] = count
+		result["msg"] = fmt.Sprintf("Purged %d bootstrap token(s)", count)
+		
+		if deleteFiles && count > 0 {
+			tokens, _ := kdcDB.ListBootstrapTokens()
+			deletedFiles := 0
+			for _, token := range tokens {
+				status, _ := kdcDB.GetBootstrapTokenStatus(token.NodeID)
+				if status == "expired" || status == "completed" {
+					blobFile := fmt.Sprintf("%s.enroll", token.NodeID)
+					if err := os.Remove(blobFile); err == nil {
+						deletedFiles++
+					}
+				}
+			}
+			if deletedFiles > 0 {
+				result["msg"] = fmt.Sprintf("%s, deleted %d blob file(s)", result["msg"], deletedFiles)
+			}
+		}
+		
+	default:
+		result["error"] = true
+		result["error_msg"] = fmt.Sprintf("Unknown command: %s", command)
+		return result, nil
+	}
+	
+	return result, nil
+}
+
+// Helper function to get KDC config from file
+func getKdcConfig() (*kdc.KdcConf, error) {
+	// Get config file path
+	configPath, err := getKdcConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	
+	// Load KDC config from file
+	return loadKdcConfigFromFile(configPath)
+}
+
+// Enrollment commands
+var kdcNodeEnrollGenerateCmd = &cobra.Command{
+	Use:   "generate --nodeid <nodeid> --outdir <directory> [--comment <comment>]",
+	Short: "Generate an enrollment token and blob file",
+	Long: `Generate an enrollment token for a node and create an enrollment blob file.
+The enrollment blob contains the token, node ID, KDC HPKE public key, enrollment address, and control zone.
+The blob is base64-encoded JSON written to {nodeid}.enroll file in the specified output directory.
+The output directory must exist.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		nodeID, _ := cmd.Flags().GetString("nodeid")
+		if nodeID == "" {
+			log.Fatalf("Error: --nodeid is required")
+		}
+		// Ensure node ID is FQDN
+		nodeID = dns.Fqdn(nodeID)
+		
+		outDir, _ := cmd.Flags().GetString("outdir")
+		if outDir == "" {
+			log.Fatalf("Error: --outdir is required")
+		}
+		
+		// Verify output directory exists
+		info, err := os.Stat(outDir)
+		if err != nil {
+			log.Fatalf("Error: Output directory does not exist or is not accessible: %v", err)
+		}
+		if !info.IsDir() {
+			log.Fatalf("Error: Output path is not a directory: %s", outDir)
+		}
+		
+		comment, _ := cmd.Flags().GetString("comment")
+		
+		// Call API (with fallback to DB)
+		// Note: outdir is not sent to API - CLI writes the file locally
+		req := map[string]interface{}{
+			"command": "generate",
+			"node_id": nodeID,
+		}
+		if comment != "" {
+			req["comment"] = comment
+		}
+		
+		resp, err := callEnrollAPI("generate", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+		
+		// Extract token from response
+		tokenRaw, ok := resp["token"]
+		if !ok {
+			log.Fatalf("Error: No token in response")
+		}
+		
+		// Convert token to BootstrapToken struct
+		tokenJSON, _ := json.Marshal(tokenRaw)
+		var token kdc.BootstrapToken
+		if err := json.Unmarshal(tokenJSON, &token); err != nil {
+			log.Fatalf("Error parsing token: %v", err)
+		}
+		
+		// Extract blob content and write to file
+		blobContent := getString(resp, "blob_content")
+		if blobContent == "" {
+			// Fallback to old blob_path for backward compatibility
+			blobPath := getString(resp, "blob_path")
+			if blobPath != "" {
+				fmt.Printf("Enrollment token generated for node: %s\n", nodeID)
+				fmt.Printf("Token ID: %s\n", token.TokenID)
+				fmt.Printf("Enrollment blob written to: %s\n", blobPath)
+				return
+			}
+			log.Fatalf("Error: No blob content in response")
+		}
+		
+		// Write blob file to specified directory with comment header
+		// Remove trailing dot from FQDN for filename
+		nodeIDForFile := strings.TrimSuffix(nodeID, ".")
+		filename := filepath.Join(outDir, fmt.Sprintf("%s.enroll", nodeIDForFile))
+		var fileContent []byte
+		// Add comment line with timestamp
+		generatedAt := time.Now().Format("2006-01-02 15:04:05")
+		commentLine := fmt.Sprintf("# enrollment package for node \"%s\" generated at %s\n", nodeID, generatedAt)
+		fileContent = append(fileContent, []byte(commentLine)...)
+		// Add base64 content
+		fileContent = append(fileContent, []byte(blobContent)...)
+		fileContent = append(fileContent, '\n') // Add newline at end
+		if err := os.WriteFile(filename, fileContent, 0644); err != nil {
+			log.Fatalf("Error writing enrollment blob file: %v", err)
+		}
+		
+		// Get absolute path for display
+		absPath, err := filepath.Abs(filename)
+		if err != nil {
+			absPath = filename
+		}
+		
+		fmt.Printf("Enrollment token generated for node: %s\n", nodeID)
+		fmt.Printf("Token ID: %s\n", token.TokenID)
+		fmt.Printf("Enrollment blob written to: %s\n", absPath)
+	},
+}
+
+var kdcNodeEnrollActivateCmd = &cobra.Command{
+	Use:   "activate --nodeid <nodeid> [--expiration <duration>]",
+	Short: "Activate an enrollment token",
+	Long: `Activate an enrollment token for a node. This sets the activation timestamp and expiration time.
+The expiration window defaults to 5 minutes if not specified.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		nodeID, _ := cmd.Flags().GetString("nodeid")
+		if nodeID == "" {
+			log.Fatalf("Error: --nodeid is required")
+		}
+		// Ensure node ID is FQDN
+		nodeID = dns.Fqdn(nodeID)
+		
+		expirationStr, _ := cmd.Flags().GetString("expiration")
+		if expirationStr == "" {
+			expirationStr = "5m" // Default
+		}
+		
+		// Call API (with fallback to DB)
+		req := map[string]interface{}{
+			"command":           "activate",
+			"node_id":           nodeID,
+			"expiration_window": expirationStr,
+		}
+		
+		resp, err := callEnrollAPI("activate", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+		
+		fmt.Printf("Enrollment token activated for node: %s\n", nodeID)
+		fmt.Printf("Expiration window: %s\n", expirationStr)
+	},
+}
+
+var kdcNodeEnrollListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all enrollment tokens",
+	Long:  `List all enrollment tokens with their status, node ID, creation time, and expiration time.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Call API (with fallback to DB)
+		req := map[string]interface{}{
+			"command": "list",
+		}
+		
+		resp, err := callEnrollAPI("list", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+		
+		// Extract tokens from response
+		tokensRaw, ok := resp["tokens"]
+		if !ok {
+			fmt.Println("No enrollment tokens found")
+			return
+		}
+		
+		tokensArray, ok := tokensRaw.([]interface{})
+		if !ok {
+			log.Fatalf("Error: Invalid tokens format in response")
+		}
+		
+		if len(tokensArray) == 0 {
+			fmt.Println("No enrollment tokens found")
+			return
+		}
+		
+		// Convert to BootstrapToken structs
+		var tokens []*kdc.BootstrapToken
+		for _, tokenRaw := range tokensArray {
+			tokenJSON, _ := json.Marshal(tokenRaw)
+			var token kdc.BootstrapToken
+			if err := json.Unmarshal(tokenJSON, &token); err == nil {
+				tokens = append(tokens, &token)
+			}
+		}
+		
+		// Display tokens in a table (similar to dnssec key listing)
+		var lines []string
+		lines = append(lines, "Node ID | Token ID | Status | Timestamp | Event")
+		
+		for _, token := range tokens {
+			// Calculate status from token fields
+			var status string
+			if token.Used {
+				status = "completed"
+			} else if !token.Activated {
+				status = "generated"
+			} else if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
+				status = "expired"
+			} else {
+				status = "active"
+			}
+			
+			// Determine timestamp and event based on current state
+			var timestamp, event string
+			if token.Used && token.UsedAt != nil {
+				// Token was used - show when it was used
+				timestamp = token.UsedAt.Format("2006-01-02 15:04:05")
+				event = "enrollment completed"
+			} else if status == "expired" && token.ExpiresAt != nil {
+				// Token expired - show expiration time
+				timestamp = token.ExpiresAt.Format("2006-01-02 15:04:05")
+				event = "expired"
+			} else if token.Activated && token.ActivatedAt != nil {
+				// Token is active - show when it was activated and expiration time
+				timestamp = token.ActivatedAt.Format("2006-01-02 15:04:05")
+				if token.ExpiresAt != nil {
+					expiresStr := token.ExpiresAt.Format("2006-01-02 15:04:05")
+					event = fmt.Sprintf("activated (expires at %s)", expiresStr)
+				} else {
+					event = "activated"
+				}
+			} else {
+				// Token is generated but not activated - show creation time
+				timestamp = token.CreatedAt.Format("2006-01-02 15:04:05")
+				event = "generated enrollment package"
+			}
+			
+			tokenIDDisplay := token.TokenID
+			if len(tokenIDDisplay) > 8 {
+				tokenIDDisplay = tokenIDDisplay[:8] + "..."
+			}
+			
+			line := fmt.Sprintf("%s | %s | %s | %s | %s",
+				token.NodeID, tokenIDDisplay, status, timestamp, event)
+			lines = append(lines, line)
+		}
+		
+		fmt.Println(columnize.SimpleFormat(lines))
+	},
+}
+
+var kdcNodeEnrollPurgeCmd = &cobra.Command{
+	Use:   "purge [--files]",
+	Short: "Purge expired and completed enrollment tokens",
+	Long: `Delete enrollment tokens with status "expired" or "completed".
+Use --files to also delete associated enrollment blob files.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		deleteFiles, _ := cmd.Flags().GetBool("files")
+		
+		// Call API (with fallback to DB)
+		req := map[string]interface{}{
+			"command":      "purge",
+			"delete_files": deleteFiles,
+		}
+		
+		resp, err := callEnrollAPI("purge", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+		
+		msg := getString(resp, "msg")
+		if msg != "" {
+			fmt.Printf("%s\n", msg)
+		} else {
+			count := getInt(resp, "count")
+			fmt.Printf("Purged %d enrollment token(s)\n", count)
+		}
+	},
+}
+
+var kdcNodeEnrollStatusCmd = &cobra.Command{
+	Use:   "status --nodeid <nodeid>",
+	Short: "Show detailed status of an enrollment token",
+	Long:  `Show detailed status information for a specific enrollment token.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		nodeID, _ := cmd.Flags().GetString("nodeid")
+		if nodeID == "" {
+			log.Fatalf("Error: --nodeid is required")
+		}
+		// Ensure node ID is FQDN
+		nodeID = dns.Fqdn(nodeID)
+		
+		// Call API (with fallback to DB)
+		req := map[string]interface{}{
+			"command": "status",
+			"node_id": nodeID,
+		}
+		
+		resp, err := callEnrollAPI("status", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+		
+		status := getString(resp, "status")
+		if status == "not_found" {
+			fmt.Printf("No enrollment token found for node: %s\n", nodeID)
+			return
+		}
+		
+		// Extract token from response
+		tokenRaw, ok := resp["token"]
+		if !ok {
+			fmt.Printf("Enrollment Token Status for Node: %s\n", nodeID)
+			fmt.Printf("  Status: %s\n", status)
+			return
+		}
+		
+		// Convert token to BootstrapToken struct
+		tokenJSON, _ := json.Marshal(tokenRaw)
+		var token kdc.BootstrapToken
+		if err := json.Unmarshal(tokenJSON, &token); err != nil {
+			log.Fatalf("Error parsing token: %v", err)
+		}
+		
+		// Display detailed status
+		fmt.Printf("Bootstrap Token Status for Node: %s\n", nodeID)
+		fmt.Printf("  Status: %s\n", status)
+		fmt.Printf("  Token ID: %s\n", token.TokenID)
+		fmt.Printf("  Created: %s\n", token.CreatedAt.Format(time.RFC3339))
+		if token.ActivatedAt != nil {
+			fmt.Printf("  Activated: %s\n", token.ActivatedAt.Format(time.RFC3339))
+		}
+		if token.ExpiresAt != nil {
+			fmt.Printf("  Expires: %s\n", token.ExpiresAt.Format(time.RFC3339))
+			if time.Now().After(*token.ExpiresAt) {
+				fmt.Printf("  Expired: Yes\n")
+			} else {
+				remaining := time.Until(*token.ExpiresAt)
+				fmt.Printf("  Time remaining: %s\n", remaining)
+			}
+		}
+		fmt.Printf("  Used: %v\n", token.Used)
+		if token.UsedAt != nil {
+			fmt.Printf("  Used at: %s\n", token.UsedAt.Format(time.RFC3339))
+		}
+		if token.Comment != "" {
+			fmt.Printf("  Comment: %s\n", token.Comment)
+		}
+	},
+}
+
 func init() {
 	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd, kdcZoneDnssecDeleteCmd, kdcZoneDnssecHashCmd, kdcZoneDnssecPurgeCmd)
 	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd,
-		kdcZoneTransitionCmd, kdcZoneSetStateCmd, kdcZoneServiceCmd, kdcZoneComponentCmd)
+		kdcZoneTransitionCmd, kdcZoneSetStateCmd, kdcZoneServiceCmd, kdcZoneComponentCmd, KdcZoneCatalogCmd)
+	KdcZoneCatalogCmd.AddCommand(kdcZoneCatalogGenerateCmd)
 	KdcDistribCmd.AddCommand(kdcDistribListCmd, kdcDistribStateCmd, kdcDistribCompletedCmd, kdcDistribSingleCmd, kdcDistribMultiCmd, kdcDistribPurgeCmd)
-	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd, KdcNodeComponentCmd)
 	KdcNodeComponentCmd.AddCommand(kdcNodeComponentAddCmd, kdcNodeComponentDeleteCmd, kdcNodeComponentListCmd)
 	KdcDebugDistribCmd.AddCommand(kdcDebugDistribGenerateCmd, kdcDebugDistribListCmd, kdcDebugDistribDeleteCmd)
 	KdcDebugCmd.AddCommand(kdcDebugHpkeGenerateCmd, kdcDebugHpkeEncryptCmd, kdcDebugHpkeDecryptCmd, 
@@ -3404,8 +4286,30 @@ func init() {
 	KdcServiceTransactionCmd.AddCommand(kdcServiceTxStartCmd, kdcServiceTxViewCmd, kdcServiceTxCommitCmd, kdcServiceTxRollbackCmd, kdcServiceTxStatusCmd, kdcServiceTxListCmd, kdcServiceTxCleanupCmd, kdcServiceTxComponentCmd)
 	kdcServiceTxComponentCmd.AddCommand(kdcServiceTxComponentAddCmd, kdcServiceTxComponentDeleteCmd)
 	KdcComponentCmd.AddCommand(kdcComponentAddCmd, kdcComponentListCmd, kdcComponentDeleteCmd)
+	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd, KdcNodeComponentCmd, KdcNodeEnrollCmd)
+	KdcNodeEnrollCmd.AddCommand(kdcNodeEnrollGenerateCmd, kdcNodeEnrollActivateCmd, kdcNodeEnrollListCmd, kdcNodeEnrollPurgeCmd, kdcNodeEnrollStatusCmd)
+	KdcHpkeCmd.AddCommand(kdcHpkeGenerateCmd)
 	// Commands are added directly to root in main.go, not via KdcCmd
 
+	kdcNodeEnrollGenerateCmd.Flags().String("nodeid", "", "Node ID")
+	kdcNodeEnrollGenerateCmd.MarkFlagRequired("nodeid")
+	kdcNodeEnrollGenerateCmd.Flags().String("outdir", "", "Output directory (must exist)")
+	kdcNodeEnrollGenerateCmd.MarkFlagRequired("outdir")
+	kdcNodeEnrollGenerateCmd.Flags().String("comment", "", "Optional comment")
+	
+	kdcNodeEnrollActivateCmd.Flags().String("nodeid", "", "Node ID")
+	kdcNodeEnrollActivateCmd.MarkFlagRequired("nodeid")
+	kdcNodeEnrollActivateCmd.Flags().String("expiration", "", "Expiration window (e.g., 5m, 1h)")
+	
+	kdcNodeEnrollPurgeCmd.Flags().Bool("files", false, "Also delete enrollment blob files")
+	
+	kdcNodeEnrollStatusCmd.Flags().String("nodeid", "", "Node ID")
+	kdcNodeEnrollStatusCmd.MarkFlagRequired("nodeid")
+
+	// HPKE command flags
+	kdcHpkeGenerateCmd.Flags().String("outfile", "", "Output file path for HPKE private key (required)")
+	kdcHpkeGenerateCmd.MarkFlagRequired("outfile")
+	
 	kdcDistribSingleCmd.Flags().StringP("keyid", "k", "", "Key ID (must be a ZSK in standby state)")
 	kdcDistribSingleCmd.MarkFlagRequired("keyid")
 	
@@ -3571,22 +4475,42 @@ func sendKdcRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 		return nil, fmt.Errorf("error encoding request: %v", err)
 	}
 
+	if tdns.Globals.Debug {
+		fmt.Fprintf(os.Stderr, "DEBUG: Sending POST request to %s\n", endpoint)
+		reqJSON, _ := json.MarshalIndent(data, "", "  ")
+		fmt.Fprintf(os.Stderr, "DEBUG: Request body: %s\n", reqJSON)
+	}
+
 	status, buf, err := api.Post(endpoint, bytebuf.Bytes())
 	if err != nil {
+		if tdns.Globals.Debug {
+			fmt.Fprintf(os.Stderr, "DEBUG: API POST error: %v\n", err)
+		}
 		return nil, fmt.Errorf("error from API POST: %v", err)
 	}
 
 	// Only print status if it's not 200 (success) - useful for debugging errors
 	if status != 200 {
-		if tdns.Globals.Verbose {
-			fmt.Printf("Status: %d\n", status)
+		if tdns.Globals.Verbose || tdns.Globals.Debug {
+			fmt.Fprintf(os.Stderr, "DEBUG: API returned status: %d\n", status)
+			if tdns.Globals.Debug {
+				fmt.Fprintf(os.Stderr, "DEBUG: Response body: %s\n", string(buf))
+			}
 		}
 	}
 
 	if err := json.Unmarshal(buf, &result); err != nil {
+		if tdns.Globals.Debug {
+			fmt.Fprintf(os.Stderr, "DEBUG: JSON decode error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "DEBUG: Response body: %s\n", string(buf))
+		}
 		fmt.Printf("Request: URL: %s, Body: %s\n", endpoint, string(bytebuf.Bytes()))
 		fmt.Printf("Response causing error: %s\n", string(buf))
 		return nil, fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	if tdns.Globals.Debug {
+		fmt.Fprintf(os.Stderr, "DEBUG: API response decoded successfully\n")
 	}
 
 	return result, nil

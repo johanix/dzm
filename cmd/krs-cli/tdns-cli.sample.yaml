@@ -1,0 +1,53 @@
+# Sample configuration file for krs-cli
+#
+# IMPORTANT: This is a sample configuration file. All apiserver configurations
+# for different TDNS CLI tools (kdc-cli, krs-cli, etc.) are intended to be
+# merged into a single tdns-cli.yaml file. That is, the configuration for
+# accessing tdns-kdc and the configuration for accessing tdns-krs should be
+# placed next to each other in the same file, as shown in the example below.
+#
+# Copy this file to /etc/tdns/tdns-cli.yaml (or your preferred location) and
+# customize it for your environment. You can also merge entries from other
+# CLI tool sample configs into this file.
+
+apiservers:
+   # Configuration for tdns-krs (Key Receiving Service)
+   - name:              tdns-krs
+     baseurl:           https://127.0.0.1:8990/api/v1
+     apikey:            winter-is-coming-santa-stuck-in-chimney
+     authmethod:        X-API-Key
+     command:           /usr/local/libexec/tdns-krs
+     config:            /etc/tdns/tdns-krs.yaml
+     # config:          Optional: path to tdns-krs config file
+     #                  Required for commands that need direct database access
+     #                  If not specified, defaults to standard KRS config file location
+
+   # Configuration for tdns-kdc (Key Distribution Center)
+   # Add this entry when you also use kdc-cli
+   # - name:            tdns-kdc
+   #   baseurl:         https://127.0.0.1:8993/api/v1
+   #   apikey:          winter-is-coming-santa-stuck-in-chimney
+   #   authmethod:      X-API-Key
+   #   command:         /usr/local/libexec/tdns-kdc
+   #   config:          /etc/tdns/tdns-kdc.yaml
+
+   # Configuration for other TDNS services (add as needed)
+   # - name:            tdns-auth
+   #   baseurl:         https://127.0.0.1:8989/api/v1
+   #   apikey:          winter-is-coming-santa-stuck-in-chimney
+   #   authmethod:      X-API-Key
+   #   command:         /usr/local/libexec/tdns-auth
+
+keys:
+   tsig:
+      - name:		johani.key.
+        algorithm:	hmac-sha256
+        secret:		fjvJ7KwoL7oX9n+L5sOwYJqyuxS8Jwt5k2M+JIwTQ7E=
+
+      - name:		jonathan.key.
+        algorithm:	hmac-sha256
+        secret:		jkYMg8gccGs1upIgE+tLGAyquXDZyuc06YuFUPoM6Ac=
+
+log:
+   file:		/var/log/tdns/krs-cli.log
+
