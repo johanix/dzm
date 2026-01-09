@@ -78,6 +78,19 @@ type KrsDebugResponse struct {
 	Content  string    `json:"content,omitempty"` // For clear_text or encrypted_text content
 }
 
+// KrsComponentsPost represents a request to the KRS components API
+type KrsComponentsPost struct {
+	Command string `json:"command"` // "list"
+}
+
+// KrsComponentsResponse represents a response from the KRS components API
+type KrsComponentsResponse struct {
+	Time       time.Time `json:"time"`
+	Error      bool      `json:"error,omitempty"`
+	ErrorMsg   string    `json:"error_msg,omitempty"`
+	Components []string  `json:"components,omitempty"`
+}
+
 // sendJSONError sends a JSON-formatted error response
 func sendJSONError(w http.ResponseWriter, statusCode int, errorMsg string) {
 	resp := map[string]interface{}{
@@ -114,11 +127,13 @@ func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *KrsConf, tdnsConf
 		router.Path("/api/v1/krs/config").Headers("X-API-Key", apikey).HandlerFunc(APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
 		router.Path("/api/v1/krs/query").Headers("X-API-Key", apikey).HandlerFunc(APIKrsQuery(krsDB, conf)).Methods("POST")
 		router.Path("/api/v1/krs/debug").Headers("X-API-Key", apikey).HandlerFunc(APIKrsDebug(krsDB, conf)).Methods("POST")
+		router.Path("/api/v1/krs/components").Headers("X-API-Key", apikey).HandlerFunc(APIKrsComponents(krsDB)).Methods("POST")
 	} else {
 		router.Path("/api/v1/krs/keys").HandlerFunc(APIKrsKeys(krsDB)).Methods("POST")
 		router.Path("/api/v1/krs/config").HandlerFunc(APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
 		router.Path("/api/v1/krs/query").HandlerFunc(APIKrsQuery(krsDB, conf)).Methods("POST")
 		router.Path("/api/v1/krs/debug").HandlerFunc(APIKrsDebug(krsDB, conf)).Methods("POST")
+		router.Path("/api/v1/krs/components").HandlerFunc(APIKrsComponents(krsDB)).Methods("POST")
 	}
 }
 
@@ -355,6 +370,40 @@ func APIKrsDebug(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 				if textContent != "" {
 					resp.Content = textContent
 				}
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// APIKrsComponents handles component management endpoints
+func APIKrsComponents(krsDB *KrsDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req KrsComponentsPost
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := KrsComponentsResponse{
+			Time: time.Now(),
+		}
+
+		switch req.Command {
+		case "list":
+			components, err := krsDB.GetNodeComponents()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Components = components
 			}
 
 		default:

@@ -297,6 +297,25 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		log.Printf("KDC: Warning: Failed to migrate state ENUM for active_ce: %v", err)
 	}
 	
+	// Migrate: Add sig0_pubkey column to nodes table
+	if err := kdc.migrateAddSig0PubkeyToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
+	}
+	
+	// Migrate: Create bootstrap_tokens table
+	// This is critical - if it fails, log as error and return error (don't just warn)
+	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
+		log.Printf("KDC: ERROR: Failed to migrate bootstrap_tokens table: %v", err)
+		// Don't return error here - allow daemon to start, but log the error clearly
+		// The table will be created on next startup attempt
+	}
+	
+	// Migrate: Remove FK constraint from bootstrap_tokens if it exists
+	// Bootstrap tokens are created BEFORE nodes exist, so FK constraint is wrong
+	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
+	}
+	
 	// Ensure default service/component exist
 	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
 		return fmt.Errorf("failed to ensure default service/component: %v", err)
@@ -538,6 +557,25 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 	// Migrate: Update state CHECK constraint to include 'active_ce'
 	if err := kdc.migrateAddActiveCEState(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate state CHECK constraint for active_ce: %v", err)
+	}
+	
+	// Migrate: Add sig0_pubkey column to nodes table
+	if err := kdc.migrateAddSig0PubkeyToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
+	}
+	
+	// Migrate: Create bootstrap_tokens table
+	// This is critical - if it fails, log as error (don't just warn)
+	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
+		log.Printf("KDC: ERROR: Failed to migrate bootstrap_tokens table: %v", err)
+		// Don't return error here - allow daemon to start, but log the error clearly
+		// The table will be created on next startup attempt
+	}
+	
+	// Migrate: Remove FK constraint from bootstrap_tokens if it exists
+	// Bootstrap tokens are created BEFORE nodes exist, so FK constraint is wrong
+	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
 	}
 	
 	// Ensure default service/component exist
@@ -1271,8 +1309,8 @@ func (kdc *KdcDB) AddNode(node *Node) error {
 	}
 
 	_, err = kdc.DB.Exec(
-		"INSERT INTO nodes (id, name, long_term_pub_key, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?)",
-		node.ID, node.Name, node.LongTermPubKey, node.NotifyAddress, node.State, node.Comment,
+		"INSERT INTO nodes (id, name, long_term_pub_key, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		node.ID, node.Name, node.LongTermPubKey, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
 	)
 	if err != nil {
 		// Check for unique constraint violation (in case the constraint wasn't in the schema)
@@ -2686,7 +2724,134 @@ func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf
 		}
 	}
 
+	// Create node_components distribution and send NOTIFY
+	if kdcConf != nil {
+		distributionID, err := kdc.CreateNodeComponentsDistribution(nodeID, kdcConf)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to create node_components distribution for node %s: %v", nodeID, err)
+		} else {
+			// Send NOTIFY to the node
+			if kdcConf.ControlZone != "" {
+				if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
+					log.Printf("KDC: Warning: Failed to send NOTIFY for node_components distribution to node %s: %v", nodeID, err)
+				} else {
+					log.Printf("KDC: Sent NOTIFY for node_components distribution (ID: %s) to node %s", distributionID, nodeID)
+				}
+			} else {
+				log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY for node_components distribution")
+			}
+		}
+	} else {
+		log.Printf("KDC: KdcConf not provided, skipping node_components distribution")
+	}
+
 	return nil
+}
+
+// CreateNodeComponentsDistribution creates a distribution for node components
+// This creates a distribution record with content type "node_components"
+// Returns the distribution ID
+func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, kdcConf *KdcConf) (string, error) {
+	// Get the node
+	node, err := kdc.GetNode(nodeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
+	}
+	
+	if len(node.LongTermPubKey) != 32 {
+		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	}
+	
+	// Get current components for this node
+	components, err := kdc.GetComponentsForNode(nodeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get components for node %s: %v", nodeID, err)
+	}
+	
+	// Sort components for consistent output
+	sort.Strings(components)
+	
+	// Prepare JSON structure
+	type ComponentEntry struct {
+		ComponentID string `json:"component_id"`
+	}
+	
+	entries := make([]ComponentEntry, 0, len(components))
+	for _, componentID := range components {
+		entries = append(entries, ComponentEntry{
+			ComponentID: componentID,
+		})
+	}
+	
+	// Marshal to JSON
+	componentsJSON, err := json.Marshal(entries)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal components JSON: %v", err)
+	}
+	
+	// Encrypt the component list using HPKE
+	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt components: %v", err)
+	}
+	
+	// Generate a stable distribution ID based on nodeID
+	// Use hash of nodeID to ensure stability
+	hash := sha256.Sum256([]byte("node_components:" + nodeID))
+	distributionID := hex.EncodeToString(hash[:8]) // 8 bytes = 16 hex chars
+	
+	// Generate a unique ID for this distribution record
+	distRecordID := make([]byte, 16)
+	if _, err := rand.Read(distRecordID); err != nil {
+		return "", fmt.Errorf("failed to generate distribution record ID: %v", err)
+	}
+	distRecordIDHex := hex.EncodeToString(distRecordID)
+	
+	// Calculate expires_at based on DistributionTTL if config is provided
+	var expiresAt *time.Time
+	if kdcConf != nil {
+		ttl := kdcConf.GetDistributionTTL()
+		if ttl > 0 {
+			expires := time.Now().Add(ttl)
+			expiresAt = &expires
+		}
+	}
+	
+	// Store the distribution record in the database
+	// Use zone_name="_node_components" to identify node_components distributions
+	// Use key_id=nodeID to identify which node this is for
+	distRecord := &DistributionRecord{
+		ID:             distRecordIDHex,
+		ZoneName:       "_node_components",
+		KeyID:          nodeID,
+		NodeID:         nodeID,
+		EncryptedKey:   ciphertext,
+		EphemeralPubKey: ephemeralPub,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      expiresAt,
+		Status:         hpke.DistributionStatusPending,
+		DistributionID: distributionID,
+	}
+	
+	// Delete any existing node_components distribution for this node first
+	// (to avoid duplicates)
+	_, err = kdc.DB.Exec(
+		`DELETE FROM distribution_records 
+		 WHERE zone_name = '_node_components' AND key_id = ? AND node_id = ?`,
+		nodeID, nodeID,
+	)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to delete existing node_components distribution for node %s: %v", nodeID, err)
+	}
+	
+	if err := kdc.AddDistributionRecord(distRecord); err != nil {
+		return "", fmt.Errorf("failed to store node_components distribution record: %v", err)
+	}
+	
+	log.Printf("KDC: Created node_components distribution for node %s (distribution ID: %s, %d components)", 
+		nodeID, distributionID, len(components))
+	
+	return distributionID, nil
 }
 
 // RemoveNodeComponentAssignment removes a component from a node
@@ -2710,6 +2875,27 @@ func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcC
 	)
 	if err != nil {
 		return fmt.Errorf("failed to remove node-component assignment: %v", err)
+	}
+
+	// Create node_components distribution and send NOTIFY
+	if kdcConf != nil {
+		distributionID, err := kdc.CreateNodeComponentsDistribution(nodeID, kdcConf)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to create node_components distribution for node %s: %v", nodeID, err)
+		} else {
+			// Send NOTIFY to the node
+			if kdcConf.ControlZone != "" {
+				if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
+					log.Printf("KDC: Warning: Failed to send NOTIFY for node_components distribution to node %s: %v", nodeID, err)
+				} else {
+					log.Printf("KDC: Sent NOTIFY for node_components distribution (ID: %s) to node %s", distributionID, nodeID)
+				}
+			} else {
+				log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY for node_components distribution")
+			}
+		}
+	} else {
+		log.Printf("KDC: KdcConf not provided, skipping node_components distribution")
 	}
 
 	return nil
@@ -3998,5 +4184,321 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *KdcCon
 	}
 
 	return nil
+}
+
+// GenerateBootstrapToken generates a new bootstrap token for a node
+// nodeID: The node ID to generate the token for
+// Returns: BootstrapToken with generated token, error
+func (kdc *KdcDB) GenerateBootstrapToken(nodeID string) (*BootstrapToken, error) {
+	// Generate cryptographically random token (32 bytes = 256 bits)
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate random token: %v", err)
+	}
+	tokenValue := hex.EncodeToString(tokenBytes)
+
+	// Generate token ID (UUID-like format)
+	tokenID := fmt.Sprintf("%s-%d", nodeID, time.Now().UnixNano())
+
+	// Insert token into database
+	var query string
+	if kdc.DBType == "sqlite" {
+		query = `INSERT INTO bootstrap_tokens 
+			(token_id, token_value, node_id, created_at, activated, used, created_by, comment)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	} else {
+		query = `INSERT INTO bootstrap_tokens 
+			(token_id, token_value, node_id, created_at, activated, used, created_by, comment)
+			VALUES (?, ?, ?, NOW(), ?, ?, ?, ?)`
+	}
+
+	_, err := kdc.DB.Exec(query, tokenID, tokenValue, nodeID, time.Now(), false, false, "", "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert bootstrap token: %v", err)
+	}
+
+	// Retrieve the created token
+	token, err := kdc.getBootstrapTokenByValue(tokenValue)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve created token: %v", err)
+	}
+
+	log.Printf("KDC: Generated bootstrap token for node %s (token_id: %s)", nodeID, tokenID)
+	return token, nil
+}
+
+// ActivateBootstrapToken activates a bootstrap token for a node
+// nodeID: The node ID
+// expirationWindow: How long until the token expires after activation
+// Returns: error
+func (kdc *KdcDB) ActivateBootstrapToken(nodeID string, expirationWindow time.Duration) error {
+	// Find the token for this node
+	var query string
+	if kdc.DBType == "sqlite" {
+		query = `SELECT token_id FROM bootstrap_tokens 
+			WHERE node_id = ? AND activated = 0 AND used = 0
+			ORDER BY created_at DESC LIMIT 1`
+	} else {
+		query = `SELECT token_id FROM bootstrap_tokens 
+			WHERE node_id = ? AND activated = FALSE AND used = FALSE
+			ORDER BY created_at DESC LIMIT 1`
+	}
+
+	var tokenID string
+	err := kdc.DB.QueryRow(query, nodeID).Scan(&tokenID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("no inactive token found for node %s", nodeID)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to query bootstrap token: %v", err)
+	}
+
+	// Activate the token
+	now := time.Now()
+	expiresAt := now.Add(expirationWindow)
+
+	var updateQuery string
+	if kdc.DBType == "sqlite" {
+		updateQuery = `UPDATE bootstrap_tokens 
+			SET activated = 1, activated_at = ?, expires_at = ?
+			WHERE token_id = ?`
+	} else {
+		updateQuery = `UPDATE bootstrap_tokens 
+			SET activated = TRUE, activated_at = ?, expires_at = ?
+			WHERE token_id = ?`
+	}
+
+	_, err = kdc.DB.Exec(updateQuery, now, expiresAt, tokenID)
+	if err != nil {
+		return fmt.Errorf("failed to activate bootstrap token: %v", err)
+	}
+
+	log.Printf("KDC: Activated bootstrap token for node %s (expires at %s)", nodeID, expiresAt.Format(time.RFC3339))
+	return nil
+}
+
+// ValidateBootstrapToken validates a bootstrap token
+// tokenValue: The token value to validate
+// Returns: BootstrapToken if valid, error if invalid or not found
+func (kdc *KdcDB) ValidateBootstrapToken(tokenValue string) (*BootstrapToken, error) {
+	token, err := kdc.getBootstrapTokenByValue(tokenValue)
+	if err != nil {
+		return nil, fmt.Errorf("token not found: %v", err)
+	}
+
+	// Check if token is activated
+	if !token.Activated {
+		return nil, fmt.Errorf("token is not activated")
+	}
+
+	// Check if token is expired
+	if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
+		return nil, fmt.Errorf("token has expired")
+	}
+
+	// Check if token is already used
+	if token.Used {
+		return nil, fmt.Errorf("token has already been used")
+	}
+
+	return token, nil
+}
+
+// GetBootstrapTokenStatus returns the status of a bootstrap token for a node
+// nodeID: The node ID
+// Returns: status string ("generated", "active", "expired", "completed", "not_found"), error
+func (kdc *KdcDB) GetBootstrapTokenStatus(nodeID string) (string, error) {
+	var query string
+	if kdc.DBType == "sqlite" {
+		query = `SELECT activated, used, expires_at FROM bootstrap_tokens 
+			WHERE node_id = ? ORDER BY created_at DESC LIMIT 1`
+	} else {
+		query = `SELECT activated, used, expires_at FROM bootstrap_tokens 
+			WHERE node_id = ? ORDER BY created_at DESC LIMIT 1`
+	}
+
+	var activated bool
+	var used bool
+	var expiresAt sql.NullTime
+
+	err := kdc.DB.QueryRow(query, nodeID).Scan(&activated, &used, &expiresAt)
+	if err == sql.ErrNoRows {
+		return "not_found", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to query bootstrap token: %v", err)
+	}
+
+	// Calculate status
+	if used {
+		return "completed", nil
+	}
+
+	if !activated {
+		return "generated", nil
+	}
+
+	if expiresAt.Valid && time.Now().After(expiresAt.Time) {
+		return "expired", nil
+	}
+
+	return "active", nil
+}
+
+// ListBootstrapTokens returns all bootstrap tokens with their calculated status
+// Returns: slice of BootstrapToken with status, error
+func (kdc *KdcDB) ListBootstrapTokens() ([]*BootstrapToken, error) {
+	query := `SELECT token_id, token_value, node_id, created_at, activated_at, expires_at, 
+		activated, used, used_at, created_by, comment
+		FROM bootstrap_tokens ORDER BY created_at DESC`
+
+	rows, err := kdc.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query bootstrap tokens: %v", err)
+	}
+	defer rows.Close()
+
+	var tokens []*BootstrapToken
+	for rows.Next() {
+		token, err := kdc.scanBootstrapToken(rows)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to scan bootstrap token: %v", err)
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating bootstrap tokens: %v", err)
+	}
+
+	return tokens, nil
+}
+
+// PurgeBootstrapTokens deletes tokens with status "expired" or "completed"
+// Returns: number of tokens purged, error
+func (kdc *KdcDB) PurgeBootstrapTokens() (int, error) {
+	var query string
+	if kdc.DBType == "sqlite" {
+		query = `DELETE FROM bootstrap_tokens 
+			WHERE (activated = 1 AND expires_at IS NOT NULL AND expires_at < ?) 
+			OR used = 1`
+	} else {
+		query = `DELETE FROM bootstrap_tokens 
+			WHERE (activated = TRUE AND expires_at IS NOT NULL AND expires_at < NOW()) 
+			OR used = TRUE`
+	}
+
+	var result sql.Result
+	var err error
+	if kdc.DBType == "sqlite" {
+		result, err = kdc.DB.Exec(query, time.Now())
+	} else {
+		result, err = kdc.DB.Exec(query)
+	}
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to purge bootstrap tokens: %v", err)
+	}
+
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected: %v", err)
+	}
+
+	if count > 0 {
+		log.Printf("KDC: Purged %d bootstrap token(s)", count)
+	}
+
+	return int(count), nil
+}
+
+// MarkBootstrapTokenUsed marks a bootstrap token as used
+// tokenValue: The token value to mark as used
+// Returns: error
+func (kdc *KdcDB) MarkBootstrapTokenUsed(tokenValue string) error {
+	var query string
+	if kdc.DBType == "sqlite" {
+		query = `UPDATE bootstrap_tokens 
+			SET used = 1, used_at = ? WHERE token_value = ?`
+	} else {
+		query = `UPDATE bootstrap_tokens 
+			SET used = TRUE, used_at = ? WHERE token_value = ?`
+	}
+
+	result, err := kdc.DB.Exec(query, time.Now(), tokenValue)
+	if err != nil {
+		return fmt.Errorf("failed to mark token as used: %v", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %v", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("token not found: %s", tokenValue)
+	}
+
+	log.Printf("KDC: Marked bootstrap token as used (token_value: %s)", tokenValue)
+	return nil
+}
+
+// Helper function to get bootstrap token by value
+func (kdc *KdcDB) getBootstrapTokenByValue(tokenValue string) (*BootstrapToken, error) {
+	query := `SELECT token_id, token_value, node_id, created_at, activated_at, expires_at, 
+		activated, used, used_at, created_by, comment
+		FROM bootstrap_tokens WHERE token_value = ?`
+
+	row := kdc.DB.QueryRow(query, tokenValue)
+	return kdc.scanBootstrapToken(row)
+}
+
+// Helper function to scan bootstrap token from database row
+func (kdc *KdcDB) scanBootstrapToken(scanner interface{}) (*BootstrapToken, error) {
+	var token BootstrapToken
+	var activatedAt, expiresAt, usedAt sql.NullTime
+	var createdBy, comment sql.NullString
+
+	var err error
+	switch s := scanner.(type) {
+	case *sql.Row:
+		err = s.Scan(
+			&token.TokenID, &token.TokenValue, &token.NodeID, &token.CreatedAt,
+			&activatedAt, &expiresAt, &token.Activated, &token.Used, &usedAt,
+			&createdBy, &comment,
+		)
+	case *sql.Rows:
+		err = s.Scan(
+			&token.TokenID, &token.TokenValue, &token.NodeID, &token.CreatedAt,
+			&activatedAt, &expiresAt, &token.Activated, &token.Used, &usedAt,
+			&createdBy, &comment,
+		)
+	default:
+		return nil, fmt.Errorf("unsupported scanner type")
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert nullable fields
+	if activatedAt.Valid {
+		token.ActivatedAt = &activatedAt.Time
+	}
+	if expiresAt.Valid {
+		token.ExpiresAt = &expiresAt.Time
+	}
+	if usedAt.Valid {
+		token.UsedAt = &usedAt.Time
+	}
+	if createdBy.Valid {
+		token.CreatedBy = createdBy.String
+	}
+	if comment.Valid {
+		token.Comment = comment.String
+	}
+
+	return &token, nil
 }
 

@@ -59,7 +59,7 @@ func init() {
 
 	// Add all KDC commands directly to root (no "kdc" prefix needed)
 	rootCmd.AddCommand(cli.KdcZoneCmd, cli.KdcNodeCmd, cli.KdcConfigCmd, cli.KdcDebugCmd, 
-		cli.KdcDistribCmd, cli.KdcServiceCmd, cli.KdcComponentCmd, cli.PingCmd, cli.DaemonCmd)
+		cli.KdcDistribCmd, cli.KdcServiceCmd, cli.KdcComponentCmd, cli.KdcHpkeCmd, cli.PingCmd, cli.DaemonCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -123,6 +123,7 @@ type ApiDetails struct {
 	ApiKey     string `validate:"required" yaml:"apikey"`
 	AuthMethod string `validate:"required" yaml:"authmethod"`
 	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon
+	Config     string `yaml:"config,omitempty"` // Optional: path to service config file
 }
 
 func initApi() {

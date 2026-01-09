@@ -450,6 +450,8 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		return ProcessZoneList(krsDB, reassembled)
 	case "encrypted_keys":
 		return ProcessEncryptedKeys(krsDB, conf, reassembled, distributionID, retireTime)
+	case "node_components":
+		return ProcessNodeComponents(krsDB, conf, reassembled, distributionID)
 	default:
 		return fmt.Errorf("unknown content type: %s", contentType)
 	}
@@ -894,6 +896,112 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		} else {
 			log.Printf("KRS: Warning: KDC address not configured, cannot send confirmation NOTIFY")
 		}
+	}
+
+	return nil
+}
+
+// ProcessNodeComponents processes node_components content
+// Data is base64-encoded encrypted payload containing the component list
+// The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
+// distributionID is optional and can be passed from the manifest metadata
+func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string) error {
+	distID := distributionID
+	// Step 1: Decode base64 to get encrypted data
+	log.Printf("KRS: Processing node_components content (%d bytes base64)", len(data))
+	encryptedData, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		return fmt.Errorf("failed to decode base64 encrypted payload: %v", err)
+	}
+	log.Printf("KRS: Decoded encrypted data: %d bytes", len(encryptedData))
+
+	// Step 2: Load node's private key for decryption
+	if conf.Node.LongTermPrivKey == "" {
+		return fmt.Errorf("node long-term private key not configured")
+	}
+
+	privKeyData, err := os.ReadFile(conf.Node.LongTermPrivKey)
+	if err != nil {
+		return fmt.Errorf("failed to read private key file %s: %v", conf.Node.LongTermPrivKey, err)
+	}
+
+	// Parse private key (skip comments, decode hex)
+	privKeyLines := strings.Split(string(privKeyData), "\n")
+	var privKeyHex string
+	for _, line := range privKeyLines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			privKeyHex += line
+		}
+	}
+
+	if privKeyHex == "" {
+		return fmt.Errorf("could not find private key in file %s", conf.Node.LongTermPrivKey)
+	}
+
+	privateKey, err := hex.DecodeString(privKeyHex)
+	if err != nil {
+		return fmt.Errorf("failed to decode hex private key: %v", err)
+	}
+
+	if len(privateKey) != 32 {
+		return fmt.Errorf("private key must be 32 bytes (got %d)", len(privateKey))
+	}
+
+	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
+
+	// Step 3: Decrypt the entire payload
+	// Format from KDC: <ephemeral_pub_key (32 bytes)><ciphertext>
+	// Where ciphertext from hpke.Encrypt is: <encapsulated_key (32 bytes)><encrypted_data>
+	// Note: For X25519, ephemeralPub == encapsulated_key (they're the same)
+	// So the format is: <ephemeralPub (32 bytes)><encapsulated_key (32 bytes)><encrypted_data>
+	// We need to skip the first 32 bytes (duplicate) and pass the rest to hpke.Decrypt
+	if len(encryptedData) < 64 {
+		return fmt.Errorf("encrypted data too short: %d bytes (expected at least 64: 32 for ephemeral + 32 for encapsulated key)", len(encryptedData))
+	}
+
+	// Extract the actual ciphertext (skip first 32 bytes which is duplicate ephemeralPub)
+	// The ciphertext from hpke.Encrypt already includes the encapsulated key
+	actualCiphertext := encryptedData[32:]
+
+	log.Printf("KRS: Encrypted payload: total %d bytes, skipping first 32 bytes (duplicate ephemeralPub), ciphertext %d bytes", 
+		len(encryptedData), len(actualCiphertext))
+
+	// Decrypt using HPKE
+	// hpke.Decrypt expects: <encapsulated_key (32 bytes)><encrypted_data>
+	plaintextJSON, err := hpke.Decrypt(privateKey, nil, actualCiphertext)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt distribution payload: %v", err)
+	}
+
+	log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
+
+	// Step 4: Parse JSON structure (cleartext)
+	type ComponentEntry struct {
+		ComponentID string `json:"component_id"`
+	}
+
+	var entries []ComponentEntry
+	if err := json.Unmarshal(plaintextJSON, &entries); err != nil {
+		return fmt.Errorf("failed to unmarshal decrypted components JSON: %v", err)
+	}
+
+	log.Printf("KRS: Parsed %d component entries from decrypted payload", len(entries))
+
+	// Step 5: Store component assignments in the database
+	componentIDs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		componentIDs = append(componentIDs, entry.ComponentID)
+		log.Printf("KRS: Node should serve component: %s", entry.ComponentID)
+	}
+
+	log.Printf("KRS: Node component list updated: %d component(s) - %v", len(componentIDs), componentIDs)
+	log.Printf("KRS: Distribution ID: %s", distID)
+
+	// Store components in the database
+	if err := krsDB.StoreNodeComponents(componentIDs, distID); err != nil {
+		log.Printf("KRS: Warning: Failed to store components in database: %v", err)
+		// Don't fail the entire process if storage fails
 	}
 
 	return nil

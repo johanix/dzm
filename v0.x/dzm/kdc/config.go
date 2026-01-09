@@ -21,6 +21,10 @@ type KdcConf struct {
 	RetireTime time.Duration `yaml:"retire_time" mapstructure:"retire_time"` // Time to wait before retired -> removed
 	DistributionTTL time.Duration `yaml:"distribution_ttl" mapstructure:"distribution_ttl"` // TTL for distributions (default: 5 minutes, like TSIG)
 	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"` // Maximum RDATA size per OLDCHUNK (bytes, default: 60000)
+	KdcHpkePrivKey string `yaml:"kdc_hpke_priv_key" mapstructure:"kdc_hpke_priv_key"` // Path to KDC HPKE private key file
+	KdcBootstrapAddress string `yaml:"kdc_bootstrap_address" mapstructure:"kdc_bootstrap_address"` // IP:port where KDC accepts bootstrap requests
+	BootstrapExpirationWindow time.Duration `yaml:"bootstrap_expiration_window" mapstructure:"bootstrap_expiration_window"` // Expiration window after activation (default: 5 minutes)
+	CatalogZone string `yaml:"catalog_zone" mapstructure:"catalog_zone"` // Catalog zone name (e.g., "catalog.example.com.")
 }
 
 // DatabaseConf represents database configuration
@@ -43,5 +47,13 @@ func (conf *KdcConf) GetDistributionTTL() time.Duration {
 		return 5 * time.Minute // Default: 5 minutes (like TSIG signatures)
 	}
 	return conf.DistributionTTL
+}
+
+// GetBootstrapExpirationWindow returns the configured bootstrap expiration window, or default (5 minutes) if not set
+func (conf *KdcConf) GetBootstrapExpirationWindow() time.Duration {
+	if conf.BootstrapExpirationWindow <= 0 {
+		return 5 * time.Minute // Default: 5 minutes
+	}
+	return conf.BootstrapExpirationWindow
 }
 

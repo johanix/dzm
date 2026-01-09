@@ -62,6 +62,8 @@ func main() {
 	// Initialize KRS (replaces conf.StartKrs())
 	err = startKrs(ctx, conf, apirouter)
 	if err != nil {
+		// Print error to stdout/stderr for visibility
+		fmt.Fprintf(os.Stderr, "FATAL: Error starting KRS: %v\n", err)
 		tdns.Shutdowner(conf, fmt.Sprintf("Error starting KRS: %v", err))
 	}
 
@@ -92,6 +94,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	// Initialize KRS database
 	krsDB, err := krs.NewKrsDB(krsConf.Database.DSN)
 	if err != nil {
+		// Return detailed error message (already includes helpful instructions)
 		return fmt.Errorf("failed to initialize KRS database: %v", err)
 	}
 	conf.Internal.KrsDB = krsDB

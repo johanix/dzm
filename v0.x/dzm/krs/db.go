@@ -11,9 +11,12 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/johanix/dzm/v0.x/dzm"
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
@@ -25,6 +28,18 @@ type KrsDB struct {
 // NewKrsDB creates a new KRS database connection
 // dsn should be a SQLite file path
 func NewKrsDB(dsn string) (*KrsDB, error) {
+	// Ensure the database directory exists
+	if err := dzm.EnsureDatabaseDirectory(dsn); err != nil {
+		return nil, err
+	}
+	dbDir := filepath.Dir(dsn)
+	if dbDir != "." && dbDir != "" {
+		// Log if directory was created (check if it exists now)
+		if _, err := os.Stat(dbDir); err == nil {
+			log.Printf("KRS: Database directory ready: %s", dbDir)
+		}
+	}
+
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
@@ -32,6 +47,14 @@ func NewKrsDB(dsn string) (*KrsDB, error) {
 
 	// Test the connection
 	if err := db.Ping(); err != nil {
+		// Check if it's a permission issue
+		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "readonly") {
+			return nil, fmt.Errorf("cannot access database file %s: %v\n"+
+				"This may be a permissions issue. Please check:\n"+
+				"  1. The database file and directory are readable/writable\n"+
+				"  2. The user running tdns-krs has appropriate permissions\n"+
+				"  3. If the file doesn't exist, ensure the directory is writable", dsn, err)
+		}
 		return nil, fmt.Errorf("failed to ping database: %v", err)
 	}
 
@@ -85,6 +108,13 @@ func (krs *KrsDB) initSchema() error {
 			control_zone TEXT NOT NULL,
 			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		// Node components table (stores component assignments received from KDC)
+		`CREATE TABLE IF NOT EXISTS node_components (
+			component_id TEXT PRIMARY KEY,
+			received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			distribution_id TEXT
 		)`,
 
 		// Create indexes
@@ -240,6 +270,69 @@ func (krs *KrsDB) GetAllReceivedKeys() ([]*ReceivedKey, error) {
 	}
 
 	return keys, nil
+}
+
+// StoreNodeComponents stores the list of component IDs for this node
+// This replaces any existing component assignments
+func (krs *KrsDB) StoreNodeComponents(componentIDs []string, distributionID string) error {
+	// Start a transaction
+	tx, err := krs.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	// Delete all existing components
+	_, err = tx.Exec("DELETE FROM node_components")
+	if err != nil {
+		return fmt.Errorf("failed to delete existing components: %v", err)
+	}
+
+	// Insert new components
+	stmt, err := tx.Prepare("INSERT INTO node_components (component_id, distribution_id, received_at) VALUES (?, ?, CURRENT_TIMESTAMP)")
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert statement: %v", err)
+	}
+	defer stmt.Close()
+
+	for _, componentID := range componentIDs {
+		_, err = stmt.Exec(componentID, distributionID)
+		if err != nil {
+			return fmt.Errorf("failed to insert component %s: %v", componentID, err)
+		}
+	}
+
+	// Commit transaction
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	log.Printf("KRS: Stored %d component(s) in database (distribution ID: %s)", len(componentIDs), distributionID)
+	return nil
+}
+
+// GetNodeComponents retrieves all component IDs for this node
+func (krs *KrsDB) GetNodeComponents() ([]string, error) {
+	rows, err := krs.DB.Query("SELECT component_id FROM node_components ORDER BY component_id")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query components: %v", err)
+	}
+	defer rows.Close()
+
+	var components []string
+	for rows.Next() {
+		var componentID string
+		if err := rows.Scan(&componentID); err != nil {
+			return nil, fmt.Errorf("failed to scan component: %v", err)
+		}
+		components = append(components, componentID)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating components: %v", err)
+	}
+
+	return components, nil
 }
 
 // UpdateReceivedKeyState updates the state of a received key

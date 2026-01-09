@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/miekg/dns"
 )
 
@@ -1234,6 +1236,31 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 	}
 }
 
+// KdcBootstrapPost represents a request to the KDC bootstrap API
+type KdcBootstrapPost struct {
+	Command          string        `json:"command"`           // "generate", "activate", "list", "status", "purge", "mark-used"
+	NodeID           string        `json:"node_id,omitempty"` // For generate, activate, status commands
+	TokenValue       string        `json:"token_value,omitempty"` // For mark-used command
+	ExpirationWindow string        `json:"expiration_window,omitempty"` // For activate command (e.g., "5m", "1h")
+	Comment          string        `json:"comment,omitempty"` // For generate command
+	OutDir           string        `json:"outdir,omitempty"` // Deprecated: CLI writes the file, not the API
+	DeleteFiles      bool          `json:"delete_files,omitempty"` // For purge command
+}
+
+// KdcBootstrapResponse represents a response from the KDC bootstrap API
+type KdcBootstrapResponse struct {
+	Time        time.Time        `json:"time"`
+	Error       bool             `json:"error,omitempty"`
+	ErrorMsg    string           `json:"error_msg,omitempty"`
+	Msg         string           `json:"msg,omitempty"`
+	Token       *BootstrapToken  `json:"token,omitempty"`
+	Tokens      []*BootstrapToken `json:"tokens,omitempty"`
+	Status      string           `json:"status,omitempty"`
+	BlobPath    string           `json:"blob_path,omitempty"`    // For generate command (deprecated - use blob_content)
+	BlobContent string           `json:"blob_content,omitempty"` // For generate command: base64-encoded blob content
+	Count       int              `json:"count,omitempty"`        // For purge command
+}
+
 // KdcConfigPost represents a request to the KDC config API
 type KdcConfigPost struct {
 	Command string `json:"command"` // "get"
@@ -1245,6 +1272,202 @@ type KdcConfigResponse struct {
 	Error    bool                   `json:"error,omitempty"`
 	ErrorMsg string                 `json:"error_msg,omitempty"`
 	Config   map[string]interface{} `json:"config,omitempty"`
+}
+
+// APIKdcBootstrap handles bootstrap token management endpoints
+func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req KdcBootstrapPost
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := KdcBootstrapResponse{
+			Time: time.Now(),
+		}
+
+		switch req.Command {
+		case "generate":
+			if req.NodeID == "" {
+				sendJSONError(w, http.StatusBadRequest, "node_id is required for generate command")
+				return
+			}
+			
+			// Check if node already exists and is active
+			existingNode, err := kdcDB.GetNode(req.NodeID)
+			if err == nil {
+				// Node exists - check if it's in an active state
+				if existingNode.State == NodeStateOnline {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Node %s already exists and is online. Cannot generate bootstrap blob for an active node. Delete the node first (kdc-cli node delete --nodeid %s) or set it to a non-active state (suspended/offline) before re-bootstrapping.", req.NodeID, req.NodeID)
+					break
+				}
+				// Node exists but is not online (offline, suspended, compromised) - allow re-bootstrap
+				// This is intentional - nodes in these states may need to re-bootstrap
+			}
+			// If node doesn't exist (err != nil), that's fine - it's a new node
+			
+			// Check if token already exists
+			status, err := kdcDB.GetBootstrapTokenStatus(req.NodeID)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else if status != "not_found" {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Bootstrap token already exists for node %s (status: %s)", req.NodeID, status)
+			} else {
+				// Generate token
+				token, err := kdcDB.GenerateBootstrapToken(req.NodeID)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					resp.Token = token
+					resp.Msg = fmt.Sprintf("Bootstrap token generated for node: %s", req.NodeID)
+					
+					// Generate bootstrap blob content (CLI will write the file)
+					blobContent, err := GenerateBootstrapBlobContent(req.NodeID, token, kdcConf)
+					if err != nil {
+						// Set error in response - blob generation is required
+						resp.Error = true
+						resp.ErrorMsg = err.Error()
+						// Token was already created, but blob generation failed
+						// This is a critical error since the blob is required for bootstrap
+					} else {
+						resp.BlobContent = blobContent
+					}
+				}
+			}
+
+		case "activate":
+			if req.NodeID == "" {
+				sendJSONError(w, http.StatusBadRequest, "node_id is required for activate command")
+				return
+			}
+			
+			expirationWindow := kdcConf.GetBootstrapExpirationWindow()
+			if req.ExpirationWindow != "" {
+				var err error
+				expirationWindow, err = time.ParseDuration(req.ExpirationWindow)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Invalid expiration_window format: %v", err)
+					break
+				}
+			}
+			
+			// Check token status
+			status, err := kdcDB.GetBootstrapTokenStatus(req.NodeID)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else if status == "not_found" {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("No bootstrap token found for node %s", req.NodeID)
+			} else if status == "active" {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Bootstrap token for node %s is already activated", req.NodeID)
+			} else if status == "completed" {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Bootstrap token for node %s has already been used", req.NodeID)
+			} else {
+				err := kdcDB.ActivateBootstrapToken(req.NodeID, expirationWindow)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					resp.Msg = fmt.Sprintf("Bootstrap token activated for node: %s", req.NodeID)
+				}
+			}
+
+		case "list":
+			tokens, err := kdcDB.ListBootstrapTokens()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Tokens = tokens
+				resp.Msg = fmt.Sprintf("Found %d bootstrap token(s)", len(tokens))
+			}
+
+		case "status":
+			if req.NodeID == "" {
+				sendJSONError(w, http.StatusBadRequest, "node_id is required for status command")
+				return
+			}
+			
+			status, err := kdcDB.GetBootstrapTokenStatus(req.NodeID)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Status = status
+				if status != "not_found" {
+					// Get token details
+					tokens, err := kdcDB.ListBootstrapTokens()
+					if err == nil {
+						for _, t := range tokens {
+							if t.NodeID == req.NodeID {
+								resp.Token = t
+								break
+							}
+						}
+					}
+				}
+			}
+
+		case "purge":
+			count, err := kdcDB.PurgeBootstrapTokens()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Count = count
+				resp.Msg = fmt.Sprintf("Purged %d bootstrap token(s)", count)
+				
+				// Optionally delete blob files
+				if req.DeleteFiles && count > 0 {
+					tokens, _ := kdcDB.ListBootstrapTokens()
+					deletedFiles := 0
+					for _, token := range tokens {
+						status, _ := kdcDB.GetBootstrapTokenStatus(token.NodeID)
+						if status == "expired" || status == "completed" {
+							blobFile := fmt.Sprintf("%s.bootstrap", token.NodeID)
+							if err := os.Remove(blobFile); err == nil {
+								deletedFiles++
+							}
+						}
+					}
+					if deletedFiles > 0 {
+						resp.Msg += fmt.Sprintf(", deleted %d blob file(s)", deletedFiles)
+					}
+				}
+			}
+
+		case "mark-used":
+			if req.TokenValue == "" {
+				sendJSONError(w, http.StatusBadRequest, "token_value is required for mark-used command")
+				return
+			}
+			
+			err := kdcDB.MarkBootstrapTokenUsed(req.TokenValue)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Bootstrap token marked as used")
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
 }
 
 // APIKdcConfig handles KDC configuration endpoints
@@ -2342,6 +2565,57 @@ func APIKdcServiceTransaction(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	}
 }
 
+// APIKdcCatalog handles catalog zone generation endpoints
+func APIKdcCatalog(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Command string `json:"command"` // "generate"
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := map[string]interface{}{
+			"time": time.Now(),
+		}
+
+		switch req.Command {
+		case "generate":
+			if kdcConf.CatalogZone == "" {
+				resp["error"] = true
+				resp["error_msg"] = "catalog_zone is not configured in KDC config file (expected under 'kdc.catalog_zone')"
+			} else {
+				catalogZoneName := kdcConf.CatalogZone
+				if !dns.IsFqdn(catalogZoneName) {
+					catalogZoneName = dns.Fqdn(catalogZoneName)
+				}
+
+				log.Printf("KDC API: Generating catalog zone: %s", catalogZoneName)
+				// Get DnsEngine addresses from tdns.Conf
+				dnsEngineAddresses := tdns.Conf.DnsEngine.Addresses
+				zd, err := kdcDB.GenerateCatalogZone(catalogZoneName, dnsEngineAddresses)
+				if err != nil {
+					resp["error"] = true
+					resp["error_msg"] = err.Error()
+				} else {
+					resp["msg"] = fmt.Sprintf("Catalog zone '%s' generated successfully", catalogZoneName)
+					resp["serial"] = zd.CurrentSerial
+					resp["zone_name"] = catalogZoneName
+				}
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
 // pingHandler is the ping endpoint handler function
 func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingHandler http.HandlerFunc) {
 	if kdcDB == nil {
@@ -2389,6 +2663,7 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 		router.Path("/api/v1/kdc/service-component").Headers("X-API-Key", apikey).HandlerFunc(APIKdcServiceComponent(kdcDB)).Methods("POST")
 		router.Path("/api/v1/kdc/node-component").Headers("X-API-Key", apikey).HandlerFunc(APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
 		if kdcConf != nil {
+			router.Path("/api/v1/kdc/bootstrap").Headers("X-API-Key", apikey).HandlerFunc(APIKdcBootstrap(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/service-transaction").Headers("X-API-Key", apikey).HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/config").Headers("X-API-Key", apikey).HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
 			router.Path("/api/v1/kdc/debug").Headers("X-API-Key", apikey).HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
@@ -2402,12 +2677,22 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 		router.Path("/api/v1/kdc/service-component").HandlerFunc(APIKdcServiceComponent(kdcDB)).Methods("POST")
 		router.Path("/api/v1/kdc/node-component").HandlerFunc(APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
 		if kdcConf != nil {
+			router.Path("/api/v1/kdc/bootstrap").HandlerFunc(APIKdcBootstrap(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/service-transaction").HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/config").HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
 			router.Path("/api/v1/kdc/debug").HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
 		}
 	}
 	
-	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug")
+	// Register catalog zone route (requires kdcConf)
+	if kdcConf != nil {
+		if apikey != "" {
+			router.Path("/api/v1/kdc/catalog").Headers("X-API-Key", apikey).HandlerFunc(APIKdcCatalog(kdcDB, kdcConf)).Methods("POST")
+		} else {
+			router.Path("/api/v1/kdc/catalog").HandlerFunc(APIKdcCatalog(kdcDB, kdcConf)).Methods("POST")
+		}
+	}
+	
+	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/bootstrap, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug, /api/v1/kdc/catalog")
 }
 

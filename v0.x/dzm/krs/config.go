@@ -25,6 +25,7 @@ type NodeConf struct {
 	ID              string `yaml:"id" mapstructure:"id" validate:"required"`              // Node ID (must match KDC)
 	LongTermPrivKey string `yaml:"long_term_priv_key" mapstructure:"long_term_priv_key" validate:"required"` // Path to HPKE long-term private key file
 	KdcAddress      string `yaml:"kdc_address" mapstructure:"kdc_address" validate:"required"` // KDC server address (IP:port)
+	KdcHpkePubKey   string `yaml:"kdc_hpke_pubkey,omitempty" mapstructure:"kdc_hpke_pubkey"` // KDC HPKE public key (hex encoded, for future communications)
 }
 
 // DnsEngineConf represents DNS engine configuration for NOTIFY receiver

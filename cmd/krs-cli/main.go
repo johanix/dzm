@@ -43,7 +43,7 @@ func init() {
 	cobra.OnInitialize(initConfig, initApi)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
-		fmt.Sprintf("config file (default is %s)", tdns.DefaultCliCfgFile))
+		fmt.Sprintf("config file (default is %s)", tdns.DefaultKrsCfgFile))
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
 
@@ -58,8 +58,9 @@ func init() {
 	cli.SetClientKey("tdns-krs")
 
 	// Add all KRS commands directly to root (no "krs" prefix needed)
+	// Note: bootstrap command is added separately since it doesn't require config initialization
 	rootCmd.AddCommand(cli.KrsDnssecCmd, cli.KrsConfigCmd, cli.KrsQueryCmd, cli.KrsDebugCmd, 
-		cli.PingCmd, cli.DaemonCmd)
+		cli.PingCmd, cli.DaemonCmd, cli.KrsEnrollCmd, cli.KrsComponentsCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -68,7 +69,8 @@ func initConfig() {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		viper.SetConfigFile(tdns.DefaultCliCfgFile)
+		// Default to tdns-krs.yaml (KRS daemon config file)
+		viper.SetConfigFile(tdns.DefaultKrsCfgFile)
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -83,72 +85,75 @@ func initConfig() {
 		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
 	}
 
-	LocalConfig = viper.GetString("cli.localconfig")
-	if LocalConfig != "" {
-		_, err := os.Stat(LocalConfig)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				log.Fatalf("Error stat(%s): %v", LocalConfig, err)
-			}
-		} else {
-			viper.SetConfigFile(LocalConfig)
-			if err := viper.MergeInConfig(); err != nil {
-				log.Fatalf("Error merging in local config from '%s'", LocalConfig)
-			} else {
-				if tdns.Globals.Verbose {
-					fmt.Printf("Merging in local config from '%s'\n", LocalConfig)
-				}
-			}
-		}
-		viper.SetConfigFile(LocalConfig)
-	}
+	// Note: KRS config doesn't use localconfig merging like the old CLI config format
+	// The KRS config is a single file that contains all necessary information
 
-	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
-	err := viper.Unmarshal(&cconf)
+	// Unmarshal into KRS config structure
+	err := viper.Unmarshal(&krsConfig)
 	if err != nil {
-		log.Printf("Error from viper.UnMarshal(cfg): %v", err)
+		log.Fatalf("Error unmarshaling KRS config: %v", err)
 	}
 }
 
-var cconf CliConf
-
-type CliConf struct {
-	ApiServers []ApiDetails `yaml:"apiservers"`
-	Keys       tdns.KeyConf `yaml:"keys"`
+// KrsConfig represents the KRS daemon configuration file structure
+type KrsConfig struct {
+	ApiServer struct {
+		UseTLS    bool     `yaml:"usetls"`
+		Addresses []string `yaml:"addresses"`
+		ApiKey    string   `yaml:"apikey"`
+		CertFile  string   `yaml:"certfile,omitempty"`
+		KeyFile   string   `yaml:"keyfile,omitempty"`
+		BaseURL   string   `yaml:"baseurl,omitempty"` // Base URL for API client (used by krs-cli)
+	} `yaml:"apiserver"`
+	Keys tdns.KeyConf `yaml:"keys,omitempty"` // Optional: TSIG keys if needed
 }
 
-type ApiDetails struct {
-	Name       string `validate:"required" yaml:"name"`
-	BaseURL    string `validate:"required" yaml:"baseurl"`
-	ApiKey     string `validate:"required" yaml:"apikey"`
-	AuthMethod string `validate:"required" yaml:"authmethod"`
-	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon
-}
+var krsConfig KrsConfig
 
 func initApi() {
-	if tdns.Globals.Debug {
-		fmt.Printf("initApi: setting up API clients for:")
+	// Extract API connection details from KRS config file
+	if krsConfig.ApiServer.ApiKey == "" {
+		log.Fatalf("initApi: No API key found in KRS config file")
 	}
-	for _, val := range cconf.ApiServers {
-		tmp := tdns.NewClient(val.Name, val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
-		if tmp == nil {
-			log.Fatalf("initApi: Failed to setup API client for %q. Exiting.", val.Name)
+
+	// Use explicit baseurl from config if available, otherwise construct from address
+	baseURL := krsConfig.ApiServer.BaseURL
+	if baseURL == "" {
+		// Fallback: construct from address (for backward compatibility)
+		if len(krsConfig.ApiServer.Addresses) == 0 {
+			log.Fatalf("initApi: No API baseurl or addresses found in KRS config file")
 		}
-		tdns.Globals.ApiClients[val.Name] = tmp
-		if tdns.Globals.Debug {
-			fmt.Printf(" %s ", val.Name)
+		address := krsConfig.ApiServer.Addresses[0]
+		if krsConfig.ApiServer.UseTLS {
+			baseURL = fmt.Sprintf("https://%s", address)
+		} else {
+			baseURL = fmt.Sprintf("http://%s", address)
 		}
 	}
+
 	if tdns.Globals.Debug {
-		fmt.Printf("\n")
+		fmt.Printf("initApi: Setting up API client for tdns-krs\n")
+		fmt.Printf("  BaseURL: %s\n", baseURL)
+		fmt.Printf("  UseTLS: %v\n", krsConfig.ApiServer.UseTLS)
 	}
+
+	// Create API client
+	// AuthMethod is "X-API-Key" for KRS API (matches the header name)
+	tmp := tdns.NewClient("tdns-krs", baseURL, krsConfig.ApiServer.ApiKey, "X-API-Key", "insecure")
+	if tmp == nil {
+		log.Fatalf("initApi: Failed to setup API client for tdns-krs. Exiting.")
+	}
+	tdns.Globals.ApiClients["tdns-krs"] = tmp
 
 	// Store the API client for "tdns-krs" for convenience
 	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-krs"]
 
-	numtsigs, _ := tdns.ParseTsigKeys(&cconf.Keys)
-	if tdns.Globals.Debug {
-		fmt.Printf("Parsed %d TSIG keys\n", numtsigs)
+	// Parse TSIG keys if present (optional in KRS config)
+	if len(krsConfig.Keys.Tsig) > 0 {
+		numtsigs, _ := tdns.ParseTsigKeys(&krsConfig.Keys)
+		if tdns.Globals.Debug {
+			fmt.Printf("Parsed %d TSIG keys\n", numtsigs)
+		}
 	}
 }
 

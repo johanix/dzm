@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gorilla/mux"
@@ -61,6 +62,8 @@ func main() {
 	// Note: This will also register KDC API routes directly on apirouter
 	err = startKdc(ctx, conf, apirouter)
 	if err != nil {
+		// Print error to stdout so user sees it immediately
+		fmt.Fprintf(os.Stdout, "\n%s\n\n", err.Error())
 		tdns.Shutdowner(conf, fmt.Sprintf("Error starting KDC: %v", err))
 	}
 
@@ -87,6 +90,49 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	default:
 		return fmt.Errorf("KDC configuration not found or invalid type (got %T)", conf.Internal.KdcConf)
 	}
+
+	// Validate HPKE key configuration BEFORE initializing database
+	// This is critical - KDC cannot function without a valid HPKE keypair
+	if kdcConf.KdcHpkePrivKey == "" {
+		return fmt.Errorf(`FATAL: kdc_hpke_priv_key is not configured in KDC config file.
+
+The KDC requires a long-term HPKE (Hybrid Public Key Encryption) keypair to:
+  - Encrypt bootstrap confirmations sent to KRS nodes
+  - Decrypt bootstrap requests from KRS nodes
+
+To fix this:
+  1. Generate an HPKE keypair using: kdc-cli hpke generate --outfile /path/to/kdc.hpke.privatekey
+  2. Add the following to your KDC config file (under 'kdc:' section):
+     kdc_hpke_priv_key: /path/to/kdc.hpke.privatekey
+  3. Restart the KDC
+
+The key file will be created with appropriate permissions (0600) and will contain
+both the private key and public key information.`)
+	}
+
+	// Try to load the HPKE keypair to validate it exists and is readable
+	hpkeKeys, err := kdc.GetKdcHpkeKeypair(kdcConf.KdcHpkePrivKey)
+	if err != nil {
+		return fmt.Errorf(`FATAL: Failed to load HPKE keypair from %s: %v
+
+The KDC cannot start without a valid HPKE keypair. This keypair is required to:
+  - Encrypt bootstrap confirmations sent to KRS nodes
+  - Decrypt bootstrap requests from KRS nodes
+
+To fix this:
+  1. If the key file does not exist, generate a new HPKE keypair:
+     kdc-cli hpke generate --outfile %s
+  2. If the key file exists but cannot be read, check file permissions (should be 0600)
+  3. Ensure the path in kdc_hpke_priv_key in your KDC config is correct
+  4. Restart the KDC
+
+Note: If you generate a NEW keypair, you must regenerate all bootstrap blobs that were
+created with the old public key, as they will no longer be decryptable.`, kdcConf.KdcHpkePrivKey, err, kdcConf.KdcHpkePrivKey)
+	}
+	
+	// Log successful key loading (public key for verification)
+	pubKeyHex := fmt.Sprintf("%x", hpkeKeys.PublicKey)
+	log.Printf("KDC: Loaded HPKE keypair from %s (public key: %s...)", kdcConf.KdcHpkePrivKey, pubKeyHex[:16])
 
 	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN)
 	if err != nil {
@@ -157,6 +203,14 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 	log.Printf("KDC: Registered query handlers for MANIFEST, OLDCHUNK, and CHUNK")
 
+	// Register default query handler for zone-based queries (e.g., catalog zone)
+	// This is needed because KDC doesn't have zones in config, but may have programmatically added zones
+	// The default handler serves zones from the Zones map (including programmatically added ones)
+	if err := tdns.RegisterQueryHandler(0, tdns.DefaultQueryHandler); err != nil {
+		return fmt.Errorf("failed to register default query handler: %v", err)
+	}
+	log.Printf("KDC: Registered default zone-based query handler")
+
 	// Register debug NOTIFY handler FIRST (for all NOTIFYs) - logs all NOTIFYs before processing
 	// This is optional - only register if debug mode is enabled
 	if tdns.Globals.Debug {
@@ -179,6 +233,31 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		return fmt.Errorf("failed to register CHUNK NOTIFY handler: %v", err)
 	}
 	log.Printf("KDC: Registered NOTIFY handler for CHUNK")
+
+	// Register KDC bootstrap UPDATE handler (handles bootstrap DNS UPDATE requests)
+	// Matches UPDATEs with name pattern _bootstrap.*
+	bootstrapMatcher := func(dur *tdns.DnsUpdateRequest) bool {
+		// Check if any RR in the UPDATE section has a name starting with "_bootstrap."
+		for _, rr := range dur.Msg.Ns {
+			if strings.HasPrefix(rr.Header().Name, "_bootstrap.") {
+				return true
+			}
+		}
+		return false
+	}
+
+	bootstrapUpdateHandler := func(ctx context.Context, dur *tdns.DnsUpdateRequest) error {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: BootstrapUpdateHandler invoked (qname=%s)", dur.Qname)
+		}
+		// Call KDC bootstrap handler
+		return kdc.HandleBootstrapUpdate(ctx, dur, kdcDB, &kdcConf)
+	}
+
+	if err := tdns.RegisterUpdateHandler(bootstrapMatcher, bootstrapUpdateHandler); err != nil {
+		return fmt.Errorf("failed to register bootstrap UPDATE handler: %v", err)
+	}
+	log.Printf("KDC: Registered bootstrap UPDATE handler for _bootstrap.* pattern")
 
 	// Register engines using the registration API
 	if err := tdns.RegisterEngine("DnsEngine", func(ctx context.Context) error {
