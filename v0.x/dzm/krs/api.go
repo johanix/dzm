@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -88,7 +89,7 @@ type KrsComponentsResponse struct {
 	Time       time.Time `json:"time"`
 	Error      bool      `json:"error,omitempty"`
 	ErrorMsg   string    `json:"error_msg,omitempty"`
-	Components []string  `json:"components,omitempty"`
+	Components []string  `json:"components"` // Always include, even if empty
 }
 
 // sendJSONError sends a JSON-formatted error response
@@ -117,24 +118,25 @@ func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *KrsConf, tdnsConf
 		}
 	}
 	
-	// Register routes directly on the main router with full paths
+	// Create subrouter for KRS routes under /api/v1/krs
 	// The router passed in already has /api/v1 routes set up via SetupAPIRouter.
-	// We register KRS-specific routes with the full path /api/v1/krs/* directly on the router.
-	// We use the same API key header requirement as the main /api/v1 routes.
+	// We create a subrouter for /api/v1/krs/* with the same API key header requirement.
+	var sr *mux.Router
 	if apikey != "" {
-		// Routes require API key header (same as main /api/v1 routes)
-		router.Path("/api/v1/krs/keys").Headers("X-API-Key", apikey).HandlerFunc(APIKrsKeys(krsDB)).Methods("POST")
-		router.Path("/api/v1/krs/config").Headers("X-API-Key", apikey).HandlerFunc(APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
-		router.Path("/api/v1/krs/query").Headers("X-API-Key", apikey).HandlerFunc(APIKrsQuery(krsDB, conf)).Methods("POST")
-		router.Path("/api/v1/krs/debug").Headers("X-API-Key", apikey).HandlerFunc(APIKrsDebug(krsDB, conf)).Methods("POST")
-		router.Path("/api/v1/krs/components").Headers("X-API-Key", apikey).HandlerFunc(APIKrsComponents(krsDB)).Methods("POST")
+		// Create subrouter with API key header requirement
+		sr = router.PathPrefix("/api/v1/krs").Headers("X-API-Key", apikey).Subrouter()
 	} else {
-		router.Path("/api/v1/krs/keys").HandlerFunc(APIKrsKeys(krsDB)).Methods("POST")
-		router.Path("/api/v1/krs/config").HandlerFunc(APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
-		router.Path("/api/v1/krs/query").HandlerFunc(APIKrsQuery(krsDB, conf)).Methods("POST")
-		router.Path("/api/v1/krs/debug").HandlerFunc(APIKrsDebug(krsDB, conf)).Methods("POST")
-		router.Path("/api/v1/krs/components").HandlerFunc(APIKrsComponents(krsDB)).Methods("POST")
+		sr = router.PathPrefix("/api/v1/krs").Subrouter()
 	}
+	
+	// Register KRS routes on the subrouter (paths are relative to the prefix)
+	sr.HandleFunc("/keys", APIKrsKeys(krsDB)).Methods("POST")
+	sr.HandleFunc("/config", APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
+	sr.HandleFunc("/query", APIKrsQuery(krsDB, conf)).Methods("POST")
+	sr.HandleFunc("/debug", APIKrsDebug(krsDB, conf)).Methods("POST")
+	sr.HandleFunc("/components", APIKrsComponents(krsDB)).Methods("POST")
+	
+	log.Printf("KRS API routes registered: /api/v1/krs/keys, /api/v1/krs/config, /api/v1/krs/query, /api/v1/krs/debug, /api/v1/krs/components")
 }
 
 // APIKrsKeys handles key management endpoints
@@ -320,7 +322,7 @@ func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 
 		// All query commands are obsolete (KMREQ/KMCTRL are no longer used)
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("Query command '%s' is obsolete - keys are now distributed via NOTIFY + MANIFEST/OLDCHUNK/CHUNK", req.Command)
+		resp.ErrorMsg = fmt.Sprintf("Query command '%s' is obsolete - keys are now distributed via NOTIFY + CHUNK", req.Command)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
@@ -392,8 +394,11 @@ func APIKrsComponents(krsDB *KrsDB) http.HandlerFunc {
 			return
 		}
 
+		log.Printf("APIKrsComponents: /components request: %+v", req)
+
 		resp := KrsComponentsResponse{
-			Time: time.Now(),
+			Time:       time.Now(),
+			Components: []string{}, // Initialize as empty slice so it's always present in JSON
 		}
 
 		switch req.Command {
@@ -403,6 +408,10 @@ func APIKrsComponents(krsDB *KrsDB) http.HandlerFunc {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
+				// Ensure components is never nil (use empty slice if nil)
+				if components == nil {
+					components = []string{}
+				}
 				resp.Components = components
 			}
 

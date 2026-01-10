@@ -72,7 +72,6 @@ type KrsBootstrapConf struct {
 	Database    DatabaseConf `yaml:"database"`
 	Node        NodeConf     `yaml:"node"`
 	ControlZone string       `yaml:"control_zone"`
-	UseChunk    bool         `yaml:"use_chunk"`
 }
 
 // RunEnroll performs the complete enrollment process
@@ -382,7 +381,6 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 				KdcHpkePubKey:   confirmation.KdcHpkePubKey,
 			},
 			ControlZone: blob.ControlZone,
-			UseChunk:    true, // Use CHUNK format
 		},
 	}
 

@@ -353,6 +353,28 @@ func PrepArgs(args ...interface{}) {
 				cmd.Flag("cname").Value.Set(componentName)
 			}
 
+		case "cid":
+			var componentID string
+			if cmd != nil {
+				componentFlag := cmd.Flag("cid")
+				if componentFlag == nil {
+					fmt.Printf("Error: --cid flag not defined for this command\n")
+					os.Exit(1)
+				}
+				componentID = componentFlag.Value.String()
+			} else {
+				fmt.Printf("Error: component ID not specified using --cid flag\n")
+				os.Exit(1)
+			}
+			if componentID == "" {
+				fmt.Printf("Error: component ID not specified using --cid flag\n")
+				os.Exit(1)
+			}
+			componentID = strings.TrimSpace(componentID)
+			if cmd != nil {
+				cmd.Flag("cid").Value.Set(componentID)
+			}
+
 		case "tx":
 			var txID string
 			if cmd != nil {

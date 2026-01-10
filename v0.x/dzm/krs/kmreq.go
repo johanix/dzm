@@ -3,7 +3,7 @@
  *
  * This file previously contained KMREQ/KMCTRL query functionality.
  * These RR types are obsolete and have been removed.
- * Keys are now distributed via NOTIFY + MANIFEST/OLDCHUNK/CHUNK.
+ * Keys are now distributed via NOTIFY + CHUNK.
  */
 
 package krs

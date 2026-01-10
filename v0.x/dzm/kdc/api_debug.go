@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/miekg/dns"
 )
 
@@ -42,6 +43,9 @@ type KdcDebugResponse struct {
 // APIKdcDebug handles debug API requests
 func APIKdcDebug(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcDebug handler called")
+		}
 		var req KdcDebugPost
 		resp := KdcDebugResponse{
 			Time: time.Now(),

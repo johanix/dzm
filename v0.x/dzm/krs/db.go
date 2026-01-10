@@ -319,7 +319,7 @@ func (krs *KrsDB) GetNodeComponents() ([]string, error) {
 	}
 	defer rows.Close()
 
-	var components []string
+	components := make([]string, 0) // Initialize as empty slice, not nil
 	for rows.Next() {
 		var componentID string
 		if err := rows.Scan(&componentID); err != nil {

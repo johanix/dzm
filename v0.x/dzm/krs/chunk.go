@@ -1,18 +1,17 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * MANIFEST and OLDCHUNK query handling for tdns-krs
+ * CHUNK query handling for tdns-krs
+ * CHUNK query handling for tdns-krs
  */
 
 package krs
 
 import (
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -21,10 +20,14 @@ import (
 	"github.com/johanix/tdns/v0.x/tdns/edns0"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
+
+	"github.com/johanix/dzm/v0.x/dzm"
 )
 
-// QueryMANIFEST queries the KDC for a MANIFEST record
-func QueryMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (*core.MANIFEST, error) {
+// QueryCHUNK queries the KDC for a CHUNK record
+// sequence: 0 for manifest, 1+ for data chunks
+// chunkSize is the expected chunk size from the manifest (0 if unknown, used for TCP decision)
+func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, sequence uint16, chunkSize uint16) (*core.CHUNK, error) {
 	nodeConfig, err := krsDB.GetNodeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node config: %v", err)
@@ -40,7 +43,8 @@ func QueryMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (
 	}
 
 	// Build QNAME: <nodeid><distributionID>.<controlzone>
-	// Node ID is an FQDN (with trailing dot), so we concatenate directly
+	// For manifest (sequence 0): node.distid.control.
+	// For data chunks (sequence > 0): sequence.node.distid.control.
 	controlZoneClean := conf.ControlZone
 	if !strings.HasSuffix(controlZoneClean, ".") {
 		controlZoneClean += "."
@@ -49,234 +53,107 @@ func QueryMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (
 	nodeIDFQDN := nodeID
 	if !strings.HasSuffix(nodeIDFQDN, ".") {
 		nodeIDFQDN = dns.Fqdn(nodeID)
-	}
-	qname := fmt.Sprintf("%s%s.%s", nodeIDFQDN, distributionID, controlZoneClean)
-
-	// Create MANIFEST query
-	msg := new(dns.Msg)
-	msg.SetQuestion(qname, core.TypeMANIFEST)
-	msg.RecursionDesired = false
-
-	log.Printf("KRS: Querying MANIFEST for node %s, distribution %s", nodeID, distributionID)
-	log.Printf("KRS: MANIFEST query: QNAME=%s, QTYPE=MANIFEST", qname)
-
-	// Send query to KDC (try UDP first, fallback to TCP if truncated)
-	udpClient := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
-	resp, _, err := udpClient.Exchange(msg, kdcAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send MANIFEST query: %v", err)
 	}
 	
-	// Check for truncation and retry with TCP
-	if resp.Truncated {
-		log.Printf("KRS: MANIFEST response truncated (TC=1), retrying with TCP")
-		tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
-		resp, _, err = tcpClient.Exchange(msg, kdcAddress)
-		if err != nil {
-			return nil, fmt.Errorf("failed to send MANIFEST query over TCP: %v", err)
-		}
+	var qname string
+	if sequence == 0 {
+		// Manifest chunk
+		qname = fmt.Sprintf("%s%s.%s", nodeIDFQDN, distributionID, controlZoneClean)
+	} else {
+		// Data chunk
+		qname = fmt.Sprintf("%d.%s%s.%s", sequence, nodeIDFQDN, distributionID, controlZoneClean)
 	}
 
-	if resp.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("MANIFEST query returned rcode %s", dns.RcodeToString[resp.Rcode])
-	}
-
-	// Parse MANIFEST from response
-	if len(resp.Answer) == 0 {
-		return nil, fmt.Errorf("MANIFEST response has no answer RRs")
-	}
-
-	rr := resp.Answer[0]
-	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeMANIFEST {
-		if manifest, ok := privRR.Data.(*core.MANIFEST); ok {
-			log.Printf("KRS: Parsed MANIFEST: format=%d, chunk_count=%d, chunk_size=%d", manifest.Format, manifest.ChunkCount, manifest.ChunkSize)
-			if manifest.Metadata != nil {
-				if content, ok := manifest.Metadata["content"].(string); ok {
-					log.Printf("KRS: MANIFEST content type: %s", content)
-				}
-			}
-			// If chunk size is specified and large, prefer TCP for chunk queries
-			if manifest.ChunkSize > 0 && manifest.ChunkSize > 1180 {
-				log.Printf("KRS: Manifest indicates large chunks (%d bytes), will use TCP for OLDCHUNK queries", manifest.ChunkSize)
-			}
-			return manifest, nil
-		}
-	}
-
-	return nil, fmt.Errorf("failed to parse MANIFEST from response")
-}
-
-// loadPrivateKey loads a private key from a file path
-// The file should contain a hex-encoded 32-byte HPKE private key
-func loadPrivateKey(keyPath string) ([]byte, error) {
-	if keyPath == "" {
-		return nil, fmt.Errorf("private key path is empty")
-	}
-
-	// Read key file
-	keyData, err := os.ReadFile(keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read private key file %s: %v", keyPath, err)
-	}
-
-	// Parse key (skip comments, decode hex)
-	keyLines := strings.Split(string(keyData), "\n")
-	var keyHex string
-	for _, line := range keyLines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			keyHex += line
-		}
-	}
-
-	if keyHex == "" {
-		return nil, fmt.Errorf("could not find key in file %s", keyPath)
-	}
-
-	// Decode hex key
-	key, err := hex.DecodeString(keyHex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode hex key: %v", err)
-	}
-
-	if len(key) != 32 {
-		return nil, fmt.Errorf("private key must be 32 bytes (got %d)", len(key))
-	}
-
-	return key, nil
-}
-
-// QueryOLDCHUNK queries the KDC for a specific OLDCHUNK record
-// chunkSize is the expected chunk size from the manifest (0 if unknown)
-// If chunkSize > 1180 bytes, TCP is used directly (UDP max is ~1232 bytes including headers)
-func QueryOLDCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chunkID uint16, chunkSize uint16) (*core.OLDCHUNK, error) {
-	nodeConfig, err := krsDB.GetNodeConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get node config: %v", err)
-	}
-
-	// Use KDC address from config, fallback to database if not in config
-	kdcAddress := conf.Node.KdcAddress
-	if kdcAddress == "" {
-		kdcAddress = nodeConfig.KdcAddress
-	}
-	if kdcAddress == "" {
-		return nil, fmt.Errorf("KDC address not configured")
-	}
-
-	// Build QNAME: <chunkid>.<nodeid><distributionID>.<controlzone>
-	// Node ID is an FQDN (with trailing dot), so we concatenate directly
-	controlZoneClean := conf.ControlZone
-	if !strings.HasSuffix(controlZoneClean, ".") {
-		controlZoneClean += "."
-	}
-	// Ensure nodeID is FQDN
-	nodeIDFQDN := nodeID
-	if !strings.HasSuffix(nodeIDFQDN, ".") {
-		nodeIDFQDN = dns.Fqdn(nodeID)
-	}
-	qname := fmt.Sprintf("%d.%s%s.%s", chunkID, nodeIDFQDN, distributionID, controlZoneClean)
-
-	// Create OLDCHUNK query
+	// Create CHUNK query
 	msg := new(dns.Msg)
-	msg.SetQuestion(qname, core.TypeOLDCHUNK)
+	msg.SetQuestion(qname, core.TypeCHUNK)
 	msg.RecursionDesired = false
 	// Set EDNS0 to allow larger messages
 	msg.SetEdns0(dns.DefaultMsgSize, true)
 
-	log.Printf("KRS: Querying OLDCHUNK chunk %d for node %s, distribution %s", chunkID, nodeID, distributionID)
-	log.Printf("KRS: OLDCHUNK query: QNAME=%s, QTYPE=OLDCHUNK", qname)
-	
+	if sequence == 0 {
+		log.Printf("KRS: Querying CHUNK manifest for node %s, distribution %s", nodeID, distributionID)
+		log.Printf("KRS: CHUNK query: QNAME=%s, QTYPE=CHUNK", qname)
+	} else {
+		log.Printf("KRS: Querying CHUNK chunk %d for node %s, distribution %s", sequence, nodeID, distributionID)
+		log.Printf("KRS: CHUNK query: QNAME=%s, QTYPE=CHUNK", qname)
+	}
+
 	// UDP DNS message max size is ~1232 bytes (with EDNS0), but we need to account for
 	// DNS header (~12 bytes) and QNAME (~50-100 bytes typically), leaving ~1180 bytes for payload
 	// If chunk size is known and > 1180 bytes, use TCP directly
-	useTCP := chunkSize > 1180
-	
+	useTCP := chunkSize > 1180 || sequence == 0 // Always use TCP for manifest (can be large)
+
 	var resp *dns.Msg
-	
+
 	if useTCP {
-		log.Printf("KRS: Using TCP for OLDCHUNK (chunk size %d > 1180 bytes)", chunkSize)
+		if sequence == 0 {
+			log.Printf("KRS: Using TCP for CHUNK manifest")
+		} else {
+			log.Printf("KRS: Using TCP for CHUNK (chunk size %d > 1180 bytes)", chunkSize)
+		}
 		tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
 		resp, _, err = tcpClient.Exchange(msg, kdcAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send OLDCHUNK query over TCP: %v", err)
+			return nil, fmt.Errorf("failed to send CHUNK query over TCP: %v", err)
 		}
 	} else {
-		// Try UDP first for smaller chunks, fallback to TCP if truncated
+		// Try UDP first
 		udpClient := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
 		resp, _, err = udpClient.Exchange(msg, kdcAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send OLDCHUNK query: %v", err)
+			return nil, fmt.Errorf("failed to send CHUNK query: %v", err)
 		}
-		
+
 		// Check for truncation and retry with TCP
 		if resp.Truncated {
-			log.Printf("KRS: OLDCHUNK response truncated (TC=1), retrying with TCP")
+			log.Printf("KRS: CHUNK response truncated (TC=1), retrying with TCP")
 			tcpClient := &dns.Client{Net: "tcp", Timeout: 10 * time.Second}
 			resp, _, err = tcpClient.Exchange(msg, kdcAddress)
 			if err != nil {
-				return nil, fmt.Errorf("failed to send OLDCHUNK query over TCP: %v", err)
+				return nil, fmt.Errorf("failed to send CHUNK query over TCP: %v", err)
 			}
 		}
 	}
 
 	if resp.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("OLDCHUNK query returned rcode %s", dns.RcodeToString[resp.Rcode])
+		return nil, fmt.Errorf("CHUNK query returned rcode %s", dns.RcodeToString[resp.Rcode])
 	}
 
-	// Parse OLDCHUNK from response
+	// Parse CHUNK from response
 	if len(resp.Answer) == 0 {
-		return nil, fmt.Errorf("OLDCHUNK response has no answer RRs")
+		return nil, fmt.Errorf("CHUNK response has no answer RRs")
 	}
 
 	rr := resp.Answer[0]
-	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeOLDCHUNK {
-		if chunk, ok := privRR.Data.(*core.OLDCHUNK); ok {
-			log.Printf("KRS: Parsed OLDCHUNK: sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
+	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeCHUNK {
+		if chunk, ok := privRR.Data.(*core.CHUNK); ok {
+			if sequence == 0 {
+				log.Printf("KRS: Parsed CHUNK manifest: format=%d, total=%d", chunk.Format, chunk.Total)
+			} else {
+				log.Printf("KRS: Parsed CHUNK chunk: sequence=%d, total=%d, data_length=%d", chunk.Sequence, chunk.Total, chunk.DataLength)
+			}
 			return chunk, nil
 		}
 	}
 
-	log.Printf("KRS: Failed to parse OLDCHUNK from response")
-	return nil, fmt.Errorf("failed to parse OLDCHUNK from response")
+	return nil, fmt.Errorf("failed to parse CHUNK from response")
 }
 
-// ReassembleChunks reassembles chunks into the complete base64-encoded data
-func ReassembleChunks(chunks []*core.OLDCHUNK) ([]byte, error) {
-	if len(chunks) == 0 {
-		return nil, fmt.Errorf("no chunks to reassemble")
-	}
-
-	total := int(chunks[0].Total)
-	if len(chunks) != total {
-		return nil, fmt.Errorf("chunk count mismatch: expected %d, got %d", total, len(chunks))
-	}
-
-	// Sort chunks by sequence number
-	chunkMap := make(map[uint16]*core.OLDCHUNK)
-	for _, chunk := range chunks {
-		if int(chunk.Sequence) >= total {
-			return nil, fmt.Errorf("chunk sequence %d out of range (max %d)", chunk.Sequence, total-1)
-		}
-		chunkMap[chunk.Sequence] = chunk
-	}
-
-	// Reassemble in order
-	reassembled := make([]byte, 0)
-	for i := uint16(0); i < uint16(total); i++ {
-		chunk, ok := chunkMap[i]
-		if !ok {
-			return nil, fmt.Errorf("missing chunk %d", i)
-		}
-		reassembled = append(reassembled, chunk.Data...)
-	}
-
-	return reassembled, nil
+// ExtractManifestFromCHUNK extracts MANIFEST-like information from a CHUNK manifest chunk
+// Returns the same structure that ProcessDistribution expects
+// This is a wrapper around dzm.UnmarshalManifestFromCHUNK for backward compatibility
+func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*core.MANIFEST, error) {
+	return dzm.UnmarshalManifestFromCHUNK(chunk)
 }
 
-// ProcessDistribution processes a complete distribution event
-// Queries MANIFEST, fetches all chunks, reassembles, and processes based on content type
-// If processTextResult is not nil, test_text content will be stored there instead of printed
+// ReassembleCHUNKChunks reassembles CHUNK chunks into complete data
+// This is a wrapper around dzm.ReassembleCHUNKChunks for backward compatibility
+func ReassembleCHUNKChunks(chunks []*core.CHUNK) ([]byte, error) {
+	return dzm.ReassembleCHUNKChunks(chunks)
+}
+
+// ProcessDistribution processes a distribution using CHUNK format
 func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, processTextResult *string) error {
 	// Use node ID from config file, not database
 	// Ensure it's an FQDN
@@ -288,24 +165,19 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 
 	log.Printf("KRS: Processing distribution %s for node %s", distributionID, nodeID)
 
-	// Check if we should use CHUNK format
-	if conf.UseChunk {
-		return ProcessDistributionCHUNK(krsDB, conf, distributionID, processTextResult)
-	}
-
-	// Query MANIFEST (legacy MANIFEST+OLDCHUNK format)
-	manifest, err := QueryMANIFEST(krsDB, conf, nodeID, distributionID)
+	// Query CHUNK manifest (sequence 0)
+	manifestChunk, err := QueryCHUNK(krsDB, conf, nodeID, distributionID, 0, 0)
 	if err != nil {
-		return fmt.Errorf("failed to query MANIFEST: %v", err)
+		return fmt.Errorf("failed to query CHUNK manifest: %v", err)
 	}
 
-	// Verify MANIFEST Format
-	if manifest.Format != core.FormatJSON {
-		return fmt.Errorf("unsupported MANIFEST format: %d (expected FormatJSON=%d)", manifest.Format, core.FormatJSON)
+	// Extract manifest information from CHUNK
+	manifest, err := ExtractManifestFromCHUNK(manifestChunk)
+	if err != nil {
+		return fmt.Errorf("failed to extract manifest from CHUNK: %v", err)
 	}
 
-	// Verify MANIFEST HMAC using this node's long-term public key
-	// The HMAC was calculated by KDC using this node's public key
+	// Verify CHUNK manifest HMAC using this node's long-term public key
 	if conf.Node.LongTermPrivKey != "" {
 		// Load node's private key
 		privateKey, err := loadPrivateKey(conf.Node.LongTermPrivKey)
@@ -322,12 +194,12 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		// Verify HMAC using the public key
 		valid, err := manifest.VerifyHMAC(publicKey)
 		if err != nil {
-			return fmt.Errorf("failed to verify MANIFEST HMAC: %v", err)
+			return fmt.Errorf("failed to verify CHUNK manifest HMAC: %v", err)
 		}
 		if !valid {
-			return fmt.Errorf("MANIFEST HMAC verification failed - possible tampering or key mismatch")
+			return fmt.Errorf("CHUNK manifest HMAC verification failed - possible tampering or key mismatch")
 		}
-		log.Printf("KRS: MANIFEST HMAC verified successfully using node's public key")
+		log.Printf("KRS: CHUNK manifest HMAC verified successfully using node's public key")
 	} else {
 		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
 	}
@@ -373,7 +245,6 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	}
 
 	// Validate timestamp freshness (replay protection)
-	// Note: Real protection comes from DNSSEC (RRSIG on MANIFEST), but we check freshness here
 	now := time.Now()
 	distributionTime := time.Unix(distributionTimestamp, 0)
 	age := now.Sub(distributionTime)
@@ -394,35 +265,31 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		// Payload is inline, use it directly
 		reassembled = make([]byte, len(manifest.Payload))
 		copy(reassembled, manifest.Payload)
-		log.Printf("KRS: Using inline payload from MANIFEST (%d bytes)", len(reassembled))
+		log.Printf("KRS: Using inline payload from CHUNK manifest (%d bytes)", len(reassembled))
 	} else if manifest.ChunkCount > 0 {
-		// Payload is chunked, fetch all chunks
-		// Pass chunk size from manifest to QueryOLDCHUNK so it can decide UDP vs TCP
-		var chunks []*core.OLDCHUNK
-		for i := uint16(0); i < manifest.ChunkCount; i++ {
-			chunk, err := QueryOLDCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
+		// Payload is chunked, fetch all CHUNK chunks
+		// Note: CHUNK uses sequence 0 for manifest, so data chunks start at sequence 1
+		var chunks []*core.CHUNK
+		for i := uint16(1); i <= manifest.ChunkCount; i++ {
+			chunk, err := QueryCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
 			if err != nil {
-				return fmt.Errorf("failed to query OLDCHUNK %d: %v", i, err)
+				return fmt.Errorf("failed to query CHUNK chunk %d: %v", i, err)
 			}
 			chunks = append(chunks, chunk)
-			log.Printf("KRS: Fetched chunk %d/%d", i+1, manifest.ChunkCount)
+			log.Printf("KRS: Fetched CHUNK chunk %d/%d (sequence %d)", i, manifest.ChunkCount, chunk.Sequence)
 		}
 
 		// Reassemble chunks
 		var err error
-		reassembled, err = ReassembleChunks(chunks)
+		reassembled, err = ReassembleCHUNKChunks(chunks)
 		if err != nil {
-			return fmt.Errorf("failed to reassemble chunks: %v", err)
+			return fmt.Errorf("failed to reassemble CHUNK chunks: %v", err)
 		}
 
-		log.Printf("KRS: Reassembled %d bytes from %d chunks", len(reassembled), len(chunks))
+		log.Printf("KRS: Reassembled %d bytes from %d CHUNK chunks", len(reassembled), len(chunks))
 	} else {
-		return fmt.Errorf("manifest has no payload and chunk_count is 0")
+		return fmt.Errorf("CHUNK manifest has no payload and chunk_count is 0")
 	}
-
-	// Note: HMAC verification was already done above (line 318) using manifest.VerifyHMAC()
-	// The HMAC protects the manifest metadata (Format + JSON fields), not the payload itself.
-	// Payload integrity is protected through encryption (for encrypted_keys) or other mechanisms.
 
 	// Process based on content type
 	switch contentType {
@@ -500,81 +367,17 @@ func ProcessEncryptedText(krsDB *KrsDB, conf *KrsConf, data []byte) (string, err
 	}
 	fmt.Println()
 
-	// Step 3: Decrypt using HPKE
-	// The ciphertext from hpke.Encrypt() already contains: <encapsulated_key (32 bytes)><encrypted_data>
-	// But KDC prepends ephemeralPub again, so we have: <ephemeralPub (32 bytes)><encapsulated_key (32 bytes)><encrypted_data>
-	// We need to skip the first 32 bytes (duplicate ephemeralPub) and use the rest
-	log.Printf("KRS: Analyzing ciphertext structure...")
-	if len(ciphertextBase64) < 64 {
-		return "", fmt.Errorf("ciphertext too short: %d bytes (expected at least 64: 32 for duplicate ephemeral + 32 for encapsulated key)", len(ciphertextBase64))
-	}
-
-	// Extract the actual ciphertext (skip first 32 bytes which is duplicate ephemeralPub)
-	// Verify that first 32 bytes match bytes 32-64 (they should both be the encapsulated key)
-	duplicateEphemeral := ciphertextBase64[:32]
-	encapsulatedKey := ciphertextBase64[32:64]
-	if len(encapsulatedKey) < 32 {
-		return "", fmt.Errorf("ciphertext too short to extract encapsulated key: %d bytes", len(ciphertextBase64))
-	}
-	
-	// Check if they match (they should, as KDC prepends ephemeralPub which is a copy of encapsulated key)
-	match := true
-	for i := 0; i < 32; i++ {
-		if duplicateEphemeral[i] != encapsulatedKey[i] {
-			match = false
-			break
-		}
-	}
-	if !match {
-		log.Printf("KRS: WARNING: First 32 bytes (duplicate ephemeral) don't match bytes 32-64 (encapsulated key)")
-		log.Printf("KRS: Duplicate ephemeral (first 32): %x", duplicateEphemeral)
-		log.Printf("KRS: Encapsulated key (bytes 32-64): %x", encapsulatedKey)
-	} else {
-		log.Printf("KRS: Verified: duplicate ephemeral matches encapsulated key (first 32 bytes)")
-	}
-	
-	actualCiphertext := ciphertextBase64[32:]
-	log.Printf("KRS: Extracted actual ciphertext: %d bytes (skipped first 32 bytes which is duplicate ephemeralPub)", len(actualCiphertext))
-	log.Printf("KRS: First 32 bytes of actual ciphertext (encapsulated key): %x", actualCiphertext[:32])
-
-	// Load node's private key from config
+	// Step 3: Load node's private key and decrypt using shared function
 	log.Printf("KRS: Loading private key from %s...", conf.Node.LongTermPrivKey)
 	if conf.Node.LongTermPrivKey == "" {
 		return "", fmt.Errorf("node long-term private key not configured")
 	}
 
-	// Read private key file
-	privKeyData, err := os.ReadFile(conf.Node.LongTermPrivKey)
+	privateKey, err := dzm.LoadPrivateKey(conf.Node.LongTermPrivKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to read private key file %s: %v", conf.Node.LongTermPrivKey, err)
+		return "", fmt.Errorf("failed to load private key: %v", err)
 	}
-	log.Printf("KRS: Read private key file: %d bytes", len(privKeyData))
-
-	// Parse private key (skip comments, decode hex)
-	privKeyLines := strings.Split(string(privKeyData), "\n")
-	var privKeyHex string
-	for _, line := range privKeyLines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			privKeyHex += line
-		}
-	}
-
-	if privKeyHex == "" {
-		return "", fmt.Errorf("could not find private key in file %s", conf.Node.LongTermPrivKey)
-	}
-	log.Printf("KRS: Extracted private key hex: %d characters", len(privKeyHex))
-
-	// Decode hex private key
-	privateKey, err := hex.DecodeString(privKeyHex)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode hex private key: %v", err)
-	}
-
-	if len(privateKey) != 32 {
-		return "", fmt.Errorf("private key must be 32 bytes (got %d)", len(privateKey))
-	}
-	log.Printf("KRS: Private key decoded: %d bytes", len(privateKey))
+	log.Printf("KRS: Private key loaded: %d bytes", len(privateKey))
 	log.Printf("KRS: Private key (first 8 bytes): %x", privateKey[:8])
 	
 	// Verify we can derive public key from private key (sanity check)
@@ -586,23 +389,11 @@ func ProcessEncryptedText(krsDB *KrsDB, conf *KrsConf, data []byte) (string, err
 		log.Printf("KRS: This public key should match the node's public key stored in KDC")
 	}
 
-	// Decrypt using HPKE
+	// Decrypt using shared function
 	log.Printf("KRS: Attempting HPKE decryption...")
-	log.Printf("KRS:   - Private key length: %d bytes", len(privateKey))
-	log.Printf("KRS:   - Ciphertext length: %d bytes", len(actualCiphertext))
-	log.Printf("KRS:   - Encapsulated key (first 32 bytes of actual ciphertext): %x", actualCiphertext[:32])
-	plaintext, err := hpke.Decrypt(privateKey, nil, actualCiphertext)
+	plaintext, err := dzm.DecodeAndDecrypt(privateKey, data)
 	if err != nil {
 		log.Printf("KRS: HPKE decryption failed: %v", err)
-		log.Printf("KRS: Ciphertext structure:")
-		log.Printf("KRS:   - Total bytes after base64 decode: %d", len(ciphertextBase64))
-		log.Printf("KRS:   - Actual ciphertext (after skipping duplicate ephemeral): %d", len(actualCiphertext))
-		log.Printf("KRS:   - First 32 bytes (duplicate ephemeral): %x", ciphertextBase64[:32])
-		log.Printf("KRS:   - Bytes 32-64 (encapsulated key): %x", ciphertextBase64[32:64])
-		log.Printf("KRS:   - Encapsulated key from actual ciphertext: %x", actualCiphertext[:32])
-		if len(derivedPubKey) == 32 {
-			log.Printf("KRS:   - Derived public key from private key: %x", derivedPubKey)
-		}
 		return "", fmt.Errorf("failed to decrypt encrypted text: %v", err)
 	}
 	log.Printf("KRS: HPKE decryption successful: %d bytes decrypted", len(plaintext))
@@ -634,7 +425,7 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 		log.Printf("KRS:   - %s", zone)
 	}
 
-		// TODO: Process zone list
+	// TODO: Process zone list
 	return nil
 }
 
@@ -644,76 +435,27 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 // distributionID and retireTime are optional and can be passed from the manifest metadata
 func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string, retireTime string) error {
 	distID := distributionID
-	// Step 1: Decode base64 to get encrypted data
+	// Step 1: Load node's private key for decryption
 	log.Printf("KRS: Processing encrypted_keys content (%d bytes base64)", len(data))
-	encryptedData, err := base64.StdEncoding.DecodeString(string(data))
-	if err != nil {
-		return fmt.Errorf("failed to decode base64 encrypted payload: %v", err)
-	}
-	log.Printf("KRS: Decoded encrypted data: %d bytes", len(encryptedData))
-
-	// Step 2: Load node's private key for decryption
 	if conf.Node.LongTermPrivKey == "" {
 		return fmt.Errorf("node long-term private key not configured")
 	}
 
-	privKeyData, err := os.ReadFile(conf.Node.LongTermPrivKey)
+	privateKey, err := dzm.LoadPrivateKey(conf.Node.LongTermPrivKey)
 	if err != nil {
-		return fmt.Errorf("failed to read private key file %s: %v", conf.Node.LongTermPrivKey, err)
+		return fmt.Errorf("failed to load private key: %v", err)
 	}
-
-	// Parse private key (skip comments, decode hex)
-	privKeyLines := strings.Split(string(privKeyData), "\n")
-	var privKeyHex string
-	for _, line := range privKeyLines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			privKeyHex += line
-		}
-	}
-
-	if privKeyHex == "" {
-		return fmt.Errorf("could not find private key in file %s", conf.Node.LongTermPrivKey)
-	}
-
-	privateKey, err := hex.DecodeString(privKeyHex)
-	if err != nil {
-		return fmt.Errorf("failed to decode hex private key: %v", err)
-	}
-
-	if len(privateKey) != 32 {
-		return fmt.Errorf("private key must be 32 bytes (got %d)", len(privateKey))
-	}
-
 	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
 
-	// Step 3: Decrypt the entire payload
-	// Format from KDC: <ephemeral_pub_key (32 bytes)><ciphertext>
-	// Where ciphertext from hpke.Encrypt is: <encapsulated_key (32 bytes)><encrypted_data>
-	// Note: For X25519, ephemeralPub == encapsulated_key (they're the same)
-	// So the format is: <ephemeralPub (32 bytes)><encapsulated_key (32 bytes)><encrypted_data>
-	// We need to skip the first 32 bytes (duplicate) and pass the rest to hpke.Decrypt
-	if len(encryptedData) < 64 {
-		return fmt.Errorf("encrypted data too short: %d bytes (expected at least 64: 32 for ephemeral + 32 for encapsulated key)", len(encryptedData))
-	}
-
-	// Extract the actual ciphertext (skip first 32 bytes which is duplicate ephemeralPub)
-	// The ciphertext from hpke.Encrypt already includes the encapsulated key
-	actualCiphertext := encryptedData[32:]
-
-	log.Printf("KRS: Encrypted payload: total %d bytes, skipping first 32 bytes (duplicate ephemeralPub), ciphertext %d bytes", 
-		len(encryptedData), len(actualCiphertext))
-
-	// Decrypt using HPKE
-	// hpke.Decrypt expects: <encapsulated_key (32 bytes)><encrypted_data>
-	plaintextJSON, err := hpke.Decrypt(privateKey, nil, actualCiphertext)
+	// Step 2: Decrypt the entire payload using shared function
+	plaintextJSON, err := dzm.DecodeAndDecrypt(privateKey, data)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt distribution payload: %v", err)
 	}
 
 	log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
 
-	// Step 4: Parse JSON structure (cleartext)
+	// Step 3: Parse JSON structure (cleartext)
 	type KeyEntry struct {
 		ZoneName   string `json:"zone_name"`
 		KeyID      string `json:"key_id"`
@@ -750,7 +492,7 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		log.Printf("KRS: DEBUG: Decrypted distribution payload (private keys masked): %s", string(logJSON))
 	}
 
-	// Step 5: Process each key entry and store
+	// Step 4: Process each key entry and store
 	// Note: AddEdgesignerKeyWithRetirement handles retiring existing edgesigner keys atomically
 	successCount := 0
 	var successfulKeys []edns0.KeyStatusEntry
@@ -907,76 +649,27 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 // distributionID is optional and can be passed from the manifest metadata
 func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string) error {
 	distID := distributionID
-	// Step 1: Decode base64 to get encrypted data
+	// Step 1: Load node's private key for decryption
 	log.Printf("KRS: Processing node_components content (%d bytes base64)", len(data))
-	encryptedData, err := base64.StdEncoding.DecodeString(string(data))
-	if err != nil {
-		return fmt.Errorf("failed to decode base64 encrypted payload: %v", err)
-	}
-	log.Printf("KRS: Decoded encrypted data: %d bytes", len(encryptedData))
-
-	// Step 2: Load node's private key for decryption
 	if conf.Node.LongTermPrivKey == "" {
 		return fmt.Errorf("node long-term private key not configured")
 	}
 
-	privKeyData, err := os.ReadFile(conf.Node.LongTermPrivKey)
+	privateKey, err := dzm.LoadPrivateKey(conf.Node.LongTermPrivKey)
 	if err != nil {
-		return fmt.Errorf("failed to read private key file %s: %v", conf.Node.LongTermPrivKey, err)
+		return fmt.Errorf("failed to load private key: %v", err)
 	}
-
-	// Parse private key (skip comments, decode hex)
-	privKeyLines := strings.Split(string(privKeyData), "\n")
-	var privKeyHex string
-	for _, line := range privKeyLines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			privKeyHex += line
-		}
-	}
-
-	if privKeyHex == "" {
-		return fmt.Errorf("could not find private key in file %s", conf.Node.LongTermPrivKey)
-	}
-
-	privateKey, err := hex.DecodeString(privKeyHex)
-	if err != nil {
-		return fmt.Errorf("failed to decode hex private key: %v", err)
-	}
-
-	if len(privateKey) != 32 {
-		return fmt.Errorf("private key must be 32 bytes (got %d)", len(privateKey))
-	}
-
 	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
 
-	// Step 3: Decrypt the entire payload
-	// Format from KDC: <ephemeral_pub_key (32 bytes)><ciphertext>
-	// Where ciphertext from hpke.Encrypt is: <encapsulated_key (32 bytes)><encrypted_data>
-	// Note: For X25519, ephemeralPub == encapsulated_key (they're the same)
-	// So the format is: <ephemeralPub (32 bytes)><encapsulated_key (32 bytes)><encrypted_data>
-	// We need to skip the first 32 bytes (duplicate) and pass the rest to hpke.Decrypt
-	if len(encryptedData) < 64 {
-		return fmt.Errorf("encrypted data too short: %d bytes (expected at least 64: 32 for ephemeral + 32 for encapsulated key)", len(encryptedData))
-	}
-
-	// Extract the actual ciphertext (skip first 32 bytes which is duplicate ephemeralPub)
-	// The ciphertext from hpke.Encrypt already includes the encapsulated key
-	actualCiphertext := encryptedData[32:]
-
-	log.Printf("KRS: Encrypted payload: total %d bytes, skipping first 32 bytes (duplicate ephemeralPub), ciphertext %d bytes", 
-		len(encryptedData), len(actualCiphertext))
-
-	// Decrypt using HPKE
-	// hpke.Decrypt expects: <encapsulated_key (32 bytes)><encrypted_data>
-	plaintextJSON, err := hpke.Decrypt(privateKey, nil, actualCiphertext)
+	// Step 2: Decrypt the entire payload using shared function
+	plaintextJSON, err := dzm.DecodeAndDecrypt(privateKey, data)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt distribution payload: %v", err)
 	}
 
 	log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
 
-	// Step 4: Parse JSON structure (cleartext)
+	// Step 3: Parse JSON structure (cleartext)
 	type ComponentEntry struct {
 		ComponentID string `json:"component_id"`
 	}
@@ -988,7 +681,7 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributio
 
 	log.Printf("KRS: Parsed %d component entries from decrypted payload", len(entries))
 
-	// Step 5: Store component assignments in the database
+	// Step 4: Store component assignments in the database
 	componentIDs := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		componentIDs = append(componentIDs, entry.ComponentID)
@@ -999,11 +692,65 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributio
 	log.Printf("KRS: Distribution ID: %s", distID)
 
 	// Store components in the database
+	var successfulComponents []edns0.ComponentStatusEntry
+	var failedComponents []edns0.ComponentStatusEntry
+	
+	for _, componentID := range componentIDs {
+		// For now, assume all components succeed (we could add error handling later)
+		successfulComponents = append(successfulComponents, edns0.ComponentStatusEntry{
+			ComponentID: componentID,
+		})
+	}
+	
 	if err := krsDB.StoreNodeComponents(componentIDs, distID); err != nil {
 		log.Printf("KRS: Warning: Failed to store components in database: %v", err)
-		// Don't fail the entire process if storage fails
+		// Mark all components as failed if storage fails
+		failedComponents = successfulComponents
+		successfulComponents = nil
+		for i := range failedComponents {
+			failedComponents[i].Error = err.Error()
+		}
+	}
+
+	// Send confirmation NOTIFY back to KDC
+	// Get KDC address from config
+	kdcAddress := conf.Node.KdcAddress
+	if kdcAddress == "" {
+		// Fallback to database
+		nodeConfig, err := krsDB.GetNodeConfig()
+		if err == nil && nodeConfig.KdcAddress != "" {
+			kdcAddress = nodeConfig.KdcAddress
+		}
+	}
+
+	if kdcAddress != "" && distID != "" {
+		// Send confirmation asynchronously (don't block on network I/O)
+		// Capture distID and component status in closure
+		distIDCopy := distID
+		successfulComponentsCopy := successfulComponents
+		failedComponentsCopy := failedComponents
+		go func() {
+			if err := SendComponentConfirmationToKDC(distIDCopy, conf.ControlZone, kdcAddress, successfulComponentsCopy, failedComponentsCopy); err != nil {
+				log.Printf("KRS: Warning: Failed to send component confirmation NOTIFY: %v", err)
+			} else {
+				log.Printf("KRS: Successfully sent component confirmation NOTIFY for distribution %s", distIDCopy)
+			}
+		}()
+	} else {
+		if distID == "" {
+			log.Printf("KRS: Warning: Distribution ID not available, cannot send component confirmation NOTIFY")
+		} else {
+			log.Printf("KRS: Warning: KDC address not configured, cannot send component confirmation NOTIFY")
+		}
 	}
 
 	return nil
+}
+
+// loadPrivateKey loads a private key from a file path
+// The file should contain a hex-encoded 32-byte HPKE private key
+// This is a wrapper around dzm.LoadPrivateKey for backward compatibility
+func loadPrivateKey(keyPath string) ([]byte, error) {
+	return dzm.LoadPrivateKey(keyPath)
 }
 

@@ -20,7 +20,7 @@ type KdcConf struct {
 	PublishTime time.Duration `yaml:"publish_time" mapstructure:"publish_time"` // Time to wait before published -> standby
 	RetireTime time.Duration `yaml:"retire_time" mapstructure:"retire_time"` // Time to wait before retired -> removed
 	DistributionTTL time.Duration `yaml:"distribution_ttl" mapstructure:"distribution_ttl"` // TTL for distributions (default: 5 minutes, like TSIG)
-	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"` // Maximum RDATA size per OLDCHUNK (bytes, default: 60000)
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"` // Maximum RDATA size per CHUNK (bytes, default: 60000)
 	KdcHpkePrivKey string `yaml:"kdc_hpke_priv_key" mapstructure:"kdc_hpke_priv_key"` // Path to KDC HPKE private key file
 	KdcBootstrapAddress string `yaml:"kdc_bootstrap_address" mapstructure:"kdc_bootstrap_address"` // IP:port where KDC accepts bootstrap requests
 	BootstrapExpirationWindow time.Duration `yaml:"bootstrap_expiration_window" mapstructure:"bootstrap_expiration_window"` // Expiration window after activation (default: 5 minutes)

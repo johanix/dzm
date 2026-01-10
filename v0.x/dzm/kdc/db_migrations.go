@@ -746,3 +746,284 @@ func (kdc *KdcDB) migrateRemoveBootstrapTokensFK() error {
 	return nil
 }
 
+// migrateMakeDistributionZoneKeyNullable makes zone_name and key_id nullable in distribution_records
+// This allows node_components distributions to use NULL for these fields (they're not about zones/keys)
+// Foreign key constraints remain but only apply when values are NOT NULL
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateMakeDistributionZoneKeyNullable() error {
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if columns are already nullable by checking table info
+		var zoneNameNullable, keyIDNullable bool
+		
+		rows, err := kdc.DB.Query("PRAGMA table_info(distribution_records)")
+		if err != nil {
+			return fmt.Errorf("failed to query table info: %v", err)
+		}
+		defer rows.Close()
+		
+		for rows.Next() {
+			var cid int
+			var name, dataType string
+			var notNull int
+			var defaultValue, pk interface{}
+			
+			if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+				continue
+			}
+			
+			if name == "zone_name" {
+				zoneNameNullable = (notNull == 0)
+			}
+			if name == "key_id" {
+				keyIDNullable = (notNull == 0)
+			}
+		}
+		
+		if zoneNameNullable && keyIDNullable {
+			// Already nullable, nothing to do
+			return nil
+		}
+		
+		// Need to recreate table to make columns nullable
+		log.Printf("KDC: Recreating distribution_records table to make zone_name and key_id nullable")
+		
+		// Create new table with nullable zone_name and key_id
+		_, err = kdc.DB.Exec(`
+			CREATE TABLE IF NOT EXISTS distribution_records_new (
+				id TEXT PRIMARY KEY,
+				zone_name TEXT,
+				key_id TEXT,
+				node_id TEXT,
+				encrypted_key BLOB NOT NULL,
+				ephemeral_pub_key BLOB NOT NULL,
+				created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				expires_at DATETIME,
+				status TEXT NOT NULL DEFAULT 'pending',
+				distribution_id TEXT NOT NULL,
+				completed_at DATETIME,
+				FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
+				FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
+				FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+				CHECK (status IN ('pending', 'delivered', 'active', 'revoked', 'completed'))
+			)`)
+		if err != nil {
+			return fmt.Errorf("failed to create new distribution_records table: %v", err)
+		}
+		
+		// Copy data
+		_, err = kdc.DB.Exec(`
+			INSERT INTO distribution_records_new 
+			SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, 
+			       created_at, expires_at, status, distribution_id, completed_at
+			FROM distribution_records`)
+		if err != nil {
+			return fmt.Errorf("failed to copy data to new table: %v", err)
+		}
+		
+		// Drop old table
+		_, err = kdc.DB.Exec("DROP TABLE distribution_records")
+		if err != nil {
+			return fmt.Errorf("failed to drop old table: %v", err)
+		}
+		
+		// Rename new table
+		_, err = kdc.DB.Exec("ALTER TABLE distribution_records_new RENAME TO distribution_records")
+		if err != nil {
+			return fmt.Errorf("failed to rename new table: %v", err)
+		}
+		
+		// Recreate indexes
+		indexes := []string{
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_zone_name ON distribution_records(zone_name)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_key_id ON distribution_records(key_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_node_id ON distribution_records(node_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_status ON distribution_records(status)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_distribution_id ON distribution_records(distribution_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_completed_at ON distribution_records(completed_at)",
+		}
+		for _, idxStmt := range indexes {
+			if _, err := kdc.DB.Exec(idxStmt); err != nil {
+				log.Printf("KDC: Warning: Failed to create index: %v", err)
+			}
+		}
+		
+		log.Printf("KDC: Successfully made zone_name and key_id nullable in distribution_records")
+	} else {
+		// MySQL/MariaDB: Use ALTER TABLE to modify columns
+		// Check if columns are already nullable
+		var zoneNameNullable, keyIDNullable bool
+		
+		var zoneNameNull, keyIDNull string
+		err := kdc.DB.QueryRow(
+			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_records' AND COLUMN_NAME = 'zone_name'",
+		).Scan(&zoneNameNull)
+		if err == nil {
+			zoneNameNullable = (zoneNameNull == "YES")
+		}
+		
+		err = kdc.DB.QueryRow(
+			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_records' AND COLUMN_NAME = 'key_id'",
+		).Scan(&keyIDNull)
+		if err == nil {
+			keyIDNullable = (keyIDNull == "YES")
+		}
+		
+		if zoneNameNullable && keyIDNullable {
+			// Already nullable, nothing to do
+			return nil
+		}
+		
+		// Modify columns to allow NULL
+		if !zoneNameNullable {
+			_, err = kdc.DB.Exec(
+				"ALTER TABLE distribution_records MODIFY COLUMN zone_name VARCHAR(255) NULL",
+			)
+			if err != nil {
+				return fmt.Errorf("failed to make zone_name nullable: %v", err)
+			}
+			log.Printf("KDC: Made zone_name nullable in distribution_records")
+		}
+		
+		if !keyIDNullable {
+			_, err = kdc.DB.Exec(
+				"ALTER TABLE distribution_records MODIFY COLUMN key_id VARCHAR(255) NULL",
+			)
+			if err != nil {
+				return fmt.Errorf("failed to make key_id nullable: %v", err)
+			}
+			log.Printf("KDC: Made key_id nullable in distribution_records")
+		}
+	}
+	
+	return nil
+}
+
+// migrateMakeDistributionConfirmationsZoneKeyNullable makes zone_name and key_id nullable in distribution_confirmations
+// This allows node_components distributions to use NULL for these fields (they're not about zones/keys)
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateMakeDistributionConfirmationsZoneKeyNullable() error {
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if columns are already nullable by trying to insert NULL
+		// Actually, SQLite doesn't enforce NOT NULL constraints on existing tables when we alter them
+		// We need to recreate the table or use a workaround
+		// For now, let's check if we can insert a NULL value
+		var testID string = "migration_test_" + fmt.Sprintf("%d", time.Now().Unix())
+		_, err := kdc.DB.Exec(
+			`INSERT INTO distribution_confirmations (id, distribution_id, zone_name, key_id, node_id) 
+			 VALUES (?, 'test', NULL, NULL, 'test')`,
+			testID,
+		)
+		if err == nil {
+			// NULL is allowed, delete test record
+			kdc.DB.Exec("DELETE FROM distribution_confirmations WHERE id = ?", testID)
+			return nil
+		}
+		
+		// NULL is not allowed, need to recreate table
+		log.Printf("KDC: Recreating distribution_confirmations table to make zone_name and key_id nullable")
+		
+		// Create new table with nullable columns
+		_, err = kdc.DB.Exec(`
+			CREATE TABLE IF NOT EXISTS distribution_confirmations_new (
+				id TEXT PRIMARY KEY,
+				distribution_id TEXT NOT NULL,
+				zone_name TEXT NULL,
+				key_id TEXT NULL,
+				node_id TEXT NOT NULL,
+				confirmed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
+				FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
+				FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+				UNIQUE (distribution_id, node_id)
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create new distribution_confirmations table: %v", err)
+		}
+		
+		// Copy data from old table to new (convert empty strings to NULL)
+		_, err = kdc.DB.Exec(`
+			INSERT INTO distribution_confirmations_new 
+			SELECT id, distribution_id, 
+			       CASE WHEN zone_name = '' THEN NULL ELSE zone_name END,
+			       CASE WHEN key_id = '' THEN NULL ELSE key_id END,
+			       node_id, confirmed_at
+			FROM distribution_confirmations
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to copy data to new table: %v", err)
+		}
+		
+		// Drop old table and rename new one
+		_, err = kdc.DB.Exec("DROP TABLE distribution_confirmations")
+		if err != nil {
+			return fmt.Errorf("failed to drop old table: %v", err)
+		}
+		
+		_, err = kdc.DB.Exec("ALTER TABLE distribution_confirmations_new RENAME TO distribution_confirmations")
+		if err != nil {
+			return fmt.Errorf("failed to rename new table: %v", err)
+		}
+		
+		// Recreate indexes
+		indexes := []string{
+			"CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_distribution_id ON distribution_confirmations(distribution_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_zone_key ON distribution_confirmations(zone_name, key_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_node_id ON distribution_confirmations(node_id)",
+		}
+		for _, idxStmt := range indexes {
+			if _, err := kdc.DB.Exec(idxStmt); err != nil {
+				log.Printf("KDC: Warning: Failed to create index: %v", err)
+			}
+		}
+		
+		log.Printf("KDC: Successfully made zone_name and key_id nullable in distribution_confirmations")
+	} else {
+		// MySQL/MariaDB: Use ALTER TABLE to modify columns
+		// Check if columns are already nullable
+		var zoneNameNullable, keyIDNullable bool
+		
+		var zoneNameNull, keyIDNull string
+		err := kdc.DB.QueryRow(
+			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_confirmations' AND COLUMN_NAME = 'zone_name'",
+		).Scan(&zoneNameNull)
+		if err == nil {
+			zoneNameNullable = (zoneNameNull == "YES")
+		}
+		
+		err = kdc.DB.QueryRow(
+			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_confirmations' AND COLUMN_NAME = 'key_id'",
+		).Scan(&keyIDNull)
+		if err == nil {
+			keyIDNullable = (keyIDNull == "YES")
+		}
+		
+		if zoneNameNullable && keyIDNullable {
+			// Already nullable, nothing to do
+			return nil
+		}
+		
+		// Modify columns to allow NULL
+		if !zoneNameNullable {
+			_, err = kdc.DB.Exec(
+				"ALTER TABLE distribution_confirmations MODIFY COLUMN zone_name VARCHAR(255) NULL",
+			)
+			if err != nil {
+				return fmt.Errorf("failed to make zone_name nullable: %v", err)
+			}
+			log.Printf("KDC: Made zone_name nullable in distribution_confirmations")
+		}
+		
+		if !keyIDNullable {
+			_, err = kdc.DB.Exec(
+				"ALTER TABLE distribution_confirmations MODIFY COLUMN key_id VARCHAR(255) NULL",
+			)
+			if err != nil {
+				return fmt.Errorf("failed to make key_id nullable: %v", err)
+			}
+			log.Printf("KDC: Made key_id nullable in distribution_confirmations")
+		}
+	}
+	
+	return nil
+}

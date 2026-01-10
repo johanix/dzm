@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * Chunk preparation and retrieval for MANIFEST and OLDCHUNK queries
+ * Chunk preparation and retrieval for CHUNK queries
  */
 
 package kdc
@@ -23,6 +23,8 @@ import (
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
+
+	"github.com/johanix/dzm/v0.x/dzm"
 )
 
 // chunkCache stores prepared chunks in memory (keyed by nodeID+distributionID)
@@ -44,7 +46,7 @@ var globalChunkCache = &chunkCache{
 }
 
 // prepareChunksForNode prepares chunks for a node's distribution event
-// This is called on-demand when MANIFEST is queried
+// This is called on-demand when CHUNK is queried
 func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcConf) (*preparedChunks, error) {
 	cacheKey := fmt.Sprintf("%s:%s", nodeID, distributionID)
 
@@ -93,10 +95,10 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	}
 
 	// Determine content type based on distribution records
-	// Check if this is a node_components distribution (zone_name == "_node_components")
+	// Check if this is a node_components distribution (zone_name and key_id are NULL)
 	// Otherwise, use "encrypted_keys" for key distributions
 	contentType := "encrypted_keys"
-	if len(nodeRecords) > 0 && nodeRecords[0].ZoneName == "_node_components" {
+	if len(nodeRecords) > 0 && nodeRecords[0].ZoneName == "" && nodeRecords[0].KeyID == "" {
 		contentType = "node_components"
 	}
 	
@@ -105,63 +107,31 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	var keyCount int
 
 	if contentType == "node_components" {
-		// Prepare JSON structure with component IDs
-		// For node_components distributions, we get the current component list directly from the database
-		// rather than decrypting from the distribution record, to ensure we always have the latest list
+		// For node_components distributions, use the encrypted data directly from the distribution record
+		// The distribution record already contains the correct encrypted component list
+		// (created with the intended component list, not the current DB state)
 		if len(nodeRecords) != 1 {
 			return nil, fmt.Errorf("node_components distribution should have exactly one record, got %d", len(nodeRecords))
 		}
 		
-		// Get the current component list from the database
-		components, err := kdc.GetComponentsForNode(nodeID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get components for node %s: %v", nodeID, err)
-		}
+		record := nodeRecords[0]
 		
-		// Sort components for consistent output
-		sort.Strings(components)
-		
-		// Prepare JSON structure
-		type ComponentEntry struct {
-			ComponentID string `json:"component_id"`
-		}
-		
-		entries := make([]ComponentEntry, 0, len(components))
-		for _, componentID := range components {
-			entries = append(entries, ComponentEntry{
-				ComponentID: componentID,
-			})
-		}
-		
-		componentCount := len(entries)
-		
-		if componentCount == 0 {
-			return nil, fmt.Errorf("no components found for node %s, distribution %s", nodeID, distributionID)
-		}
-		
-		// Marshal to JSON (cleartext)
-		componentsJSON, err := json.Marshal(entries)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal components JSON: %v", err)
-		}
-		
-		log.Printf("KDC: Prepared components JSON: %d components, JSON size: %d bytes", 
-			componentCount, len(componentsJSON))
-		
-		// Encrypt the entire JSON payload using HPKE
-		ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
+		// The distribution record already contains the encrypted component list
+		// Format stored: <ephemeral_pub_key (32 bytes)><ciphertext>
+		// We just need to combine them and base64 encode
+		if len(record.EphemeralPubKey) != 32 {
+			return nil, fmt.Errorf("invalid ephemeral public key length: %d (expected 32)", len(record.EphemeralPubKey))
 		}
 		
 		// Combine ephemeral public key and ciphertext for transport
 		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
-		encryptedData := append(ephemeralPub, ciphertext...)
+		encryptedData := append(record.EphemeralPubKey, record.EncryptedKey...)
 		
 		// Base64 encode the encrypted data
 		base64Data = []byte(base64.StdEncoding.EncodeToString(encryptedData))
-		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> encrypted %d bytes -> base64 %d bytes", 
-			len(componentsJSON), len(encryptedData), len(base64Data))
+		
+		log.Printf("KDC: Using encrypted component list from distribution record: encrypted %d bytes -> base64 %d bytes", 
+			len(encryptedData), len(base64Data))
 		
 		zoneCount = 0 // node_components doesn't have zones
 		keyCount = 0  // node_components doesn't have keys
@@ -241,20 +211,13 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		log.Printf("KDC: Prepared keys JSON: %d keys for %d zones, JSON size: %d bytes", 
 			keyCount, zoneCount, len(keysJSON))
 
-		// Encrypt the entire JSON payload using HPKE
-		ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, keysJSON)
+		// Encrypt the entire JSON payload using HPKE and encode for transport
+		base64Data, err = dzm.EncryptAndEncode(node.LongTermPubKey, keysJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
 		}
-
-		// Combine ephemeral public key and ciphertext for transport
-		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
-		encryptedData := append(ephemeralPub, ciphertext...)
-
-		// Base64 encode the encrypted data
-		base64Data = []byte(base64.StdEncoding.EncodeToString(encryptedData))
-		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> encrypted %d bytes -> base64 %d bytes", 
-			len(keysJSON), len(encryptedData), len(base64Data))
+		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> base64 %d bytes", 
+			len(keysJSON), len(base64Data))
 	} else {
 		// "zonelist" mode (fallback)
 		// Collect zone names from distribution records
@@ -284,60 +247,43 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	hash := sha256.Sum256([]byte(base64Data))
 	checksum := fmt.Sprintf("sha256:%x", hash)
 
-	// Create manifest
-	now := time.Now()
-	metadata := map[string]interface{}{
-		"content":         contentType,
-		"distribution_id": distributionID,
-		"node_id":         nodeID,
-		"timestamp":       now.Unix(), // Unix timestamp for replay protection (validated by KRS)
-	}
+	// Create manifest metadata
+	extraFields := make(map[string]interface{})
 	if contentType == "encrypted_keys" {
-		metadata["zone_count"] = zoneCount
-		metadata["key_count"] = keyCount
+		extraFields["zone_count"] = zoneCount
+		extraFields["key_count"] = keyCount
 	} else if contentType == "node_components" {
-		// Get component count from the data we prepared
-		if components, err := kdc.GetComponentsForNode(nodeID); err == nil {
-			metadata["component_count"] = len(components)
+		// Get component count from the stored component list for this distribution
+		// This ensures the metadata matches the actual payload (which comes from the distribution record)
+		_, intendedComponents, err := kdc.GetDistributionComponentList(distributionID)
+		if err == nil {
+			extraFields["component_count"] = len(intendedComponents)
+			log.Printf("KDC: Set component_count in metadata to %d (from stored distribution component list)", len(intendedComponents))
+		} else {
+			// Fallback: if we can't get the stored list, log a warning but don't fail
+			log.Printf("KDC: Warning: Failed to get component list for distribution %s to set metadata: %v", distributionID, err)
+			// Don't set component_count if we can't get the correct value
 		}
 	}
 	// Add retire_time from config if available
 	if conf != nil && conf.RetireTime > 0 {
-		metadata["retire_time"] = conf.RetireTime.String() // Convert duration to string (e.g., "168h0m0s")
+		extraFields["retire_time"] = conf.RetireTime.String() // Convert duration to string (e.g., "168h0m0s")
 	}
 	// Add distribution_ttl from config if available (for KRS validation)
 	if conf != nil && conf.GetDistributionTTL() > 0 {
-		metadata["distribution_ttl"] = conf.GetDistributionTTL().String() // Convert duration to string (e.g., "5m0s")
+		extraFields["distribution_ttl"] = conf.GetDistributionTTL().String() // Convert duration to string (e.g., "5m0s")
 	}
+	metadata := dzm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
 
 	// Determine if payload should be included inline
-	// DNS UDP message limit is ~1232 bytes with EDNS0, but we need to account for:
-	// - DNS headers (~12 bytes)
-	// - QNAME length (variable, ~50-100 bytes typical)
-	// - MANIFEST structure overhead (~200-300 bytes for metadata, field names, etc.)
-	// - JSON encoding overhead (base64 string encoding adds ~33% overhead)
-	// So we use a conservative threshold of ~500 bytes for base64Data to ensure it fits
-	const inlinePayloadThreshold = 500
 	payloadSize := len(base64Data)
-	
-	// Create a test manifest to check actual size
-	// Note: We use a placeholder HMAC for size estimation (actual HMAC will be calculated later)
-	testHMAC := make([]byte, 32) // HMAC-SHA256 is 32 bytes
-	testManifest := &core.MANIFEST{
-		Format:     core.FormatJSON,
-		ChunkCount: 0,
-		ChunkSize:  0,
-		HMAC:       testHMAC,
-		Metadata:   metadata,
-		Payload:    base64Data, // Test with actual payload
-	}
-	testSize := testManifest.Len()
+	testSize := dzm.EstimateManifestSize(metadata, base64Data)
 	
 	// Check if the manifest fits in DNS message (accounting for headers and QNAME)
 	// Estimate: DNS headers (~12) + QNAME (~100) + RR header (~10) + manifest data
 	const estimatedDNSOverhead = 150
 	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
+	includeInline := dzm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
 
 	var chunks []*core.OLDCHUNK
 	var chunkSize uint16
@@ -347,12 +293,12 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in MANIFEST", 
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest", 
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
-		chunks = splitIntoChunks([]byte(base64Data), chunkSizeInt)
+		chunks = dzm.SplitIntoChunks([]byte(base64Data), chunkSizeInt)
 		chunkCount = uint16(len(chunks))
 		chunkSize = uint16(chunkSizeInt)
 		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
@@ -377,37 +323,15 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	if err := manifest.CalculateHMAC(node.LongTermPubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
-	log.Printf("KDC: Calculated HMAC for MANIFEST using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
+	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
 
 	// Create CHUNK records (unified manifest/chunk format)
 	unifiedChunks := make([]*core.CHUNK, 0)
 	
 	// Create manifest CHUNK (Total=0)
-	// First, marshal the manifest JSON data (same as MANIFEST payload)
-	jsonFields := struct {
-		ChunkCount uint16                 `json:"chunk_count"`
-		ChunkSize  uint16                 `json:"chunk_size,omitempty"`
-		Metadata   map[string]interface{} `json:"metadata,omitempty"`
-		Payload    []byte                 `json:"payload,omitempty"`
-	}{
-		ChunkCount: manifest.ChunkCount,
-		ChunkSize:  manifest.ChunkSize,
-		Metadata:   manifest.Metadata,
-		Payload:    manifest.Payload,
-	}
-	manifestJSON, err := json.Marshal(jsonFields)
+	manifestCHUNK, err := dzm.CreateCHUNKFromManifest(manifest)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK: %v", err)
-	}
-	
-	manifestCHUNK := &core.CHUNK{
-		Format:     manifest.Format,
-		HMACLen:    uint16(len(manifest.HMAC)),
-		HMAC:       manifest.HMAC,
-		Sequence:   0, // Unused for manifest
-		Total:      0, // 0 indicates manifest
-		DataLength: uint16(len(manifestJSON)),
-		Data:       manifestJSON,
+		return nil, fmt.Errorf("failed to create CHUNK from manifest: %v", err)
 	}
 	unifiedChunks = append(unifiedChunks, manifestCHUNK)
 	
@@ -441,64 +365,12 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	globalChunkCache.cache[cacheKey] = prepared
 	globalChunkCache.mu.Unlock()
 
-	log.Printf("KDC: Prepared %d chunks (MANIFEST/OLDCHUNK) and %d CHUNK records for node %s, distribution %s", 
-		len(chunks), len(unifiedChunks), nodeID, distributionID)
+	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s", 
+		len(unifiedChunks), nodeID, distributionID)
 	return prepared, nil
 }
 
-// splitIntoChunks splits data into chunks of specified size
-func splitIntoChunks(data []byte, chunkSize int) []*core.OLDCHUNK {
-	if chunkSize <= 0 {
-		chunkSize = 60000 // Default
-	}
 
-	var chunks []*core.OLDCHUNK
-	total := len(data)
-	numChunks := (total + chunkSize - 1) / chunkSize // Ceiling division
-
-	for i := 0; i < numChunks; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if end > total {
-			end = total
-		}
-
-		chunkData := make([]byte, end-start)
-		copy(chunkData, data[start:end])
-
-		chunk := &core.OLDCHUNK{
-			Sequence: uint16(i),
-			Total:    uint16(numChunks),
-			Data:     chunkData,
-		}
-		chunks = append(chunks, chunk)
-	}
-
-	return chunks
-}
-
-// GetManifestForNode retrieves or prepares manifest for a node's distribution event
-func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcConf) (*core.MANIFEST, error) {
-	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
-	if err != nil {
-		return nil, err
-	}
-	return prepared.manifest, nil
-}
-
-// GetChunkForNode retrieves a specific chunk for a node's distribution event
-func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.OLDCHUNK, error) {
-	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
-	if err != nil {
-		return nil, err
-	}
-
-	if int(chunkID) >= len(prepared.chunks) {
-		return nil, fmt.Errorf("chunk ID %d out of range (max %d)", chunkID, len(prepared.chunks)-1)
-	}
-
-	return prepared.chunks[chunkID], nil
-}
 
 // GetCHUNKForNode retrieves a CHUNK record for a node's distribution event
 // chunkID 0 returns the manifest CHUNK (Total=0), chunkID > 0 returns data CHUNK (Total>0)
@@ -533,16 +405,24 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 	var records []*DistributionRecord
 	for rows.Next() {
 		record := &DistributionRecord{}
+		var zoneName sql.NullString
+		var keyID sql.NullString
 		var nodeID sql.NullString
 		var expiresAt sql.NullTime
 		var completedAt sql.NullTime
 		var statusStr string
 		if err := rows.Scan(
-			&record.ID, &record.ZoneName, &record.KeyID, &nodeID,
+			&record.ID, &zoneName, &keyID, &nodeID,
 			&record.EncryptedKey, &record.EphemeralPubKey, &record.CreatedAt,
 			&expiresAt, &statusStr, &record.DistributionID, &completedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan distribution record: %v", err)
+		}
+		if zoneName.Valid {
+			record.ZoneName = zoneName.String
+		}
+		if keyID.Valid {
+			record.KeyID = keyID.String
 		}
 		if nodeID.Valid {
 			record.NodeID = nodeID.String
@@ -714,20 +594,12 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	// var err error
 
 	if contentType == "encrypted_text" {
-
-		// Encrypt the text using HPKE
-		ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, []byte(text))
+		// Encrypt the text using HPKE and encode for transport
+		dataToChunk, err = dzm.EncryptAndEncode(node.LongTermPubKey, []byte(text))
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt text: %v", err)
 		}
-
-		// Combine ephemeral public key and ciphertext for transport
-		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
-		encryptedData := append(ephemeralPub, ciphertext...)
-
-		// Base64 encode the encrypted data
-		dataToChunk = []byte(base64.StdEncoding.EncodeToString(encryptedData))
-		log.Printf("KDC: Encrypted text (%d bytes) -> encrypted data (%d bytes) -> base64 (%d bytes)", len(text), len(encryptedData), len(dataToChunk))
+		log.Printf("KDC: Encrypted text (%d bytes) -> base64 (%d bytes)", len(text), len(dataToChunk))
 	} else {
 		// clear_text: just base64 encode the text
 		dataToChunk = []byte(base64.StdEncoding.EncodeToString([]byte(text)))
@@ -738,31 +610,19 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	checksum := fmt.Sprintf("sha256:%x", hash)
 
 	// Determine if payload should be included inline
-	const inlinePayloadThreshold = 500
 	payloadSize := len(dataToChunk)
-	
-	// Create a test manifest to check actual size
-	// Note: We use a placeholder HMAC for size estimation (actual HMAC will be calculated later)
-	testHMAC := make([]byte, 32) // HMAC-SHA256 is 32 bytes
-	testManifest := &core.MANIFEST{
-		Format:     core.FormatJSON,
-		ChunkCount: 0,
-		ChunkSize:  0,
-		HMAC:       testHMAC,
-		Metadata: map[string]interface{}{
-			"content":         contentType,
-			"distribution_id": distributionID,
-			"node_id":         nodeID,
-			"text_length":     len(text),
-		},
-		Payload: dataToChunk, // Test with actual payload
+	testMetadata := map[string]interface{}{
+		"content":         contentType,
+		"distribution_id": distributionID,
+		"node_id":         nodeID,
+		"text_length":     len(text),
 	}
-	testSize := testManifest.Len()
+	testSize := dzm.EstimateManifestSize(testMetadata, dataToChunk)
 	
 	// Check if the manifest fits in DNS message
 	const estimatedDNSOverhead = 150
 	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
+	includeInline := dzm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
 
 	var chunks []*core.OLDCHUNK
 	var chunkSize uint16
@@ -772,12 +632,12 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in MANIFEST", 
+		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest", 
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
-		chunks = splitIntoChunks(dataToChunk, chunkSizeInt)
+		chunks = dzm.SplitIntoChunks(dataToChunk, chunkSizeInt)
 		chunkCount = uint16(len(chunks))
 		chunkSize = uint16(chunkSizeInt)
 		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
@@ -785,16 +645,15 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	}
 
 	// Create manifest
+	extraFields := map[string]interface{}{
+		"text_length": len(text),
+	}
+	metadata := dzm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
 	manifest := &core.MANIFEST{
 		Format:     core.FormatJSON, // Set format to JSON (1)
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
-		Metadata: map[string]interface{}{
-			"content":         contentType,
-			"distribution_id": distributionID,
-			"node_id":         nodeID,
-			"text_length":     len(text),
-		},
+		Metadata:   metadata,
 	}
 
 	// Include payload inline if it fits
@@ -808,36 +667,15 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	if err := manifest.CalculateHMAC(node.LongTermPubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
-	log.Printf("KDC: Calculated HMAC for MANIFEST using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
+	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
 
 	// Create CHUNK records (unified manifest/chunk format)
 	unifiedChunks := make([]*core.CHUNK, 0)
 	
 	// Create manifest CHUNK (Total=0)
-	jsonFields := struct {
-		ChunkCount uint16                 `json:"chunk_count"`
-		ChunkSize  uint16                 `json:"chunk_size,omitempty"`
-		Metadata   map[string]interface{} `json:"metadata,omitempty"`
-		Payload    []byte                 `json:"payload,omitempty"`
-	}{
-		ChunkCount: manifest.ChunkCount,
-		ChunkSize:  manifest.ChunkSize,
-		Metadata:   manifest.Metadata,
-		Payload:    manifest.Payload,
-	}
-	manifestJSON, err := json.Marshal(jsonFields)
+	manifestCHUNK, err := dzm.CreateCHUNKFromManifest(manifest)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal manifest JSON for CHUNK: %v", err)
-	}
-	
-	manifestCHUNK := &core.CHUNK{
-		Format:     manifest.Format,
-		HMACLen:    uint16(len(manifest.HMAC)),
-		HMAC:       manifest.HMAC,
-		Sequence:   0, // Unused for manifest
-		Total:      0, // 0 indicates manifest
-		DataLength: uint16(len(manifestJSON)),
-		Data:       manifestJSON,
+		return nil, fmt.Errorf("failed to create CHUNK from manifest: %v", err)
 	}
 	unifiedChunks = append(unifiedChunks, manifestCHUNK)
 	
