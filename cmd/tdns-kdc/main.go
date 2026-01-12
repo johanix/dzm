@@ -16,7 +16,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
-	"github.com/johanix/dzm/v0.x/kdc"
+	"github.com/johanix/tdns-nm/v0.x/kdc"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/miekg/dns"
@@ -72,7 +72,7 @@ func main() {
 }
 
 // startKdc initializes and starts all KDC subsystems
-// This replaces the tdns.StartKdc() function but uses dzm packages
+// This replaces the tdns.StartKdc() function but uses tdns-nm packages
 func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
 	// Parse KDC configuration from stored YAML bytes
 	var kdcConf kdc.KdcConf

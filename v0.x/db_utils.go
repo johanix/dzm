@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * Database utility functions for DZM
+ * Database utility functions for TDNS Node Management
  */
 
 package dzm

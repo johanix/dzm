@@ -1,2 +1,2 @@
-# dzm
-DNS Zone Mgr
+# tdns-nm
+TDNS Node Management

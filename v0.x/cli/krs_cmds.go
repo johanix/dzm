@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/dzm/v0.x/krs"
+	"github.com/johanix/tdns-nm/v0.x/krs"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"

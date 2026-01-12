@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/johanix/dzm/v0.x/krs"
+	"github.com/johanix/tdns-nm/v0.x/krs"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"gopkg.in/yaml.v3"
@@ -72,7 +72,7 @@ func main() {
 }
 
 // startKrs initializes and starts all KRS subsystems
-// This replaces the tdns.StartKrs() function but uses dzm packages
+// This replaces the tdns.StartKrs() function but uses tdns-nm packages
 func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
 	// Parse KRS configuration from stored YAML bytes
 	var krsConf krs.KrsConf

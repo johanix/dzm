@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/dzm/v0.x/kdc"
+	"github.com/johanix/tdns-nm/v0.x/kdc"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"

@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"time"
 
-	dzm "github.com/johanix/dzm/v0.x"
+	dzm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/miekg/dns"
 )

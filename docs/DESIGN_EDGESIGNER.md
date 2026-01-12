@@ -15,8 +15,8 @@ The server acts as an edge signing node that:
 ## Architecture
 
 ### Location
-- **Application**: `dzm/cmd/tdns-edgesigner/`
-- **Library Code**: `dzm/v0.x/dzm/edgesigner/` (new package)
+- **Application**: `tdns-nm/cmd/tdns-edgesigner/`
+- **Library Code**: `tdns-nm/v0.x/edgesigner/` (new package)
 - **Shared Code**: Reuses `tdns/v0.x/tdns` (keystore, DNS engine, etc.)
 
 ### Component Integration
@@ -71,7 +71,7 @@ The server acts as an edge signing node that:
 - Confirmation sending (`SendConfirmationToKDC`)
 - KRS database schema (`received_keys` table)
 
-#### New Code (dzm/v0.x/dzm/edgesigner):
+#### New Code (tdns-nm/v0.x/edgesigner):
 - Integration layer between KRS and keystore
 - Key format conversion (KRS format → Keystore format)
 - Unified configuration structure
@@ -82,7 +82,7 @@ The server acts as an edge signing node that:
 ### 1. Directory Structure
 
 ```
-dzm/
+tdns-nm/
 ├── cmd/
 │   └── tdns-edgesigner/
 │       ├── main.go              # Application entry point
@@ -92,7 +92,7 @@ dzm/
 │       └── tdns-edgesigner.sample.yaml
 │
 └── v0.x/
-    └── dzm/
+    └── tdns-nm/
         └── edgesigner/
             ├── config.go        # Unified configuration
             ├── keystore_bridge.go # KRS → Keystore conversion
@@ -348,13 +348,13 @@ Extend the standard tdns-auth API with KRS-specific endpoints:
 ### 9. Dependencies
 
 ```go
-// dzm/cmd/tdns-edgesigner/go.mod
-module github.com/johanix/dzm/cmd/tdns-edgesigner
+// tdns-nm/cmd/tdns-edgesigner/go.mod
+module github.com/johanix/tdns-nm/cmd/tdns-edgesigner
 
 require (
     github.com/johanix/tdns/v0.x/tdns v0.x.x  // tdns library (keystore, DNS engine)
-    github.com/johanix/dzm/v0.x/krs v0.x.x // KRS library
-    github.com/johanix/dzm/v0.x/edgesigner v0.x.x // Integration layer
+    github.com/johanix/tdns-nm/v0.x/krs v0.x.x // KRS library
+    github.com/johanix/tdns-nm/v0.x/edgesigner v0.x.x // Integration layer
     // ... other dependencies
 )
 ```

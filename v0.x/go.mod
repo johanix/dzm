@@ -1,4 +1,4 @@
-module github.com/johanix/dzm/v0.x
+module github.com/johanix/tdns-nm/v0.x
 
 go 1.24.0
 
