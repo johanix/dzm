@@ -192,16 +192,10 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	}
 
 	// Register handlers for each qtype that KDC handles
-	if err := tdns.RegisterQueryHandler(core.TypeMANIFEST, kdcQueryHandler); err != nil {
-		return fmt.Errorf("failed to register MANIFEST handler: %v", err)
-	}
-	if err := tdns.RegisterQueryHandler(core.TypeOLDCHUNK, kdcQueryHandler); err != nil {
-		return fmt.Errorf("failed to register OLDCHUNK handler: %v", err)
-	}
 	if err := tdns.RegisterQueryHandler(core.TypeCHUNK, kdcQueryHandler); err != nil {
 		return fmt.Errorf("failed to register CHUNK handler: %v", err)
 	}
-	log.Printf("KDC: Registered query handlers for MANIFEST, OLDCHUNK, and CHUNK")
+	log.Printf("KDC: Registered query handler for CHUNK")
 
 	// Register default query handler for zone-based queries (e.g., catalog zone)
 	// This is needed because KDC doesn't have zones in config, but may have programmatically added zones

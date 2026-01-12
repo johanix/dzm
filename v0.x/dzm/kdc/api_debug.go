@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/johanix/dzm/v0.x/dzm"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/miekg/dns"
 )
@@ -92,8 +93,20 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					} else {
 						resp.Msg = fmt.Sprintf("Test distribution %s created successfully for node %s", req.DistributionID, nodeIDFQDN)
 						resp.DistributionID = req.DistributionID
-						resp.ChunkCount = prepared.manifest.ChunkCount
-						log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, prepared.manifest.ChunkCount)
+						// Get chunk count from first CHUNK (manifest)
+						if len(prepared.chunks) > 0 && prepared.chunks[0].Total == 0 {
+							manifestData, err := dzm.ExtractManifestData(prepared.chunks[0])
+							if err == nil {
+								resp.ChunkCount = manifestData.ChunkCount
+								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, manifestData.ChunkCount)
+							} else {
+								resp.ChunkCount = uint16(len(prepared.chunks) - 1) // -1 for manifest
+								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
+							}
+						} else {
+							resp.ChunkCount = uint16(len(prepared.chunks) - 1) // -1 for manifest
+							log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
+						}
 					}
 				}
 			}

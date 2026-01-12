@@ -7,9 +7,8 @@
 package dzm
 
 import (
+	"encoding/json"
 	"time"
-
-	"github.com/johanix/tdns/v0.x/tdns/core"
 )
 
 // CreateManifestMetadata creates base metadata for a distribution manifest
@@ -39,17 +38,31 @@ func ShouldIncludePayloadInline(payloadSize, estimatedTotalSize int) bool {
 	return payloadSize <= inlinePayloadThreshold && estimatedTotalSize < maxTotalSize
 }
 
-// EstimateManifestSize estimates the size of a manifest with the given metadata and payload
+// EstimateManifestSize estimates the size of a CHUNK manifest with the given metadata and payload
 // Uses a placeholder HMAC for size estimation
 func EstimateManifestSize(metadata map[string]interface{}, payload []byte) int {
-	testHMAC := make([]byte, 32) // HMAC-SHA256 is 32 bytes
-	testManifest := &core.MANIFEST{
-		Format:     core.FormatJSON,
+	// Create test manifest data
+	testManifestData := &ManifestData{
 		ChunkCount: 0,
 		ChunkSize:  0,
-		HMAC:       testHMAC,
 		Metadata:   metadata,
 		Payload:    payload,
 	}
-	return testManifest.Len()
+	
+	// Marshal to JSON to get size
+	manifestJSON, err := json.Marshal(testManifestData)
+	if err != nil {
+		// Fallback estimate if marshaling fails
+		return 500
+	}
+	
+	// CHUNK manifest size = Format (1) + HMACLen (2) + HMAC (32) + Sequence (2) + Total (2) + DataLength (2) + Data
+	// Format: 1 byte
+	// HMACLen: 2 bytes
+	// HMAC: 32 bytes
+	// Sequence: 2 bytes
+	// Total: 2 bytes
+	// DataLength: 2 bytes
+	// Data: len(manifestJSON) bytes
+	return 1 + 2 + 32 + 2 + 2 + 2 + len(manifestJSON)
 }

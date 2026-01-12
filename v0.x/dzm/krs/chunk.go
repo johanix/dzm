@@ -140,11 +140,10 @@ func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, sequ
 	return nil, fmt.Errorf("failed to parse CHUNK from response")
 }
 
-// ExtractManifestFromCHUNK extracts MANIFEST-like information from a CHUNK manifest chunk
-// Returns the same structure that ProcessDistribution expects
-// This is a wrapper around dzm.UnmarshalManifestFromCHUNK for backward compatibility
-func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*core.MANIFEST, error) {
-	return dzm.UnmarshalManifestFromCHUNK(chunk)
+// ExtractManifestFromCHUNK extracts manifest data from a CHUNK manifest chunk
+// This is a wrapper around dzm.ExtractManifestData for backward compatibility
+func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*dzm.ManifestData, error) {
+	return dzm.ExtractManifestData(chunk)
 }
 
 // ReassembleCHUNKChunks reassembles CHUNK chunks into complete data
@@ -172,7 +171,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	}
 
 	// Extract manifest information from CHUNK
-	manifest, err := ExtractManifestFromCHUNK(manifestChunk)
+	manifestData, err := ExtractManifestFromCHUNK(manifestChunk)
 	if err != nil {
 		return fmt.Errorf("failed to extract manifest from CHUNK: %v", err)
 	}
@@ -192,7 +191,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		}
 
 		// Verify HMAC using the public key
-		valid, err := manifest.VerifyHMAC(publicKey)
+		valid, err := dzm.VerifyCHUNKHMAC(manifestChunk, publicKey)
 		if err != nil {
 			return fmt.Errorf("failed to verify CHUNK manifest HMAC: %v", err)
 		}
@@ -209,16 +208,16 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	retireTime := ""
 	var distributionTimestamp int64
 	var distributionTTL time.Duration
-	if manifest.Metadata != nil {
-		if c, ok := manifest.Metadata["content"].(string); ok {
+	if manifestData.Metadata != nil {
+		if c, ok := manifestData.Metadata["content"].(string); ok {
 			contentType = c
 		}
-		if rt, ok := manifest.Metadata["retire_time"].(string); ok {
+		if rt, ok := manifestData.Metadata["retire_time"].(string); ok {
 			retireTime = rt
 			log.Printf("KRS: Extracted retire_time from metadata: %s", retireTime)
 		}
 		// Extract timestamp for replay protection
-		if ts, ok := manifest.Metadata["timestamp"].(float64); ok {
+		if ts, ok := manifestData.Metadata["timestamp"].(float64); ok {
 			distributionTimestamp = int64(ts)
 			log.Printf("KRS: Extracted timestamp from metadata: %d", distributionTimestamp)
 		} else {
@@ -226,7 +225,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 			return fmt.Errorf("missing timestamp in distribution metadata (replay protection)")
 		}
 		// Extract distribution_ttl (default to 5 minutes if not present)
-		if ttlStr, ok := manifest.Metadata["distribution_ttl"].(string); ok {
+		if ttlStr, ok := manifestData.Metadata["distribution_ttl"].(string); ok {
 			parsedTTL, err := time.ParseDuration(ttlStr)
 			if err != nil {
 				log.Printf("KRS: Warning: Failed to parse distribution_ttl '%s', using default 5 minutes: %v", ttlStr, err)
@@ -256,27 +255,27 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	}
 	log.Printf("KRS: Distribution timestamp validated: age %v (within TTL %v)", age, distributionTTL)
 
-	log.Printf("KRS: Distribution content type: %s, chunk_count: %d", contentType, manifest.ChunkCount)
+	log.Printf("KRS: Distribution content type: %s, chunk_count: %d", contentType, manifestData.ChunkCount)
 
 	var reassembled []byte
 
 	// Check if payload is included inline in manifest
-	if len(manifest.Payload) > 0 {
+	if len(manifestData.Payload) > 0 {
 		// Payload is inline, use it directly
-		reassembled = make([]byte, len(manifest.Payload))
-		copy(reassembled, manifest.Payload)
+		reassembled = make([]byte, len(manifestData.Payload))
+		copy(reassembled, manifestData.Payload)
 		log.Printf("KRS: Using inline payload from CHUNK manifest (%d bytes)", len(reassembled))
-	} else if manifest.ChunkCount > 0 {
+	} else if manifestData.ChunkCount > 0 {
 		// Payload is chunked, fetch all CHUNK chunks
 		// Note: CHUNK uses sequence 0 for manifest, so data chunks start at sequence 1
 		var chunks []*core.CHUNK
-		for i := uint16(1); i <= manifest.ChunkCount; i++ {
-			chunk, err := QueryCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
+		for i := uint16(1); i <= manifestData.ChunkCount; i++ {
+			chunk, err := QueryCHUNK(krsDB, conf, nodeID, distributionID, i, manifestData.ChunkSize)
 			if err != nil {
 				return fmt.Errorf("failed to query CHUNK chunk %d: %v", i, err)
 			}
 			chunks = append(chunks, chunk)
-			log.Printf("KRS: Fetched CHUNK chunk %d/%d (sequence %d)", i, manifest.ChunkCount, chunk.Sequence)
+			log.Printf("KRS: Fetched CHUNK chunk %d/%d (sequence %d)", i, manifestData.ChunkCount, chunk.Sequence)
 		}
 
 		// Reassemble chunks

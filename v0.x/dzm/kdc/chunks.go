@@ -34,9 +34,7 @@ type chunkCache struct {
 }
 
 type preparedChunks struct {
-	manifest  *core.MANIFEST
-	chunks    []*core.OLDCHUNK
-	unifiedChunks []*core.CHUNK // CHUNK records (unified manifest/chunk)
+	chunks []*core.CHUNK // CHUNK records (manifest + data chunks)
 	checksum  string
 	timestamp int64
 }
@@ -285,9 +283,9 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := dzm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
 
-	var chunks []*core.OLDCHUNK
-	var chunkSize uint16
+	var dataChunks []*core.CHUNK
 	var chunkCount uint16
+	var chunkSize uint16
 
 	if includeInline {
 		// Payload fits inline, include it directly in manifest
@@ -298,15 +296,15 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
-		chunks = dzm.SplitIntoChunks([]byte(base64Data), chunkSizeInt)
-		chunkCount = uint16(len(chunks))
+		dataChunks = dzm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
 		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
-	manifest := &core.MANIFEST{
-		Format:     core.FormatJSON, // Set format to JSON (1)
+	// Create manifest data
+	manifestData := &dzm.ManifestData{
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
 		Metadata:   metadata,
@@ -314,48 +312,30 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 
 	// Include payload inline if it fits
 	if includeInline {
-		manifest.Payload = make([]byte, len(base64Data))
-		copy(manifest.Payload, base64Data)
+		manifestData.Payload = make([]byte, len(base64Data))
+		copy(manifestData.Payload, base64Data)
+	}
+
+	// Create manifest CHUNK (Total=0)
+	manifestCHUNK, err := dzm.CreateCHUNKManifest(manifestData, core.FormatJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
 	}
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
-	if err := manifest.CalculateHMAC(node.LongTermPubKey); err != nil {
+	if err := dzm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
+	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
 
-	// Create CHUNK records (unified manifest/chunk format)
-	unifiedChunks := make([]*core.CHUNK, 0)
-	
-	// Create manifest CHUNK (Total=0)
-	manifestCHUNK, err := dzm.CreateCHUNKFromManifest(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create CHUNK from manifest: %v", err)
-	}
-	unifiedChunks = append(unifiedChunks, manifestCHUNK)
-	
-	// Create data CHUNK records (Total>0)
-		// Note: OLDCHUNK uses 0-based sequence (0, 1, 2, ..., N-1), but CHUNK uses 1-based sequence
-	// to match chunkID in QNAME (chunkID 0 = manifest, chunkID 1+ = data chunks)
-	// So unifiedChunks[0] = manifest (chunkID 0), unifiedChunks[1] = data chunk 1 (chunkID 1), etc.
-	for i, oldchunk := range chunks {
-		chunk := &core.CHUNK{
-			Format:     manifest.Format, // Store format from manifest (not 0)
-			HMACLen:    0, // No HMAC for data chunks
-			HMAC:       nil,
-			Sequence:   uint16(i + 1), // 1-based: chunkID 1, 2, 3, ..., N
-			Total:      oldchunk.Total,   // Total number of data chunks
-			DataLength: uint16(len(oldchunk.Data)),
-			Data:       oldchunk.Data,
-		}
-		unifiedChunks = append(unifiedChunks, chunk)
-	}
+	// Create CHUNK records (manifest + data chunks)
+	allChunks := make([]*core.CHUNK, 0)
+	allChunks = append(allChunks, manifestCHUNK)
+	allChunks = append(allChunks, dataChunks...)
 
 	prepared := &preparedChunks{
-		manifest:      manifest,
-		chunks:        chunks,
-		unifiedChunks: unifiedChunks,
+		chunks:    allChunks,
 		checksum:  checksum,
 		timestamp: 0, // TODO: add timestamp
 	}
@@ -366,7 +346,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	globalChunkCache.mu.Unlock()
 
 	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s", 
-		len(unifiedChunks), nodeID, distributionID)
+		len(allChunks), nodeID, distributionID)
 	return prepared, nil
 }
 
@@ -380,11 +360,11 @@ func (kdc *KdcDB) GetCHUNKForNode(nodeID, distributionID string, chunkID uint16,
 		return nil, err
 	}
 
-	if int(chunkID) >= len(prepared.unifiedChunks) {
-		return nil, fmt.Errorf("CHUNK ID %d out of range (max %d)", chunkID, len(prepared.unifiedChunks)-1)
+	if int(chunkID) >= len(prepared.chunks) {
+		return nil, fmt.Errorf("CHUNK ID %d out of range (max %d)", chunkID, len(prepared.chunks)-1)
 	}
 
-	return prepared.unifiedChunks[chunkID], nil
+	return prepared.chunks[chunkID], nil
 }
 
 // GetDistributionRecordsForDistributionID gets all distribution records for a distribution ID
@@ -624,9 +604,9 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := dzm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
 
-	var chunks []*core.OLDCHUNK
-	var chunkSize uint16
+	var dataChunks []*core.CHUNK
 	var chunkCount uint16
+	var chunkSize uint16
 
 	if includeInline {
 		// Payload fits inline, include it directly in manifest
@@ -637,20 +617,19 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
-		chunks = dzm.SplitIntoChunks(dataToChunk, chunkSizeInt)
-		chunkCount = uint16(len(chunks))
+		dataChunks = dzm.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
+		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
 		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
-	// Create manifest
+	// Create manifest data
 	extraFields := map[string]interface{}{
 		"text_length": len(text),
 	}
 	metadata := dzm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
-	manifest := &core.MANIFEST{
-		Format:     core.FormatJSON, // Set format to JSON (1)
+	manifestData := &dzm.ManifestData{
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
 		Metadata:   metadata,
@@ -658,48 +637,30 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 
 	// Include payload inline if it fits
 	if includeInline {
-		manifest.Payload = make([]byte, len(dataToChunk))
-		copy(manifest.Payload, dataToChunk)
+		manifestData.Payload = make([]byte, len(dataToChunk))
+		copy(manifestData.Payload, dataToChunk)
+	}
+
+	// Create manifest CHUNK (Total=0)
+	manifestCHUNK, err := dzm.CreateCHUNKManifest(manifestData, core.FormatJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
 	}
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
-	if err := manifest.CalculateHMAC(node.LongTermPubKey); err != nil {
+	if err := dzm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifest.HMAC))
+	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
 
-	// Create CHUNK records (unified manifest/chunk format)
-	unifiedChunks := make([]*core.CHUNK, 0)
-	
-	// Create manifest CHUNK (Total=0)
-	manifestCHUNK, err := dzm.CreateCHUNKFromManifest(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create CHUNK from manifest: %v", err)
-	}
-	unifiedChunks = append(unifiedChunks, manifestCHUNK)
-	
-	// Create data CHUNK records (Total>0)
-		// Note: OLDCHUNK uses 0-based sequence (0, 1, 2, ..., N-1), but CHUNK uses 1-based sequence
-	// to match chunkID in QNAME (chunkID 0 = manifest, chunkID 1+ = data chunks)
-	// So unifiedChunks[0] = manifest (chunkID 0), unifiedChunks[1] = data chunk 1 (chunkID 1), etc.
-	for i, oldchunk := range chunks {
-		chunk := &core.CHUNK{
-			Format:     manifest.Format, // Store format from manifest (not 0)
-			HMACLen:    0, // No HMAC for data chunks
-			HMAC:       nil,
-			Sequence:   uint16(i + 1), // 1-based: chunkID 1, 2, 3, ..., N
-			Total:      oldchunk.Total,   // Total number of data chunks
-			DataLength: uint16(len(oldchunk.Data)),
-			Data:       oldchunk.Data,
-		}
-		unifiedChunks = append(unifiedChunks, chunk)
-	}
+	// Create CHUNK records (manifest + data chunks)
+	allChunks := make([]*core.CHUNK, 0)
+	allChunks = append(allChunks, manifestCHUNK)
+	allChunks = append(allChunks, dataChunks...)
 
 	prepared := &preparedChunks{
-		manifest:      manifest,
-		chunks:        chunks,
-		unifiedChunks: unifiedChunks,
+		chunks:    allChunks,
 		checksum:  checksum,
 		timestamp: 0,
 	}
@@ -739,7 +700,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		}
 	}
 
-	log.Printf("KDC: Prepared %d %s chunks for node %s, distribution %s", len(chunks), contentType, nodeID, distributionID)
+	log.Printf("KDC: Prepared %d %s chunks for node %s, distribution %s", len(allChunks), contentType, nodeID, distributionID)
 	return prepared, nil
 }
 
