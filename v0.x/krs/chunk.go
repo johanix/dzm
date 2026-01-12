@@ -21,7 +21,7 @@ import (
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
 
-	"github.com/johanix/dzm/v0.x/dzm"
+	dzm "github.com/johanix/dzm/v0.x"
 )
 
 // QueryCHUNK queries the KDC for a CHUNK record

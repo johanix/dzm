@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/johanix/dzm/v0.x/dzm/krs"
+	"github.com/johanix/dzm/v0.x/krs"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"gopkg.in/yaml.v3"

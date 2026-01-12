@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/johanix/dzm/v0.x/dzm/cli"
+	"github.com/johanix/dzm/v0.x/cli"
 	"github.com/johanix/tdns/v0.x/tdns"
 )
 

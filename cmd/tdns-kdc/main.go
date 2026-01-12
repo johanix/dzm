@@ -16,7 +16,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
-	"github.com/johanix/dzm/v0.x/dzm/kdc"
+	"github.com/johanix/dzm/v0.x/kdc"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/miekg/dns"

@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/dzm/v0.x/dzm"
-	"github.com/johanix/dzm/v0.x/dzm/kdc"
+	dzm "github.com/johanix/dzm/v0.x"
+	"github.com/johanix/dzm/v0.x/kdc"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/johanix/tdns/v0.x/tdns/edns0"

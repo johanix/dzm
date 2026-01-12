@@ -3,7 +3,7 @@ module github.com/johanix/dzm/cmd/tdns-kdc
 go 1.24.0
 
 replace (
-	github.com/johanix/dzm/v0.x/dzm => ../../v0.x/dzm
+	github.com/johanix/dzm/v0.x => ../../v0.x
 	github.com/johanix/tdns/v0.x/tdns => ../../../tdns/v0.x/tdns
 	github.com/johanix/tdns/v0.x/tdns/cache => ../../../tdns/v0.x/tdns/cache
 	github.com/johanix/tdns/v0.x/tdns/core => ../../../tdns/v0.x/tdns/core
@@ -13,7 +13,7 @@ replace (
 
 require (
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/dzm/v0.x/dzm v0.0.0-00010101000000-000000000000
+	github.com/johanix/dzm/v0.x v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v0.x/tdns v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.68
 	gopkg.in/yaml.v3 v3.0.1

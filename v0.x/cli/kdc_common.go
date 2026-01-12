@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/johanix/dzm/v0.x/dzm/kdc"
+	"github.com/johanix/dzm/v0.x/kdc"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"gopkg.in/yaml.v3"
 )

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/dzm/v0.x/dzm"
+	dzm "github.com/johanix/dzm/v0.x"
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 

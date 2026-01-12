@@ -24,7 +24,7 @@ import (
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 
-	"github.com/johanix/dzm/v0.x/dzm"
+	dzm "github.com/johanix/dzm/v0.x"
 )
 
 // chunkCache stores prepared chunks in memory (keyed by nodeID+distributionID)
