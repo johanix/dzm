@@ -2,7 +2,7 @@
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
  * DNS query handler for tdns-kdc
- * Handles MANIFEST, OLDCHUNK, and CHUNK queries
+ * Handles CHUNK queries
  */
 
 package kdc
@@ -75,27 +75,6 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 
 	log.Printf("KDC: Processing query type %s (%d) for %s", dns.TypeToString[qtype], qtype, qname)
 	switch qtype {
-	case core.TypeMANIFEST:
-		log.Printf("KDC: Handling MANIFEST query")
-		err := handleMANIFESTQuery(ctx, m, msg, qname, w, kdcDB, conf)
-		if err != nil {
-			log.Printf("KDC: Error handling MANIFEST: %v", err)
-		} else {
-			log.Printf("KDC: MANIFEST query handled successfully")
-		}
-		// Don't return error - we've already sent the response (success or error)
-		return nil
-
-	case core.TypeOLDCHUNK:
-		log.Printf("KDC: Handling OLDCHUNK query")
-		err := handleOLDCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
-		if err != nil {
-			log.Printf("KDC: Error handling OLDCHUNK: %v", err)
-		} else {
-			log.Printf("KDC: OLDCHUNK query handled successfully")
-		}
-		return err
-
 	case core.TypeCHUNK:
 		log.Printf("KDC: Handling CHUNK query")
 		err := handleCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
@@ -113,9 +92,10 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 	}
 }
 
-// ParseQnameForMANIFEST extracts nodeid and distributionID from MANIFEST QNAME
+// ParseQnameForMANIFEST extracts nodeid and distributionID from CHUNK manifest QNAME
 // Format: <nodeid><distributionID>.<controlzone>
 // Node ID is an FQDN (with trailing dot), so distributionID is concatenated directly after it
+// Used for parsing CHUNK manifest queries (chunkID=0)
 func ParseQnameForMANIFEST(qname string, controlZone string) (nodeID, distributionID string, err error) {
 	// Remove trailing dot if present
 	if len(qname) > 0 && qname[len(qname)-1] == '.' {
@@ -150,12 +130,13 @@ func ParseQnameForMANIFEST(qname string, controlZone string) (nodeID, distributi
 		return "", "", fmt.Errorf("invalid MANIFEST QNAME format: %s (no labels found)", qname)
 	}
 	
-	// The distribution ID should be the last label (it's hex)
+	// The distribution ID should be the last label (it's hex, from monotonic counter)
 	// Try the last label first, then work backwards if needed
 	found := false
 	for i := len(labels) - 1; i >= 0 && !found; i-- {
 		candidateDistID := labels[i]
 		// Check if this label is a valid hex string (4-16 hex chars)
+		// Distribution IDs are now hex-encoded integers (monotonic counter)
 		if len(candidateDistID) >= 4 && len(candidateDistID) <= 16 {
 			if _, err := hex.DecodeString(candidateDistID); err == nil {
 				// Valid hex string found - this is the distribution ID
@@ -180,9 +161,10 @@ func ParseQnameForMANIFEST(qname string, controlZone string) (nodeID, distributi
 	return nodeID, distributionID, nil
 }
 
-// ParseQnameForOLDCHUNK extracts chunkid, nodeid, and distributionID from OLDCHUNK QNAME
+// ParseQnameForOLDCHUNK extracts chunkid, nodeid, and distributionID from CHUNK data chunk QNAME
 // Format: <chunkid>.<nodeid><distributionID>.<controlzone>
 // Node ID is an FQDN (with trailing dot), so distributionID is concatenated directly after it
+// Used for parsing CHUNK data chunk queries (chunkID>0)
 func ParseQnameForOLDCHUNK(qname string, controlZone string) (chunkID uint16, nodeID, distributionID string, err error) {
 	// Remove trailing dot if present
 	if len(qname) > 0 && qname[len(qname)-1] == '.' {
@@ -232,12 +214,13 @@ func ParseQnameForOLDCHUNK(qname string, controlZone string) (chunkID uint16, no
 	}
 	prefixLabels := labels[1:controlStartIdx]
 	
-	// The distribution ID should be the last label in prefixLabels (it's hex)
+	// The distribution ID should be the last label in prefixLabels (it's hex, from monotonic counter)
 	// Try the last label first, then work backwards if needed
 	found := false
 	for i := len(prefixLabels) - 1; i >= 0 && !found; i-- {
 		candidateDistID := prefixLabels[i]
 		// Check if this label is a valid hex string (4-16 hex chars)
+		// Distribution IDs are now hex-encoded integers (monotonic counter)
 		if len(candidateDistID) >= 4 && len(candidateDistID) <= 16 {
 			if _, err := hex.DecodeString(candidateDistID); err == nil {
 				// Valid hex string found - this is the distribution ID
@@ -260,128 +243,6 @@ func ParseQnameForOLDCHUNK(qname string, controlZone string) (chunkID uint16, no
 	}
 
 	return chunkID, nodeID, distributionID, nil
-}
-
-// handleMANIFESTQuery processes MANIFEST queries
-// QNAME format: <nodeid>.<distributionID>.<controlzone>
-func handleMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	log.Printf("KDC: Processing MANIFEST query for %s", qname)
-
-	// Parse QNAME to extract node ID and distribution ID
-	nodeID, distributionID, err := ParseQnameForMANIFEST(qname, conf.ControlZone)
-	if err != nil {
-		log.Printf("KDC: Error parsing MANIFEST QNAME %s: %v", qname, err)
-		m.SetRcode(msg, dns.RcodeFormatError)
-		if writeErr := w.WriteMsg(m); writeErr != nil {
-			return writeErr
-		}
-		return fmt.Errorf("failed to parse QNAME: %v", err)
-	}
-
-	log.Printf("KDC: MANIFEST query: qname=%s, parsed node-id=%s, distribution-id=%s (length: %d)", qname, nodeID, distributionID, len(distributionID))
-
-	// Get manifest data for this node and distribution
-	manifest, err := kdcDB.GetManifestForNode(nodeID, distributionID, conf)
-	if err != nil {
-		log.Printf("KDC: Error getting manifest for node %s, distribution %s: %v", nodeID, distributionID, err)
-		// Check if distribution records exist at all
-		records, checkErr := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
-		if checkErr == nil {
-			if len(records) == 0 {
-				log.Printf("KDC: No distribution records found for distribution %s (may have been purged after completion)", distributionID)
-				m.SetRcode(msg, dns.RcodeNameError)
-			} else {
-				log.Printf("KDC: Found %d distribution records for distribution %s, but failed to prepare manifest", len(records), distributionID)
-				m.SetRcode(msg, dns.RcodeServerFailure)
-			}
-		} else {
-			log.Printf("KDC: Failed to check distribution records: %v", checkErr)
-			m.SetRcode(msg, dns.RcodeServerFailure)
-		}
-		if writeErr := w.WriteMsg(m); writeErr != nil {
-			return writeErr
-		}
-		return fmt.Errorf("failed to get manifest: %v", err)
-	}
-
-	if manifest == nil {
-		log.Printf("KDC: No manifest found for node %s, distribution %s (GetManifestForNode returned nil)", nodeID, distributionID)
-		m.SetRcode(msg, dns.RcodeNameError)
-		if writeErr := w.WriteMsg(m); writeErr != nil {
-			return writeErr
-		}
-		return fmt.Errorf("no manifest found for node %s, distribution %s", nodeID, distributionID)
-	}
-
-	// Create MANIFEST RR
-	manifestRR := &dns.PrivateRR{
-		Hdr: dns.RR_Header{
-			Name:   qname,
-			Rrtype: core.TypeMANIFEST,
-			Class:  dns.ClassINET,
-			Ttl:    300,
-		},
-		Data: manifest,
-	}
-
-	m.Answer = append(m.Answer, manifestRR)
-	m.SetRcode(msg, dns.RcodeSuccess)
-
-	content := "unknown"
-	if manifest.Metadata != nil {
-		if c, ok := manifest.Metadata["content"].(string); ok {
-			content = c
-		}
-	}
-	log.Printf("KDC: Sending MANIFEST response with content=%s, chunk_count=%d", content, manifest.ChunkCount)
-	return w.WriteMsg(m)
-}
-
-// handleOLDCHUNKQuery processes OLDCHUNK queries
-// QNAME format: <chunkid>.<nodeid>.<distributionID>.<controlzone>
-func handleOLDCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
-	log.Printf("KDC: Processing OLDCHUNK query for %s", qname)
-
-	// Parse QNAME to extract chunk ID, node ID, and distribution ID
-	chunkID, nodeID, distributionID, err := ParseQnameForOLDCHUNK(qname, conf.ControlZone)
-	if err != nil {
-		log.Printf("KDC: Error parsing OLDCHUNK QNAME %s: %v", qname, err)
-		m.SetRcode(msg, dns.RcodeFormatError)
-		return w.WriteMsg(m)
-	}
-
-	log.Printf("KDC: OLDCHUNK chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
-
-	// Get chunk data for this node, distribution, and chunk ID
-	chunk, err := kdcDB.GetChunkForNode(nodeID, distributionID, chunkID, conf)
-	if err != nil {
-		log.Printf("KDC: Error getting chunk %d for node %s, distribution %s: %v", chunkID, nodeID, distributionID, err)
-		m.SetRcode(msg, dns.RcodeServerFailure)
-		return w.WriteMsg(m)
-	}
-
-	if chunk == nil {
-		log.Printf("KDC: No chunk %d found for node %s, distribution %s", chunkID, nodeID, distributionID)
-		m.SetRcode(msg, dns.RcodeNameError)
-		return w.WriteMsg(m)
-	}
-
-	// Create OLDCHUNK RR
-	chunkRR := &dns.PrivateRR{
-		Hdr: dns.RR_Header{
-			Name:   qname,
-			Rrtype: core.TypeOLDCHUNK,
-			Class:  dns.ClassINET,
-			Ttl:    300,
-		},
-		Data: chunk,
-	}
-
-	m.Answer = append(m.Answer, chunkRR)
-	m.SetRcode(msg, dns.RcodeSuccess)
-
-	log.Printf("KDC: Sending OLDCHUNK response with sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
-	return w.WriteMsg(m)
 }
 
 // handleCHUNKQuery processes CHUNK queries
@@ -589,8 +450,12 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		}
 	}
 
-	// Extract failed keys from CHUNK EDNS(0) option if present
+	// Check if this is a node_components distribution (zone_name and key_id are empty/NULL)
+	isNodeComponents := len(records) > 0 && records[0].ZoneName == "" && records[0].KeyID == ""
+	
+	// Extract failed keys/components from CHUNK EDNS(0) option if present
 	failedKeys := make(map[string]bool) // Map of "zone:keyID" -> true
+	failedComponents := make(map[string]bool) // Map of componentID -> true
 	
 	// Check for CHUNK EDNS(0) option in the NOTIFY message
 	opt := msg.IsEdns0()
@@ -599,33 +464,168 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		if found {
 			log.Printf("KDC: Found CHUNK EDNS option in confirmation NOTIFY")
 			
-			// Parse key status report from CHUNK option
-			contentType, report, err := edns0.ParseKeyStatusReport(chunkOpt)
-			if err != nil {
-				log.Printf("KDC: Warning: Failed to parse key status report from CHUNK option: %v", err)
-			} else if contentType == edns0.CHUNKContentTypeKeyStatus && report != nil {
-				log.Printf("KDC: Parsed key status report: %d successful, %d failed keys", 
-					len(report.SuccessfulKeys), len(report.FailedKeys))
-				
-				// Build failed keys map
-				for _, failedKey := range report.FailedKeys {
-					keyKey := fmt.Sprintf("%s:%s", failedKey.ZoneName, failedKey.KeyID)
-					failedKeys[keyKey] = true
-					log.Printf("KDC: Key %s (zone %s) failed to install: %s", failedKey.KeyID, failedKey.ZoneName, failedKey.Error)
-				}
-				
-				// Log successful keys for debugging
-				for _, successKey := range report.SuccessfulKeys {
-					log.Printf("KDC: Key %s (zone %s) successfully installed", successKey.KeyID, successKey.ZoneName)
+			if isNodeComponents {
+				// Parse component status report from CHUNK option
+				contentType, compReport, err := edns0.ParseComponentStatusReport(chunkOpt)
+				if err != nil {
+					log.Printf("KDC: Warning: Failed to parse component status report from CHUNK option: %v", err)
+				} else if contentType == edns0.CHUNKContentTypeComponentStatus && compReport != nil {
+					log.Printf("KDC: Parsed component status report: %d successful, %d failed components", 
+						len(compReport.SuccessfulComponents), len(compReport.FailedComponents))
+					
+					// Build failed components map
+					for _, failedComp := range compReport.FailedComponents {
+						failedComponents[failedComp.ComponentID] = true
+						log.Printf("KDC: Component %s failed to install: %s", failedComp.ComponentID, failedComp.Error)
+					}
+					
+					// Log successful components for debugging
+					for _, successComp := range compReport.SuccessfulComponents {
+						log.Printf("KDC: Component %s successfully installed", successComp.ComponentID)
+					}
+				} else {
+					log.Printf("KDC: CHUNK option has unsupported content type: %d (expected %d for components)", contentType, edns0.CHUNKContentTypeComponentStatus)
 				}
 			} else {
-				log.Printf("KDC: CHUNK option has unsupported content type: %d", contentType)
+				// Parse key status report from CHUNK option
+				contentType, report, err := edns0.ParseKeyStatusReport(chunkOpt)
+				if err != nil {
+					log.Printf("KDC: Warning: Failed to parse key status report from CHUNK option: %v", err)
+				} else if contentType == edns0.CHUNKContentTypeKeyStatus && report != nil {
+					log.Printf("KDC: Parsed key status report: %d successful, %d failed keys", 
+						len(report.SuccessfulKeys), len(report.FailedKeys))
+					
+					// Build failed keys map
+					for _, failedKey := range report.FailedKeys {
+						keyKey := fmt.Sprintf("%s:%s", failedKey.ZoneName, failedKey.KeyID)
+						failedKeys[keyKey] = true
+						log.Printf("KDC: Key %s (zone %s) failed to install: %s", failedKey.KeyID, failedKey.ZoneName, failedKey.Error)
+					}
+					
+					// Log successful keys for debugging
+					for _, successKey := range report.SuccessfulKeys {
+						log.Printf("KDC: Key %s (zone %s) successfully installed", successKey.KeyID, successKey.ZoneName)
+					}
+				} else {
+					log.Printf("KDC: CHUNK option has unsupported content type: %d", contentType)
+				}
 			}
 		} else {
-			log.Printf("KDC: No CHUNK EDNS option in confirmation NOTIFY (assuming all keys succeeded)")
+			if isNodeComponents {
+				log.Printf("KDC: No CHUNK EDNS option in confirmation NOTIFY (assuming all components succeeded)")
+			} else {
+				log.Printf("KDC: No CHUNK EDNS option in confirmation NOTIFY (assuming all keys succeeded)")
+			}
 		}
 	} else {
-		log.Printf("KDC: No EDNS(0) in confirmation NOTIFY (assuming all keys succeeded)")
+		if isNodeComponents {
+			log.Printf("KDC: No EDNS(0) in confirmation NOTIFY (assuming all components succeeded)")
+		} else {
+			log.Printf("KDC: No EDNS(0) in confirmation NOTIFY (assuming all keys succeeded)")
+		}
+	}
+
+	if isNodeComponents {
+		// For node_components distributions, we need to:
+		// 1. Record the confirmation
+		// 2. Apply the component changes to the DB (sync DB with the intended component list from distribution)
+		log.Printf("KDC: Recording component confirmation for distribution %s, node %s", 
+			distributionID, confirmedNodeID)
+
+		// Get the distribution record to extract the intended component list
+		// The distribution record contains the encrypted component list
+		// We need to decrypt it to get the intended list, but we don't have the node's private key
+		// Instead, we'll get the component list from the chunks handler which reads from DB
+		// But wait, that reads from DB which hasn't been updated yet...
+		// 
+		// Actually, we can't decrypt without the private key. So we need a different approach.
+		// We'll store the intended component list when creating the distribution, or
+		// we can compute it by comparing current DB state with what we know should be there.
+		//
+		// For now, let's use a simpler approach: when confirmation is received, we'll
+		// get the component list from the distribution by decrypting it using the node's public key
+		// Wait, we can't decrypt with public key...
+		//
+		// Actually, the simplest: Store the intended component list in a way we can retrieve it.
+		// Or, we can just apply the change we know we made (add/remove componentID).
+		// But we don't know which change was made from just the distribution ID.
+		//
+		// Let me think: When we create the distribution, we know the intended component list.
+		// We can store it in the distribution record metadata, or in a separate table.
+		// For now, let's store it in the distribution record's encrypted data (which we can't decrypt).
+		//
+		// Actually, I think the best approach: When confirmation is received, we need to
+		// get the intended component list. Since we can't decrypt, we'll need to store it separately.
+		// But for now, let's just record the confirmation and mark it complete.
+		// The DB update will happen when we can properly track the intended state.
+		//
+		// Actually wait - we can get the component list from chunks.go which reads from DB.
+		// But that's the OLD list. We need the NEW list from the distribution.
+		//
+		// Let me check if we can get it from the distribution record somehow...
+
+		// For now, let's apply a workaround: Get the current component list from DB,
+		// and the intended list should match what's in the distribution.
+		// But we can't decrypt the distribution to get the intended list.
+		//
+		// I think we need to store the intended component list when creating the distribution.
+		// Let's add a metadata field or store it in a way we can retrieve it.
+		//
+		// For now, let's just record the confirmation. The DB update will need to be handled
+		// by storing the intended state when creating the distribution.
+
+		// Record the confirmation (using NULL zone_name and key_id for node_components)
+		// Use empty strings which will be converted to NULL in the database
+		if err := kdcDB.AddDistributionConfirmation(distributionID, "", "", confirmedNodeID); err != nil {
+			log.Printf("KDC: Warning: Failed to record component confirmation: %v", err)
+			return fmt.Errorf("failed to record component confirmation: %v", err)
+		}
+
+		// Apply component changes to DB by syncing with intended component list from distribution
+		nodeID, intendedComponents, err := kdcDB.GetDistributionComponentList(distributionID)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get component list for distribution %s: %v", distributionID, err)
+			log.Printf("KDC: Component changes will not be applied to DB (distribution may have been created before this feature)")
+		} else if nodeID != confirmedNodeID {
+			log.Printf("KDC: Warning: Node ID mismatch: distribution is for %s but confirmation is from %s", nodeID, confirmedNodeID)
+		} else {
+			// Apply the intended component list to the node
+			if err := kdcDB.ApplyComponentListToNode(nodeID, intendedComponents); err != nil {
+				log.Printf("KDC: Warning: Failed to apply component list to node %s: %v", nodeID, err)
+			} else {
+				log.Printf("KDC: Successfully applied component list to node %s (%d components)", nodeID, len(intendedComponents))
+			}
+		}
+
+		log.Printf("KDC: Confirmed node_components distribution %s for node %s", distributionID, confirmedNodeID)
+
+		// Check if all nodes have confirmed (use empty string for node_components - zoneName is not used in the query)
+		allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, "")
+		if err != nil {
+			log.Printf("KDC: Error checking if all nodes confirmed: %v", err)
+			// Don't fail - we've recorded the confirmation
+		} else if allConfirmed {
+			// Mark distribution as complete
+			if err := kdcDB.MarkDistributionComplete(distributionID); err != nil {
+				log.Printf("KDC: Warning: Failed to mark distribution %s as complete: %v", distributionID, err)
+			} else {
+				log.Printf("KDC: Marked node_components distribution %s as complete", distributionID)
+			}
+		} else {
+			// Get list of confirmed nodes for logging
+			confirmedNodes, _ := kdcDB.GetDistributionConfirmations(distributionID)
+			activeNodes, _ := kdcDB.GetActiveNodes()
+			var targetCount int
+			for _, node := range activeNodes {
+				if node.NotifyAddress != "" {
+					targetCount++
+				}
+			}
+			log.Printf("KDC: Distribution %s: %d/%d nodes confirmed (need all %d)", 
+				distributionID, len(confirmedNodes), targetCount, targetCount)
+		}
+
+		return nil
 	}
 
 	// Confirm all keys in the distribution (except those in failedKeys)

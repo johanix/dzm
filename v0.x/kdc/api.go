@@ -212,6 +212,9 @@ func sendJSONError(w http.ResponseWriter, statusCode int, errorMsg string) {
 // APIKdcZone handles zone management endpoints
 func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcZone handler called")
+		}
 		var req KdcZonePost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1124,6 +1127,9 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 // APIKdcNode handles node management endpoints
 func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcNode handler called")
+		}
 		var req KdcNodePost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1277,6 +1283,9 @@ type KdcConfigResponse struct {
 // APIKdcBootstrap handles bootstrap token management endpoints
 func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcBootstrap handler called")
+		}
 		var req KdcBootstrapPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1475,6 +1484,9 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 // kdcConf is *KdcConf
 func APIKdcConfig(kdcConf *KdcConf, tdnsConf interface{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcConfig handler called")
+		}
 		var req KdcConfigPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1561,6 +1573,9 @@ type KdcDistribResponse struct {
 // APIKdcDistrib handles distribution management endpoints
 func APIKdcDistrib(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcDistrib handler called")
+		}
 		var req KdcDistribPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1728,6 +1743,9 @@ func computeKeyHash(privateKey []byte) (string, error) {
 // APIKdcService handles service management endpoints
 func APIKdcService(kdcDB *KdcDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcService handler called")
+		}
 		var req KdcServicePost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1859,6 +1877,9 @@ func APIKdcService(kdcDB *KdcDB) http.HandlerFunc {
 // APIKdcComponent handles component management endpoints
 func APIKdcComponent(kdcDB *KdcDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcComponent handler called")
+		}
 		var req KdcComponentPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1990,6 +2011,9 @@ func APIKdcComponent(kdcDB *KdcDB) http.HandlerFunc {
 // APIKdcServiceComponent handles service-component assignment endpoints
 func APIKdcServiceComponent(kdcDB *KdcDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcServiceComponent handler called")
+		}
 		var req KdcServiceComponentPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2223,12 +2247,19 @@ func APIKdcServiceComponent(kdcDB *KdcDB) http.HandlerFunc {
 // APIKdcNodeComponent handles node-component assignment endpoints
 func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcNodeComponent handler called")
+		}
 		var req KdcNodeComponentPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("KDC: APIKdcNodeComponent: Invalid request: %v", err)
 			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
 			return
 		}
+
+		log.Printf("KDC: APIKdcNodeComponent: Received %s command (node_id=%s, node_name=%s, component_id=%s, component_name=%s)", 
+			req.Command, req.NodeID, req.NodeName, req.ComponentID, req.ComponentName)
 
 		resp := KdcNodeComponentResponse{
 			Time: time.Now(),
@@ -2300,18 +2331,23 @@ func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 		case "add":
 			nodeID, err := resolveNodeID()
 			if err != nil {
+				log.Printf("KDC: APIKdcNodeComponent: Failed to resolve node ID: %v", err)
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
 				componentID, err := resolveComponentID()
 				if err != nil {
+					log.Printf("KDC: APIKdcNodeComponent: Failed to resolve component ID: %v", err)
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				} else {
+					log.Printf("KDC: APIKdcNodeComponent: Adding component %s to node %s", componentID, nodeID)
 					if err := kdcDB.AddNodeComponentAssignment(nodeID, componentID, kdcConf); err != nil {
+						log.Printf("KDC: APIKdcNodeComponent: Failed to add component %s to node %s: %v", componentID, nodeID, err)
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 					} else {
+						log.Printf("KDC: APIKdcNodeComponent: Successfully added component %s to node %s", componentID, nodeID)
 						resp.Msg = fmt.Sprintf("Component %s assigned to node %s", componentID, nodeID)
 					}
 				}
@@ -2387,6 +2423,9 @@ func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 // APIKdcServiceTransaction handles service transaction endpoints
 func APIKdcServiceTransaction(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcServiceTransaction handler called")
+		}
 		var req KdcServiceTransactionPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2568,6 +2607,9 @@ func APIKdcServiceTransaction(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 // APIKdcCatalog handles catalog zone generation endpoints
 func APIKdcCatalog(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcCatalog handler called")
+		}
 		var req struct {
 			Command string `json:"command"` // "generate"
 		}

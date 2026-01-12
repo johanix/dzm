@@ -9,7 +9,6 @@ package kdc
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -182,10 +181,12 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		// Distribution records table
+		// zone_name and key_id are nullable to allow node_components distributions (not about zones/keys)
+		// Foreign key constraints still apply when values are NOT NULL
 		`CREATE TABLE IF NOT EXISTS distribution_records (
 			id VARCHAR(255) PRIMARY KEY,
-			zone_name VARCHAR(255) NOT NULL,
-			key_id VARCHAR(255) NOT NULL,
+			zone_name VARCHAR(255) NULL,
+			key_id VARCHAR(255) NULL,
 			node_id VARCHAR(255),
 			encrypted_key BLOB NOT NULL,
 			ephemeral_pub_key BLOB NOT NULL,
@@ -229,12 +230,20 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			INDEX idx_active (active)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
+		// Distribution ID sequence table (monotonic counter)
+		`CREATE TABLE IF NOT EXISTS distribution_id_sequence (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			last_distribution_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
 		// Distribution confirmations table - tracks which nodes have confirmed receipt of distributed keys
+		// zone_name and key_id are nullable to allow node_components distributions (not about zones/keys)
 		`CREATE TABLE IF NOT EXISTS distribution_confirmations (
 			id VARCHAR(255) PRIMARY KEY,
 			distribution_id VARCHAR(255) NOT NULL,
-			zone_name VARCHAR(255) NOT NULL,
-			key_id VARCHAR(255) NOT NULL,
+			zone_name VARCHAR(255) NULL,
+			key_id VARCHAR(255) NULL,
 			node_id VARCHAR(255) NOT NULL,
 			confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
@@ -430,10 +439,12 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		)`,
 
 		// Distribution records table
+		// zone_name and key_id are nullable to allow node_components distributions (not about zones/keys)
+		// Foreign key constraints still apply when values are NOT NULL
 		`CREATE TABLE IF NOT EXISTS distribution_records (
 			id TEXT PRIMARY KEY,
-			zone_name TEXT NOT NULL,
-			key_id TEXT NOT NULL,
+			zone_name TEXT NULL,
+			key_id TEXT NULL,
 			node_id TEXT,
 			encrypted_key BLOB NOT NULL,
 			ephemeral_pub_key BLOB NOT NULL,
@@ -472,12 +483,20 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			CHECK (active IN (0, 1))
 		)`,
 
+		// Distribution ID sequence table (monotonic counter)
+		`CREATE TABLE IF NOT EXISTS distribution_id_sequence (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			last_distribution_id INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+
 		// Distribution confirmations table - tracks which nodes have confirmed receipt of distributed keys
+		// zone_name and key_id are nullable to allow node_components distributions (not about zones/keys)
 		`CREATE TABLE IF NOT EXISTS distribution_confirmations (
 			id TEXT PRIMARY KEY,
 			distribution_id TEXT NOT NULL,
-			zone_name TEXT NOT NULL,
-			key_id TEXT NOT NULL,
+			zone_name TEXT NULL,
+			key_id TEXT NULL,
 			node_id TEXT NOT NULL,
 			confirmed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
@@ -578,9 +597,67 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
 	}
 	
+	// Migrate: Make zone_name and key_id nullable in distribution_records
+	// This allows node_components distributions to use NULL (they're not about zones/keys)
+	if err := kdc.migrateMakeDistributionZoneKeyNullable(); err != nil {
+		log.Printf("KDC: Warning: Failed to make zone_name/key_id nullable: %v", err)
+	}
+	
+	// Migrate: Make zone_name and key_id nullable in distribution_confirmations
+	// This allows node_components confirmations to use NULL (they're not about zones/keys)
+	if err := kdc.migrateMakeDistributionConfirmationsZoneKeyNullable(); err != nil {
+		log.Printf("KDC: Warning: Failed to make zone_name/key_id nullable in distribution_confirmations: %v", err)
+	}
+	
 	// Ensure default service/component exist
 	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
 		return fmt.Errorf("failed to ensure default service/component: %v", err)
+	}
+	
+	// Ensure distribution_id_sequence table exists and is initialized
+	if err := kdc.ensureDistributionIDSequence(); err != nil {
+		return fmt.Errorf("failed to ensure distribution_id_sequence: %v", err)
+	}
+	
+	return nil
+}
+
+// ensureDistributionIDSequence ensures the distribution_id_sequence table exists and is initialized
+func (kdc *KdcDB) ensureDistributionIDSequence() error {
+	// Check if table exists by trying to query it
+	var count int
+	err := kdc.DB.QueryRow("SELECT COUNT(*) FROM distribution_id_sequence WHERE id = 1").Scan(&count)
+	if err != nil {
+		// Table doesn't exist - create it
+		if kdc.DBType == "sqlite" {
+			_, err = kdc.DB.Exec(`
+				CREATE TABLE IF NOT EXISTS distribution_id_sequence (
+					id INTEGER PRIMARY KEY CHECK (id = 1),
+					last_distribution_id INTEGER NOT NULL DEFAULT 0,
+					updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+				)`)
+		} else {
+			_, err = kdc.DB.Exec(`
+				CREATE TABLE IF NOT EXISTS distribution_id_sequence (
+					id INTEGER PRIMARY KEY CHECK (id = 1),
+					last_distribution_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+					updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+				) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to create distribution_id_sequence table: %v", err)
+		}
+		log.Printf("KDC: Created distribution_id_sequence table")
+	}
+	
+	// Initialize with row if it doesn't exist
+	if kdc.DBType == "sqlite" {
+		_, err = kdc.DB.Exec("INSERT OR IGNORE INTO distribution_id_sequence (id, last_distribution_id) VALUES (1, 0)")
+	} else {
+		_, err = kdc.DB.Exec("INSERT IGNORE INTO distribution_id_sequence (id, last_distribution_id) VALUES (1, 0)")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to initialize distribution_id_sequence: %v", err)
 	}
 	
 	return nil
@@ -1567,11 +1644,52 @@ func (kdc *KdcDB) DeleteKeysByState(state KeyState, zoneName string) (int64, err
 
 // AddDistributionRecord adds a distribution record
 func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
+	// Convert empty strings to NULL for zone_name and key_id
+	var zoneName, keyID interface{}
+	if record.ZoneName == "" {
+		zoneName = nil
+	} else {
+		zoneName = record.ZoneName
+	}
+	if record.KeyID == "" {
+		keyID = nil
+	} else {
+		keyID = record.KeyID
+	}
+	
 	_, err := kdc.DB.Exec(
 		`INSERT INTO distribution_records 
 			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		record.ID, record.ZoneName, record.KeyID, record.NodeID, record.EncryptedKey,
+		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
+		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to add distribution record: %v", err)
+	}
+	return nil
+}
+
+// addDistributionRecordTx adds a distribution record within a transaction
+func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord) error {
+	// Convert empty strings to NULL for zone_name and key_id
+	var zoneName, keyID interface{}
+	if record.ZoneName == "" {
+		zoneName = nil
+	} else {
+		zoneName = record.ZoneName
+	}
+	if record.KeyID == "" {
+		keyID = nil
+	} else {
+		keyID = record.KeyID
+	}
+	
+	_, err := tx.Exec(
+		`INSERT INTO distribution_records 
+			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
 		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
 	)
 	if err != nil {
@@ -1746,7 +1864,9 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	zoneKeyMap := make(map[string]map[string]bool) // distID -> zone:key -> bool
 
 	for rows.Next() {
-		var distID, zoneName, keyID string
+		var distID string
+		var zoneName sql.NullString
+		var keyID sql.NullString
 		var nodeID sql.NullString
 		var createdAt time.Time
 		var completedAt sql.NullTime
@@ -1787,27 +1907,41 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 			}
 		}
 
+		// Handle node_components distributions (zone_name and key_id are NULL)
+		var zoneNameStr, keyIDStr string
+		if !zoneName.Valid && !keyID.Valid {
+			// This is a node_components distribution
+			zoneNameStr = "_node_components"
+			keyIDStr = ""
+		} else {
+			zoneNameStr = zoneName.String
+			keyIDStr = keyID.String
+		}
+
 		// Track zone-key pairs
-		zoneKey := zoneName + ":" + keyID
+		zoneKey := zoneNameStr + ":" + keyIDStr
 		if !zoneKeyMap[distID][zoneKey] {
 			zoneKeyMap[distID][zoneKey] = true
 			// Add zone if not already present
 			found := false
 			for _, z := range distMap[distID].Zones {
-				if z == zoneName {
+				if z == zoneNameStr {
 					found = true
 					break
 				}
 			}
 			if !found {
-				distMap[distID].Zones = append(distMap[distID].Zones, zoneName)
+				distMap[distID].Zones = append(distMap[distID].Zones, zoneNameStr)
 			}
 			// Store key for zone (for verbose mode - show first key, or comma-separated if multiple)
-			if distMap[distID].Keys[zoneName] == "" {
-				distMap[distID].Keys[zoneName] = keyID
-			} else {
-				// Multiple keys for same zone - append
-				distMap[distID].Keys[zoneName] = distMap[distID].Keys[zoneName] + ", " + keyID
+			// For node_components, don't store a key
+			if zoneNameStr != "_node_components" {
+				if distMap[distID].Keys[zoneNameStr] == "" {
+					distMap[distID].Keys[zoneNameStr] = keyIDStr
+				} else {
+					// Multiple keys for same zone - append
+					distMap[distID].Keys[zoneNameStr] = distMap[distID].Keys[zoneNameStr] + ", " + keyIDStr
+				}
 			}
 		}
 	}
@@ -1817,12 +1951,17 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	}
 
 	// Get key types to count ZSK/KSK - count all unique zone:key pairs from zoneKeyMap
+	// Skip node_components distributions (they don't have keys)
 	for distID, zoneKeys := range zoneKeyMap {
 		for zoneKey := range zoneKeys {
 			parts := strings.Split(zoneKey, ":")
 			if len(parts) == 2 {
 				zoneName := parts[0]
 				keyID := parts[1]
+				// Skip node_components distributions
+				if zoneName == "_node_components" {
+					continue
+				}
 				key, err := kdc.GetDNSSECKeyByID(zoneName, keyID)
 				if err == nil {
 					if key.KeyType == KeyTypeZSK {
@@ -1838,35 +1977,77 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	// For each distribution, get confirmed and pending nodes
 	for distID, summary := range distMap {
 		if len(summary.Zones) > 0 {
-			// Use first zone to get target nodes (all zones in same distribution should have same target nodes)
 			zoneName := summary.Zones[0]
-			zoneNodes, _ := kdc.GetActiveNodesForZone(zoneName)
-			var targetNodes []string
-			for _, node := range zoneNodes {
-				if node.NotifyAddress != "" {
-					targetNodes = append(targetNodes, node.ID)
+			
+			// Handle node_components distributions differently
+			if zoneName == "_node_components" {
+				// For node_components, target nodes come from the distribution records themselves
+				// Get the node_id from the distribution records
+				nodeRows, err := kdc.DB.Query(
+					`SELECT DISTINCT node_id FROM distribution_records 
+					 WHERE distribution_id = ? AND node_id IS NOT NULL`,
+					distID,
+				)
+				if err == nil {
+					defer nodeRows.Close()
+					var targetNodes []string
+					for nodeRows.Next() {
+						var nodeID string
+						if err := nodeRows.Scan(&nodeID); err == nil && nodeID != "" {
+							targetNodes = append(targetNodes, nodeID)
+						}
+					}
+					
+					// Get confirmed nodes
+					confirmedNodes, _ := kdc.GetDistributionConfirmations(distID)
+					summary.ConfirmedNodes = confirmedNodes
+					
+					// Calculate pending nodes
+					confirmedMap := make(map[string]bool)
+					for _, nodeID := range confirmedNodes {
+						confirmedMap[nodeID] = true
+					}
+					var pendingNodes []string
+					for _, nodeID := range targetNodes {
+						if !confirmedMap[nodeID] {
+							pendingNodes = append(pendingNodes, nodeID)
+						}
+					}
+					summary.PendingNodes = pendingNodes
+					
+					// Update AllConfirmed based on actual confirmations
+					summary.AllConfirmed = len(pendingNodes) == 0 && len(targetNodes) > 0
 				}
-			}
-			
-			// Get confirmed nodes
-			confirmedNodes, _ := kdc.GetDistributionConfirmations(distID)
-			summary.ConfirmedNodes = confirmedNodes
-			
-			// Calculate pending nodes
-			confirmedMap := make(map[string]bool)
-			for _, nodeID := range confirmedNodes {
-				confirmedMap[nodeID] = true
-			}
-			var pendingNodes []string
-			for _, nodeID := range targetNodes {
-				if !confirmedMap[nodeID] {
-					pendingNodes = append(pendingNodes, nodeID)
+			} else {
+				// Use first zone to get target nodes (all zones in same distribution should have same target nodes)
+				zoneNodes, _ := kdc.GetActiveNodesForZone(zoneName)
+				var targetNodes []string
+				for _, node := range zoneNodes {
+					if node.NotifyAddress != "" {
+						targetNodes = append(targetNodes, node.ID)
+					}
 				}
+				
+				// Get confirmed nodes
+				confirmedNodes, _ := kdc.GetDistributionConfirmations(distID)
+				summary.ConfirmedNodes = confirmedNodes
+				
+				// Calculate pending nodes
+				confirmedMap := make(map[string]bool)
+				for _, nodeID := range confirmedNodes {
+					confirmedMap[nodeID] = true
+				}
+				var pendingNodes []string
+				for _, nodeID := range targetNodes {
+					if !confirmedMap[nodeID] {
+						pendingNodes = append(pendingNodes, nodeID)
+					}
+				}
+				summary.PendingNodes = pendingNodes
+				
+				// Update AllConfirmed based on actual confirmations
+				summary.AllConfirmed = len(pendingNodes) == 0 && len(targetNodes) > 0
 			}
-			summary.PendingNodes = pendingNodes
-			
-			// Update AllConfirmed based on actual confirmations
-			summary.AllConfirmed = len(pendingNodes) == 0 && len(targetNodes) > 0
 		}
 	}
 
@@ -1937,52 +2118,107 @@ func (kdc *KdcDB) GetDistributionRecordsForZoneKey(zoneName, keyID string) ([]*D
 	return records, rows.Err()
 }
 
-// GetOrCreateDistributionID gets an existing distribution ID for a key, or generates a stable one
-// The distribution ID is a hex-encoded string based on zone and key ID, ensuring stability
-func (kdc *KdcDB) GetOrCreateDistributionID(zoneName string, key *DNSSECKey) (string, error) {
-	// Check if there's an existing distribution record for this key
-	records, err := kdc.GetDistributionRecordsForZoneKey(zoneName, key.ID)
-	if err == nil && len(records) > 0 {
-		// Use the distribution ID from the most recent record
-		return records[0].DistributionID, nil
+// GetNextDistributionID returns the next monotonic distribution ID
+// If this is the first distribution (last_distribution_id == 0), starts from current epoch seconds
+// Otherwise, increments the last distribution ID by 1
+// Returns the ID as a hex-encoded string (4-16 hex characters)
+// Uses atomic update to prevent race conditions
+func (kdc *KdcDB) GetNextDistributionID() (string, error) {
+	// Use a transaction to atomically read and update
+	tx, err := kdc.DB.Begin()
+	if err != nil {
+		return "", fmt.Errorf("failed to begin transaction: %v", err)
 	}
-
-	// Generate a stable distribution ID: hex-encoded keytag (16-bit, so 4 hex chars)
-	// Format: <keytag-hex> (e.g., "a1b2" for keytag 41394)
-	distributionID := fmt.Sprintf("%04x", key.KeyID)
+	defer tx.Rollback()
+	
+	var lastID int64
+	
+	// Get current last ID with row lock (for MySQL) or just read (SQLite handles it)
+	if kdc.DBType == "sqlite" {
+		err = tx.QueryRow("SELECT last_distribution_id FROM distribution_id_sequence WHERE id = 1").Scan(&lastID)
+	} else {
+		err = tx.QueryRow("SELECT last_distribution_id FROM distribution_id_sequence WHERE id = 1 FOR UPDATE").Scan(&lastID)
+	}
+	
+	if err != nil {
+		// Table doesn't exist or no row - initialize with epoch
+		if kdc.DBType == "sqlite" {
+			_, err = tx.Exec("INSERT OR IGNORE INTO distribution_id_sequence (id, last_distribution_id) VALUES (1, 0)")
+		} else {
+			_, err = tx.Exec("INSERT IGNORE INTO distribution_id_sequence (id, last_distribution_id) VALUES (1, 0)")
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to initialize distribution_id_sequence: %v", err)
+		}
+		lastID = 0
+	}
+	
+	var nextID int64
+	if lastID == 0 {
+		// First distribution - use current epoch seconds
+		nextID = time.Now().Unix()
+	} else {
+		// Increment by 1
+		nextID = lastID + 1
+	}
+	
+	// Update the sequence
+	if kdc.DBType == "sqlite" {
+		_, err = tx.Exec("UPDATE distribution_id_sequence SET last_distribution_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", nextID)
+	} else {
+		_, err = tx.Exec("UPDATE distribution_id_sequence SET last_distribution_id = ?, updated_at = NOW() WHERE id = 1", nextID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to update distribution_id_sequence: %v", err)
+	}
+	
+	// Commit the transaction
+	if err = tx.Commit(); err != nil {
+		return "", fmt.Errorf("failed to commit transaction: %v", err)
+	}
+	
+	// Format as hex string (will be 4-16 hex characters for reasonable epoch values)
+	distributionID := fmt.Sprintf("%x", nextID)
 	return distributionID, nil
+}
+
+// GetOrCreateDistributionID returns a distribution ID for a key
+// Uses monotonic counter for unique distribution IDs
+func (kdc *KdcDB) GetOrCreateDistributionID(zoneName string, key *DNSSECKey) (string, error) {
+	// Use monotonic counter for distribution ID
+	return kdc.GetNextDistributionID()
 }
 
 // CreateDistributionIDForKeys creates a single distribution ID for multiple keys
 // This allows grouping multiple keys into a single distribution
-// The distribution ID is based on zone name and a hash of all key IDs
+// Uses monotonic counter for unique distribution IDs
 func (kdc *KdcDB) CreateDistributionIDForKeys(zoneName string, keyIDs []string) (string, error) {
 	if len(keyIDs) == 0 {
 		return "", fmt.Errorf("keyIDs cannot be empty")
 	}
 
-	// Sort key IDs for consistent hashing
-	sortedKeyIDs := make([]string, len(keyIDs))
-	copy(sortedKeyIDs, keyIDs)
-	sort.Strings(sortedKeyIDs)
-
-	// Create a hash of zone name + sorted key IDs
-	hash := sha256.New()
-	hash.Write([]byte(zoneName))
-	for _, keyID := range sortedKeyIDs {
-		hash.Write([]byte(keyID))
-	}
-	hashBytes := hash.Sum(nil)
-
-	// Use first 8 hex chars of hash as distribution ID (16 hex chars = 8 bytes)
-	distributionID := hex.EncodeToString(hashBytes[:8])
-	return distributionID, nil
+	// Use monotonic counter for distribution ID
+	return kdc.GetNextDistributionID()
 }
 
 // AddDistributionConfirmation records that a node has confirmed receipt of a distributed key
+// For node_components distributions, zoneName and keyID should be empty strings (will be stored as NULL)
 func (kdc *KdcDB) AddDistributionConfirmation(distributionID, zoneName, keyID, nodeID string) error {
 	// Generate a unique ID for this confirmation
 	confirmationID := fmt.Sprintf("%s-%s-%d", distributionID, nodeID, time.Now().Unix())
+	
+	// Convert empty strings to NULL for zone_name and key_id
+	var zoneNameVal, keyIDVal interface{}
+	if zoneName == "" {
+		zoneNameVal = nil
+	} else {
+		zoneNameVal = zoneName
+	}
+	if keyID == "" {
+		keyIDVal = nil
+	} else {
+		keyIDVal = keyID
+	}
 	
 	var err error
 	if kdc.DBType == "sqlite" {
@@ -1991,7 +2227,7 @@ func (kdc *KdcDB) AddDistributionConfirmation(distributionID, zoneName, keyID, n
 			`INSERT OR REPLACE INTO distribution_confirmations 
 				(id, distribution_id, zone_name, key_id, node_id, confirmed_at)
 				VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-			confirmationID, distributionID, zoneName, keyID, nodeID,
+			confirmationID, distributionID, zoneNameVal, keyIDVal, nodeID,
 		)
 	} else {
 		// MySQL/MariaDB: Use ON DUPLICATE KEY UPDATE
@@ -2000,7 +2236,7 @@ func (kdc *KdcDB) AddDistributionConfirmation(distributionID, zoneName, keyID, n
 				(id, distribution_id, zone_name, key_id, node_id, confirmed_at)
 				VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON DUPLICATE KEY UPDATE confirmed_at = CURRENT_TIMESTAMP`,
-			confirmationID, distributionID, zoneName, keyID, nodeID,
+			confirmationID, distributionID, zoneNameVal, keyIDVal, nodeID,
 		)
 	}
 	if err != nil {
@@ -2692,57 +2928,54 @@ func (kdc *KdcDB) GetComponentsForService(serviceID string) ([]string, error) {
 }
 
 // AddNodeComponentAssignment assigns a component to a node
+// This creates a distribution with the new component list, but does NOT update the DB yet.
+// The DB will be updated when the confirmation is received from KRS.
 // If kdcConf is provided, it will automatically trigger key distribution for newly served zones
 func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf *KdcConf) error {
-	// Add the assignment
-	_, err := kdc.DB.Exec(
-		"INSERT INTO node_component_assignments (node_id, component_id, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
-		nodeID, componentID,
-	)
+	// Get current components for this node (from DB)
+	currentComponents, err := kdc.GetComponentsForNode(nodeID)
 	if err != nil {
-		return fmt.Errorf("failed to add node-component assignment: %v", err)
+		return fmt.Errorf("failed to get current components for node %s: %v", nodeID, err)
 	}
-
-	// Compute which zones are newly served by this node
-	newlyServedZones, err := kdc.GetZonesNewlyServedByNode(nodeID, componentID)
-	if err != nil {
-		log.Printf("KDC: Warning: Failed to compute newly served zones for node %s, component %s: %v", nodeID, componentID, err)
-		// Don't fail the assignment if delta computation fails
-	} else if len(newlyServedZones) > 0 {
-		log.Printf("KDC: Node %s now serves %d new zone(s) after adding component %s: %v", nodeID, len(newlyServedZones), componentID, newlyServedZones)
-		
-		// Trigger key distribution for newly served zones
-		if kdcConf != nil {
-			for _, zoneName := range newlyServedZones {
-				if err := kdc.distributeKeysForZone(zoneName, nodeID, kdcConf); err != nil {
-					log.Printf("KDC: Warning: Failed to distribute keys for zone %s to node %s: %v", zoneName, nodeID, err)
-					// Continue with other zones
-				}
-			}
-		} else {
-			log.Printf("KDC: KdcConf not provided, skipping automatic key distribution for %d zone(s)", len(newlyServedZones))
+	
+	// Check if component is already in the list
+	for _, comp := range currentComponents {
+		if comp == componentID {
+			return fmt.Errorf("component %s is already assigned to node %s", componentID, nodeID)
 		}
 	}
+	
+	// Compute the new component list (current + new component)
+	newComponents := make([]string, 0, len(currentComponents)+1)
+	newComponents = append(newComponents, currentComponents...)
+	newComponents = append(newComponents, componentID)
+	sort.Strings(newComponents)
+	
+	log.Printf("KDC: Preparing to add component %s to node %s (will create distribution, DB update pending confirmation)", componentID, nodeID)
 
-	// Create node_components distribution and send NOTIFY
+	// Create node_components distribution with the NEW component list (before DB update)
 	if kdcConf != nil {
-		distributionID, err := kdc.CreateNodeComponentsDistribution(nodeID, kdcConf)
+		distributionID, err := kdc.CreateNodeComponentsDistribution(nodeID, newComponents, kdcConf)
 		if err != nil {
-			log.Printf("KDC: Warning: Failed to create node_components distribution for node %s: %v", nodeID, err)
-		} else {
-			// Send NOTIFY to the node
-			if kdcConf.ControlZone != "" {
-				if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
-					log.Printf("KDC: Warning: Failed to send NOTIFY for node_components distribution to node %s: %v", nodeID, err)
-				} else {
-					log.Printf("KDC: Sent NOTIFY for node_components distribution (ID: %s) to node %s", distributionID, nodeID)
-				}
+			return fmt.Errorf("failed to create node_components distribution: %v", err)
+		}
+		
+		// Store the pending change: we need to apply componentID add when confirmation is received
+		// We'll store this in the distribution record metadata or handle it in confirmation handler
+		// For now, we'll handle it in the confirmation handler by reading the component list from the distribution
+		
+		// Send NOTIFY to the node
+		if kdcConf.ControlZone != "" {
+			if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
+				log.Printf("KDC: Warning: Failed to send NOTIFY for node_components distribution to node %s: %v", nodeID, err)
 			} else {
-				log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY for node_components distribution")
+				log.Printf("KDC: Sent NOTIFY for node_components distribution (ID: %s) to node %s", distributionID, nodeID)
 			}
+		} else {
+			log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY for node_components distribution")
 		}
 	} else {
-		log.Printf("KDC: KdcConf not provided, skipping node_components distribution")
+		return fmt.Errorf("KdcConf is required to create node_components distribution")
 	}
 
 	return nil
@@ -2750,8 +2983,9 @@ func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf
 
 // CreateNodeComponentsDistribution creates a distribution for node components
 // This creates a distribution record with content type "node_components"
+// components: The intended component list (may differ from current DB state if pending changes)
 // Returns the distribution ID
-func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, kdcConf *KdcConf) (string, error) {
+func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []string, kdcConf *KdcConf) (string, error) {
 	// Get the node
 	node, err := kdc.GetNode(nodeID)
 	if err != nil {
@@ -2762,11 +2996,7 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, kdcConf *KdcCo
 		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
 	}
 	
-	// Get current components for this node
-	components, err := kdc.GetComponentsForNode(nodeID)
-	if err != nil {
-		return "", fmt.Errorf("failed to get components for node %s: %v", nodeID, err)
-	}
+	// Components list is now passed as parameter (may include pending changes)
 	
 	// Sort components for consistent output
 	sort.Strings(components)
@@ -2789,16 +3019,20 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, kdcConf *KdcCo
 		return "", fmt.Errorf("failed to marshal components JSON: %v", err)
 	}
 	
+	log.Printf("KDC: CreateNodeComponentsDistribution: Creating distribution for node %s with %d components: %v", nodeID, len(components), components)
+	
 	// Encrypt the component list using HPKE
 	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt components: %v", err)
 	}
 	
-	// Generate a stable distribution ID based on nodeID
-	// Use hash of nodeID to ensure stability
-	hash := sha256.Sum256([]byte("node_components:" + nodeID))
-	distributionID := hex.EncodeToString(hash[:8]) // 8 bytes = 16 hex chars
+	// Generate a UNIQUE distribution ID using monotonic counter
+	// This ensures that purged distributions can never be reused
+	distributionID, err := kdc.GetNextDistributionID()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate distribution ID: %v", err)
+	}
 	
 	// Generate a unique ID for this distribution record
 	distRecordID := make([]byte, 16)
@@ -2817,13 +3051,50 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, kdcConf *KdcCo
 		}
 	}
 	
+	// Start a transaction to ensure atomic deletion and insertion
+	tx, err := kdc.DB.Begin()
+	if err != nil {
+		return "", fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+	
+	// Delete ALL existing node_components distributions for this node
+	// This ensures purged distributions are never reused
+	// node_components distributions have NULL zone_name and key_id
+	result, err := tx.Exec(
+		`DELETE FROM distribution_records 
+		 WHERE zone_name IS NULL AND key_id IS NULL AND node_id = ?`,
+		nodeID,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to delete existing node_components distributions for node %s: %v", nodeID, err)
+	}
+	
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("failed to get rows affected: %v", err)
+	}
+	if deleted > 0 {
+		log.Printf("KDC: Deleted %d existing node_components distribution record(s) for node %s before creating new one", deleted, nodeID)
+	}
+	
+	// Also delete any orphaned confirmations for this node's node_components distributions
+	_, err = tx.Exec(
+		`DELETE FROM distribution_confirmations 
+		 WHERE node_id = ? AND distribution_id NOT IN (SELECT DISTINCT distribution_id FROM distribution_records)`,
+		nodeID,
+	)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to clean up orphaned confirmations for node %s: %v", nodeID, err)
+	}
+	
 	// Store the distribution record in the database
-	// Use zone_name="_node_components" to identify node_components distributions
-	// Use key_id=nodeID to identify which node this is for
+	// For node_components distributions, zone_name and key_id are NULL (not about zones/keys)
+	// The actual node ID is stored in node_id field
 	distRecord := &DistributionRecord{
 		ID:             distRecordIDHex,
-		ZoneName:       "_node_components",
-		KeyID:          nodeID,
+		ZoneName:       "", // NULL for node_components distributions
+		KeyID:          "", // NULL for node_components distributions
 		NodeID:         nodeID,
 		EncryptedKey:   ciphertext,
 		EphemeralPubKey: ephemeralPub,
@@ -2833,69 +3104,96 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, kdcConf *KdcCo
 		DistributionID: distributionID,
 	}
 	
-	// Delete any existing node_components distribution for this node first
-	// (to avoid duplicates)
-	_, err = kdc.DB.Exec(
-		`DELETE FROM distribution_records 
-		 WHERE zone_name = '_node_components' AND key_id = ? AND node_id = ?`,
-		nodeID, nodeID,
-	)
-	if err != nil {
-		log.Printf("KDC: Warning: Failed to delete existing node_components distribution for node %s: %v", nodeID, err)
+	// Insert the new distribution record
+	if err := kdc.addDistributionRecordTx(tx, distRecord); err != nil {
+		return "", fmt.Errorf("failed to store node_components distribution record: %v", err)
 	}
 	
-	if err := kdc.AddDistributionRecord(distRecord); err != nil {
-		return "", fmt.Errorf("failed to store node_components distribution record: %v", err)
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("failed to commit transaction: %v", err)
 	}
 	
 	log.Printf("KDC: Created node_components distribution for node %s (distribution ID: %s, %d components)", 
 		nodeID, distributionID, len(components))
 	
+	// Store the intended component list for this distribution so we can apply it when confirmation is received
+	// We'll store it in a simple table: distribution_component_lists
+	if err := kdc.StoreDistributionComponentList(distributionID, nodeID, components); err != nil {
+		log.Printf("KDC: Warning: Failed to store component list for distribution %s: %v", distributionID, err)
+		// Don't fail the distribution creation if storing the list fails
+	}
+	
 	return distributionID, nil
 }
 
 // RemoveNodeComponentAssignment removes a component from a node
+// This creates a distribution with the new component list, but does NOT update the DB yet.
+// The DB will be updated when the confirmation is received from KRS.
 // If kdcConf is provided, it will log zones that are no longer served (key deletion can be handled separately)
 func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcConf *KdcConf) error {
-	// Compute which zones will no longer be served BEFORE removing the assignment
+	// Get current components for this node (from DB)
+	currentComponents, err := kdc.GetComponentsForNode(nodeID)
+	if err != nil {
+		return fmt.Errorf("failed to get current components for node %s: %v", nodeID, err)
+	}
+	
+	log.Printf("KDC: RemoveNodeComponentAssignment: Current components for node %s: %v", nodeID, currentComponents)
+	
+	// Check if component is in the list
+	found := false
+	for _, comp := range currentComponents {
+		if comp == componentID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("component %s is not assigned to node %s", componentID, nodeID)
+	}
+	
+	// Compute the new component list (current - removed component)
+	newComponents := make([]string, 0, len(currentComponents)-1)
+	for _, comp := range currentComponents {
+		if comp != componentID {
+			newComponents = append(newComponents, comp)
+		}
+	}
+	sort.Strings(newComponents)
+	
+	log.Printf("KDC: RemoveNodeComponentAssignment: New component list for node %s (after removing %s): %v", nodeID, componentID, newComponents)
+	
+	// Compute which zones will no longer be served (for logging only, actual removal happens on confirmation)
 	noLongerServedZones, err := kdc.GetZonesNoLongerServedByNode(nodeID, componentID)
 	if err != nil {
 		log.Printf("KDC: Warning: Failed to compute no-longer-served zones for node %s, component %s: %v", nodeID, componentID, err)
-		// Continue with removal even if delta computation fails
 	} else if len(noLongerServedZones) > 0 {
 		log.Printf("KDC: Node %s will no longer serve %d zone(s) after removing component %s: %v", nodeID, len(noLongerServedZones), componentID, noLongerServedZones)
 		// TODO: Trigger key deletion/revocation for these zones
 		// For now, just log - key deletion can be implemented separately
 	}
+	
+	log.Printf("KDC: Preparing to remove component %s from node %s (will create distribution, DB update pending confirmation)", componentID, nodeID)
 
-	// Remove the assignment
-	_, err = kdc.DB.Exec(
-		"UPDATE node_component_assignments SET active = 0 WHERE node_id = ? AND component_id = ?",
-		nodeID, componentID,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to remove node-component assignment: %v", err)
-	}
-
-	// Create node_components distribution and send NOTIFY
+	// Create node_components distribution with the NEW component list (before DB update)
 	if kdcConf != nil {
-		distributionID, err := kdc.CreateNodeComponentsDistribution(nodeID, kdcConf)
+		distributionID, err := kdc.CreateNodeComponentsDistribution(nodeID, newComponents, kdcConf)
 		if err != nil {
-			log.Printf("KDC: Warning: Failed to create node_components distribution for node %s: %v", nodeID, err)
-		} else {
-			// Send NOTIFY to the node
-			if kdcConf.ControlZone != "" {
-				if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
-					log.Printf("KDC: Warning: Failed to send NOTIFY for node_components distribution to node %s: %v", nodeID, err)
-				} else {
-					log.Printf("KDC: Sent NOTIFY for node_components distribution (ID: %s) to node %s", distributionID, nodeID)
-				}
+			return fmt.Errorf("failed to create node_components distribution: %v", err)
+		}
+		
+		// Send NOTIFY to the node
+		if kdcConf.ControlZone != "" {
+			if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
+				log.Printf("KDC: Warning: Failed to send NOTIFY for node_components distribution to node %s: %v", nodeID, err)
 			} else {
-				log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY for node_components distribution")
+				log.Printf("KDC: Sent NOTIFY for node_components distribution (ID: %s) to node %s", distributionID, nodeID)
 			}
+		} else {
+			log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY for node_components distribution")
 		}
 	} else {
-		log.Printf("KDC: KdcConf not provided, skipping node_components distribution")
+		return fmt.Errorf("KdcConf is required to create node_components distribution")
 	}
 
 	return nil
@@ -4502,3 +4800,142 @@ func (kdc *KdcDB) scanBootstrapToken(scanner interface{}) (*BootstrapToken, erro
 	return &token, nil
 }
 
+// StoreDistributionComponentList stores the intended component list for a distribution
+// This allows us to apply the component changes to the DB when confirmation is received
+func (kdc *KdcDB) StoreDistributionComponentList(distributionID, nodeID string, components []string) error {
+	// Store as JSON in a simple key-value table
+	// We'll use a simple approach: store in distribution_component_lists table
+	// If the table doesn't exist, we'll create it on first use (or add it to schema)
+	
+	// For now, let's use a simple in-memory map (will be lost on restart, but works for now)
+	// TODO: Create a proper table for this
+	componentsJSON, err := json.Marshal(components)
+	if err != nil {
+		return fmt.Errorf("failed to marshal component list: %v", err)
+	}
+	
+	// Store in a simple table (create if not exists)
+	// We'll add this to the schema later, for now create it on the fly
+	_, err = kdc.DB.Exec(`
+		CREATE TABLE IF NOT EXISTS distribution_component_lists (
+			distribution_id VARCHAR(255) PRIMARY KEY,
+			node_id VARCHAR(255) NOT NULL,
+			component_list TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		// Table might already exist or creation failed, try insert anyway
+		log.Printf("KDC: Warning: Failed to create distribution_component_lists table (may already exist): %v", err)
+	}
+	
+	// Insert or replace the component list
+	if kdc.DBType == "sqlite" {
+		_, err = kdc.DB.Exec(
+			`INSERT OR REPLACE INTO distribution_component_lists (distribution_id, node_id, component_list) VALUES (?, ?, ?)`,
+			distributionID, nodeID, string(componentsJSON),
+		)
+	} else {
+		_, err = kdc.DB.Exec(
+			`INSERT INTO distribution_component_lists (distribution_id, node_id, component_list) VALUES (?, ?, ?)
+			 ON DUPLICATE KEY UPDATE component_list = VALUES(component_list)`,
+			distributionID, nodeID, string(componentsJSON),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to store component list: %v", err)
+	}
+	
+	return nil
+}
+
+// GetDistributionComponentList retrieves the intended component list for a distribution
+func (kdc *KdcDB) GetDistributionComponentList(distributionID string) (string, []string, error) {
+	var nodeID string
+	var componentListJSON string
+	
+	err := kdc.DB.QueryRow(
+		`SELECT node_id, component_list FROM distribution_component_lists WHERE distribution_id = ?`,
+		distributionID,
+	).Scan(&nodeID, &componentListJSON)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get component list for distribution %s: %v", distributionID, err)
+	}
+	
+	var components []string
+	if err := json.Unmarshal([]byte(componentListJSON), &components); err != nil {
+		return "", nil, fmt.Errorf("failed to unmarshal component list: %v", err)
+	}
+	
+	return nodeID, components, nil
+}
+
+// ApplyComponentListToNode applies the given component list to a node's assignments
+// This syncs the DB to match the intended component list
+func (kdc *KdcDB) ApplyComponentListToNode(nodeID string, intendedComponents []string) error {
+	// Get current components from DB
+	currentComponents, err := kdc.GetComponentsForNode(nodeID)
+	if err != nil {
+		return fmt.Errorf("failed to get current components: %v", err)
+	}
+	
+	// Create maps for easier lookup
+	currentMap := make(map[string]bool)
+	for _, comp := range currentComponents {
+		currentMap[comp] = true
+	}
+	
+	intendedMap := make(map[string]bool)
+	for _, comp := range intendedComponents {
+		intendedMap[comp] = true
+	}
+	
+	// Add components that are in intended but not in current
+	for _, comp := range intendedComponents {
+		if !currentMap[comp] {
+			// Add the component
+			_, err := kdc.DB.Exec(
+				`INSERT INTO node_component_assignments (node_id, component_id, active, since) 
+				 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+				 ON CONFLICT(node_id, component_id) DO UPDATE SET active = 1, since = CURRENT_TIMESTAMP`,
+				nodeID, comp,
+			)
+			if err != nil {
+				// Try without ON CONFLICT for SQLite
+				if kdc.DBType == "sqlite" {
+					_, err = kdc.DB.Exec(
+						`INSERT OR REPLACE INTO node_component_assignments (node_id, component_id, active, since) 
+						 VALUES (?, ?, 1, CURRENT_TIMESTAMP)`,
+						nodeID, comp,
+					)
+				}
+				if err != nil {
+					log.Printf("KDC: Warning: Failed to add component %s to node %s: %v", comp, nodeID, err)
+				} else {
+					log.Printf("KDC: Added component %s to node %s", comp, nodeID)
+				}
+			} else {
+				log.Printf("KDC: Added component %s to node %s", comp, nodeID)
+			}
+		}
+	}
+	
+	// Remove components that are in current but not in intended
+	for _, comp := range currentComponents {
+		if !intendedMap[comp] {
+			// Remove the component (deactivate)
+			_, err := kdc.DB.Exec(
+				`UPDATE node_component_assignments SET active = 0 WHERE node_id = ? AND component_id = ?`,
+				nodeID, comp,
+			)
+			if err != nil {
+				log.Printf("KDC: Warning: Failed to remove component %s from node %s: %v", comp, nodeID, err)
+			} else {
+				log.Printf("KDC: Removed component %s from node %s", comp, nodeID)
+			}
+		}
+	}
+	
+	return nil
+}

@@ -353,8 +353,8 @@ module github.com/johanix/dzm/cmd/tdns-edgesigner
 
 require (
     github.com/johanix/tdns/v0.x/tdns v0.x.x  // tdns library (keystore, DNS engine)
-    github.com/johanix/dzm/v0.x/dzm/krs v0.x.x // KRS library
-    github.com/johanix/dzm/v0.x/dzm/edgesigner v0.x.x // Integration layer
+    github.com/johanix/dzm/v0.x/krs v0.x.x // KRS library
+    github.com/johanix/dzm/v0.x/edgesigner v0.x.x // Integration layer
     // ... other dependencies
 )
 ```

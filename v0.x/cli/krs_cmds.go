@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/dzm/v0.x/dzm/krs"
+	"github.com/johanix/dzm/v0.x/krs"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/hpke"
 	"github.com/miekg/dns"
@@ -86,6 +86,11 @@ var krsComponentsListCmd = &cobra.Command{
 		componentsRaw, ok := resp["components"]
 		if !ok {
 			fmt.Printf("Error: 'components' key not found in response\n")
+			if tdns.Globals.Debug || tdns.Globals.Verbose {
+				// Show the actual response for debugging
+				prettyJSON, _ := json.MarshalIndent(resp, "", "  ")
+				fmt.Printf("Response received:\n%s\n", string(prettyJSON))
+			}
 			return
 		}
 
@@ -631,7 +636,7 @@ var krsQueryKmreqCmd = &cobra.Command{
 var krsDebugDistribFetchCmd = &cobra.Command{
 	Use:   "fetch --id <id>",
 	Short: "Fetch and process a distribution from KDC",
-	Long:  `Fetches a distribution by querying MANIFEST and OLDCHUNK records from the KDC, reassembles the chunks, and processes the content. For clear_text distributions, displays the text. For encrypted_text distributions, displays base64 transport, ciphertext, and decrypted cleartext.`,
+	Long:  `Fetches a distribution by querying CHUNK records from the KDC, reassembles the chunks, and processes the content. For clear_text distributions, displays the text. For encrypted_text distributions, displays base64 transport, ciphertext, and decrypted cleartext.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		distributionID := cmd.Flag("id").Value.String()
 
@@ -848,13 +853,33 @@ func sendKrsRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 		return nil, fmt.Errorf("error from API POST: %v", err)
 	}
 
-	// Only print status if it's not 200 (success) - useful for debugging errors
-	if status != 200 && tdns.Globals.Verbose {
-		fmt.Printf("Status: %d\n", status)
+	// Check HTTP status code
+	if status != 200 {
+		// Try to unmarshal error response for better error messages
+		if err := json.Unmarshal(buf, &result); err == nil {
+			if errorMsg, ok := result["error_msg"].(string); ok {
+				return nil, fmt.Errorf("HTTP %d: %s", status, errorMsg)
+			}
+		}
+		// If we can't parse the error, return the raw response
+		if tdns.Globals.Debug || tdns.Globals.Verbose {
+			return nil, fmt.Errorf("HTTP %d: %s", status, string(buf))
+		}
+		return nil, fmt.Errorf("HTTP status %d", status)
 	}
 
 	if err := json.Unmarshal(buf, &result); err != nil {
+		// If unmarshaling fails, show the raw response in debug/verbose mode
+		if tdns.Globals.Debug || tdns.Globals.Verbose {
+			return nil, fmt.Errorf("error unmarshaling response: %v (response body: %s)", err, string(buf))
+		}
 		return nil, fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	// In debug mode, show the full response
+	if tdns.Globals.Debug {
+		prettyJSON, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Printf("Response: %s\n", string(prettyJSON))
 	}
 
 	return result, nil

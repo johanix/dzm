@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/johanix/dzm/v0.x/dzm/cli"
+	"github.com/johanix/dzm/v0.x/cli"
 	"github.com/johanix/tdns/v0.x/tdns"
 )
 
@@ -93,12 +93,18 @@ func initConfig() {
 	if err != nil {
 		log.Fatalf("Error unmarshaling KRS config: %v", err)
 	}
+
+	// Set default UseTLS to true if not explicitly set in config
+	// Viper doesn't set zero values, so we check if the key exists
+	if !viper.IsSet("apiserver.usetls") {
+		krsConfig.ApiServer.UseTLS = true
+	}
 }
 
 // KrsConfig represents the KRS daemon configuration file structure
 type KrsConfig struct {
 	ApiServer struct {
-		UseTLS    bool     `yaml:"usetls"`
+		UseTLS    bool     `yaml:"usetls"` // Defaults to true if not set
 		Addresses []string `yaml:"addresses"`
 		ApiKey    string   `yaml:"apikey"`
 		CertFile  string   `yaml:"certfile,omitempty"`

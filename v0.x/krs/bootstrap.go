@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/dzm/v0.x/dzm"
-	"github.com/johanix/dzm/v0.x/dzm/kdc"
+	dzm "github.com/johanix/dzm/v0.x"
+	"github.com/johanix/dzm/v0.x/kdc"
 	"github.com/johanix/tdns/v0.x/tdns"
 	"github.com/johanix/tdns/v0.x/tdns/core"
 	"github.com/johanix/tdns/v0.x/tdns/edns0"
@@ -72,7 +72,6 @@ type KrsBootstrapConf struct {
 	Database    DatabaseConf `yaml:"database"`
 	Node        NodeConf     `yaml:"node"`
 	ControlZone string       `yaml:"control_zone"`
-	UseChunk    bool         `yaml:"use_chunk"`
 }
 
 // RunEnroll performs the complete enrollment process
@@ -382,7 +381,6 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 				KdcHpkePubKey:   confirmation.KdcHpkePubKey,
 			},
 			ControlZone: blob.ControlZone,
-			UseChunk:    true, // Use CHUNK format
 		},
 	}
 
