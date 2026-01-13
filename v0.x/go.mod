@@ -3,11 +3,11 @@ module github.com/johanix/tdns-nm/v0.x
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/v0.x/tdns => ../../../tdns/v0.x/tdns
-	github.com/johanix/tdns/v0.x/tdns/cache => ../../../tdns/v0.x/tdns/cache
-	github.com/johanix/tdns/v0.x/tdns/core => ../../../tdns/v0.x/tdns/core
-	github.com/johanix/tdns/v0.x/tdns/edns0 => ../../../tdns/v0.x/tdns/edns0
-	github.com/johanix/tdns/v0.x/tdns/hpke => ../../../tdns/v0.x/tdns/hpke
+	github.com/johanix/tdns/v0.x/tdns => ../../tdns/v0.x/tdns
+	github.com/johanix/tdns/v0.x/tdns/cache => ../../tdns/v0.x/tdns/cache
+	github.com/johanix/tdns/v0.x/tdns/core => ../../tdns/v0.x/tdns/core
+	github.com/johanix/tdns/v0.x/tdns/edns0 => ../../tdns/v0.x/tdns/edns0
+	github.com/johanix/tdns/v0.x/tdns/hpke => ../../tdns/v0.x/tdns/hpke
 )
 
 require (

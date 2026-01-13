@@ -92,99 +92,144 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		return nil, fmt.Errorf("no distribution records found for node %s, distribution %s (distribution exists but not for this node)", nodeID, distributionID)
 	}
 
-	// Determine content type based on distribution records
-	// Check if this is a node_components distribution (zone_name and key_id are NULL)
-	// Otherwise, use "encrypted_keys" for key distributions
-	contentType := "encrypted_keys"
-	if len(nodeRecords) > 0 && nodeRecords[0].ZoneName == "" && nodeRecords[0].KeyID == "" {
-		contentType = "node_components"
+	// Determine content type by analyzing all operations in this distribution
+	// Categorize operations into domains and check for conflicts
+	hasNodeOps := false    // update_components
+	hasKeyOps := false     // roll_key, delete_key
+	hasMgmtOps := false    // ping
+
+	for _, record := range nodeRecords {
+		switch record.Operation {
+		case "update_components":
+			hasNodeOps = true
+		case "roll_key", "delete_key":
+			hasKeyOps = true
+		case "ping":
+			hasMgmtOps = true
+		}
 	}
-	
+
+	// Determine contentType based on operation mix
+	contentType := "key_operations"  // default
+	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
+		contentType = "node_operations"
+	} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
+		contentType = "key_operations"
+	} else if !hasNodeOps && !hasKeyOps && hasMgmtOps {
+		contentType = "mgmt_operations"
+	} else if hasNodeOps || hasKeyOps || hasMgmtOps {
+		contentType = "mixed_operations"
+	}
+
+	log.Printf("KDC: Distribution %s contains: node_ops=%v, key_ops=%v, mgmt_ops=%v -> contentType=%s",
+		distributionID, hasNodeOps, hasKeyOps, hasMgmtOps, contentType)
+
 	var base64Data []byte
 	var zoneCount int
 	var keyCount int
+	var operationCount int
 
-	if contentType == "node_components" {
-		// For node_components distributions, use the encrypted data directly from the distribution record
+	if contentType == "node_operations" {
+		// For node_operations (update_components) distributions, use the encrypted data directly from the distribution record
 		// The distribution record already contains the correct encrypted component list
 		// (created with the intended component list, not the current DB state)
 		if len(nodeRecords) != 1 {
-			return nil, fmt.Errorf("node_components distribution should have exactly one record, got %d", len(nodeRecords))
+			return nil, fmt.Errorf("node_operations distribution should have exactly one record, got %d", len(nodeRecords))
 		}
-		
+
 		record := nodeRecords[0]
-		
+		if record.Operation != "update_components" {
+			return nil, fmt.Errorf("node_operations distribution has non-update_components operation: %s", record.Operation)
+		}
+
 		// The distribution record already contains the encrypted component list
 		// Format stored: <ephemeral_pub_key (32 bytes)><ciphertext>
 		// We just need to combine them and base64 encode
 		if len(record.EphemeralPubKey) != 32 {
 			return nil, fmt.Errorf("invalid ephemeral public key length: %d (expected 32)", len(record.EphemeralPubKey))
 		}
-		
+
 		// Combine ephemeral public key and ciphertext for transport
 		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
 		encryptedData := append(record.EphemeralPubKey, record.EncryptedKey...)
-		
+
 		// Base64 encode the encrypted data
 		base64Data = []byte(base64.StdEncoding.EncodeToString(encryptedData))
-		
-		log.Printf("KDC: Using encrypted component list from distribution record: encrypted %d bytes -> base64 %d bytes", 
-			len(encryptedData), len(base64Data))
-		
-		zoneCount = 0 // node_components doesn't have zones
-		keyCount = 0  // node_components doesn't have keys
-	} else if contentType == "encrypted_keys" {
-		// Prepare JSON structure with all key data (including private keys in cleartext)
-		// The entire JSON will be encrypted using HPKE
-		type KeyEntry struct {
-			ZoneName   string `json:"zone_name"`
-			KeyID      string `json:"key_id"`
-			KeyType    string `json:"key_type,omitempty"`
-			Algorithm  uint8  `json:"algorithm,omitempty"`
-			Flags      uint16 `json:"flags,omitempty"`
-			PublicKey  string `json:"public_key,omitempty"`
-			PrivateKey string `json:"private_key"` // Private key in cleartext (will be encrypted as part of entire payload)
-		}
 
-		entries := make([]KeyEntry, 0, len(nodeRecords))
+		log.Printf("KDC: Using encrypted component list from distribution record: encrypted %d bytes -> base64 %d bytes",
+			len(encryptedData), len(base64Data))
+
+		zoneCount = 0 // node_operations doesn't have zones
+		keyCount = 0  // node_operations doesn't have keys
+	} else if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
+		// Prepare JSON structure with operation-based distribution entries
+		// Supports key operations (roll_key, delete_key), management operations (ping), or mixed
+		// The entire JSON will be encrypted using HPKE
+		entries := make([]dzm.DistributionEntry, 0, len(nodeRecords))
 		zoneSet := make(map[string]bool)
-		
+
 		for _, record := range nodeRecords {
-			// Get the key details to include key_id and private key
-			key, err := kdc.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
-			if err != nil {
-				log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
+			entry := dzm.DistributionEntry{
+				Operation: record.Operation,
+				Metadata:  record.Payload,
+			}
+
+			switch record.Operation {
+			case string(OperationRollKey):
+				// Fetch key details from dnssec_keys table
+				key, err := kdc.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
+				if err != nil {
+					log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
+					continue
+				}
+
+				// Populate entry with key details
+				entry.ZoneName = record.ZoneName
+				entry.KeyID = record.KeyID
+				entry.KeyType = string(key.KeyType)
+				entry.Algorithm = key.Algorithm
+				entry.Flags = key.Flags
+				entry.PublicKey = key.PublicKey
+				entry.PrivateKey = base64.StdEncoding.EncodeToString(key.PrivateKey)
+
+				zoneSet[record.ZoneName] = true
+
+			case string(OperationPing):
+				// Ping operation (management) - metadata already contains nonce and timestamp
+				// No additional fields needed
+
+			case string(OperationDeleteKey):
+				// Delete key operation - populate zone_name and key_id
+				entry.ZoneName = record.ZoneName
+				entry.KeyID = record.KeyID
+
+				zoneSet[record.ZoneName] = true
+
+			default:
+				log.Printf("KDC: Warning: Unknown operation type %q in distribution %s", record.Operation, distributionID)
 				continue
 			}
 
-			// Decrypt the private key from the distribution record to get cleartext
-			// The record.EncryptedKey was encrypted using HPKE, we need to decrypt it
-			// But wait - we don't have the node's private key here. We need to get the cleartext private key
-			// from the DNSSECKey structure instead.
-			entry := KeyEntry{
-				ZoneName:  record.ZoneName,
-				KeyID:     record.KeyID,
-				KeyType:   string(key.KeyType),
-				Algorithm: key.Algorithm,
-				Flags:     key.Flags,
-				PublicKey: key.PublicKey,
-				PrivateKey: base64.StdEncoding.EncodeToString(key.PrivateKey), // Base64-encode private key bytes
-			}
 			entries = append(entries, entry)
-			zoneSet[record.ZoneName] = true
 		}
 
-		keyCount = len(entries)
+		operationCount = len(entries)
+		keyCount = 0  // For key_operations, count the actual key operations
+		for _, entry := range entries {
+			if entry.Operation == "roll_key" || entry.Operation == "delete_key" {
+				keyCount++
+			}
+		}
 		zoneCount = len(zoneSet)
 
-		if keyCount == 0 {
-			return nil, fmt.Errorf("no valid keys found for node %s, distribution %s", nodeID, distributionID)
+		if operationCount == 0 {
+			return nil, fmt.Errorf("no valid operations found for node %s, distribution %s", nodeID, distributionID)
 		}
 
 		// Marshal to JSON (cleartext)
-		keysJSON, err := json.Marshal(entries)
+		entriesJSON, err := json.Marshal(entries)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal keys JSON: %v", err)
+			return nil, fmt.Errorf("failed to marshal entries JSON: %v", err)
 		}
 
 		// Debug logging: log cleartext content (masking private keys)
@@ -192,53 +237,40 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 			// Create a copy for logging with masked private keys
 			logEntries := make([]map[string]interface{}, len(entries))
 			for i, entry := range entries {
-				logEntries[i] = map[string]interface{}{
-					"zone_name":   entry.ZoneName,
-					"key_id":      entry.KeyID,
-					"key_type":    entry.KeyType,
-					"algorithm":   entry.Algorithm,
-					"flags":       entry.Flags,
-					"public_key":  entry.PublicKey,
-					"private_key": "***MASKED***",
+				logEntry := map[string]interface{}{
+					"operation": entry.Operation,
+					"zone_name": entry.ZoneName,
+					"key_id":    entry.KeyID,
 				}
+				if entry.Operation == string(OperationRollKey) {
+					logEntry["key_type"] = entry.KeyType
+					logEntry["algorithm"] = entry.Algorithm
+					logEntry["flags"] = entry.Flags
+					logEntry["public_key"] = entry.PublicKey
+					logEntry["private_key"] = "***MASKED***"
+				}
+				if entry.Metadata != nil {
+					logEntry["metadata"] = entry.Metadata
+				}
+				logEntries[i] = logEntry
 			}
 			logJSON, _ := json.Marshal(logEntries)
 			log.Printf("KDC: DEBUG: Cleartext distribution payload (private keys masked): %s", string(logJSON))
 		}
 
-		log.Printf("KDC: Prepared keys JSON: %d keys for %d zones, JSON size: %d bytes", 
-			keyCount, zoneCount, len(keysJSON))
+		log.Printf("KDC: Prepared %s: %d operations (%d key ops) for %d zones, JSON size: %d bytes",
+			contentType, operationCount, keyCount, zoneCount, len(entriesJSON))
 
 		// Encrypt the entire JSON payload using HPKE and encode for transport
-		base64Data, err = dzm.EncryptAndEncode(node.LongTermPubKey, keysJSON)
+		base64Data, err = dzm.EncryptAndEncode(node.LongTermPubKey, entriesJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
 		}
-		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> base64 %d bytes", 
-			len(keysJSON), len(base64Data))
+		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> base64 %d bytes",
+			len(entriesJSON), len(base64Data))
 	} else {
-		// "zonelist" mode (fallback)
-		// Collect zone names from distribution records
-		zoneSet := make(map[string]bool)
-		for _, record := range nodeRecords {
-			zoneSet[record.ZoneName] = true
-		}
-
-		zones := make([]string, 0, len(zoneSet))
-		for zone := range zoneSet {
-			zones = append(zones, zone)
-		}
-
-		zoneCount = len(zones)
-
-		// Prepare JSON data: zone list
-		zoneListJSON, err := json.Marshal(zones)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal zone list: %v", err)
-		}
-
-		// Base64 encode
-		base64Data = []byte(base64.StdEncoding.EncodeToString(zoneListJSON))
+		// Should never reach here - all valid content types should be handled above
+		return nil, fmt.Errorf("invalid or unsupported content type: %s for distribution %s", contentType, distributionID)
 	}
 
 	// Calculate checksum
@@ -247,11 +279,13 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 
 	// Create manifest metadata
 	extraFields := make(map[string]interface{})
-	if contentType == "encrypted_keys" {
+	if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
+		// For operation-based distributions, include operation counts
 		extraFields["zone_count"] = zoneCount
 		extraFields["key_count"] = keyCount
-	} else if contentType == "node_components" {
-		// Get component count from the stored component list for this distribution
+		extraFields["operation_count"] = operationCount
+	} else if contentType == "node_operations" {
+		// For node_operations (update_components), get component count from the stored component list
 		// This ensures the metadata matches the actual payload (which comes from the distribution record)
 		_, intendedComponents, err := kdc.GetDistributionComponentList(distributionID)
 		if err == nil {
@@ -370,10 +404,10 @@ func (kdc *KdcDB) GetCHUNKForNode(nodeID, distributionID string, chunkID uint16,
 // GetDistributionRecordsForDistributionID gets all distribution records for a distribution ID
 func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string) ([]*DistributionRecord, error) {
 	rows, err := kdc.DB.Query(
-		`SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, 
-			created_at, expires_at, status, distribution_id, completed_at
-			FROM distribution_records 
-			WHERE distribution_id = ? 
+		`SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key,
+			created_at, expires_at, status, distribution_id, completed_at, operation, payload
+			FROM distribution_records
+			WHERE distribution_id = ?
 			ORDER BY created_at DESC`,
 		distributionID,
 	)
@@ -391,10 +425,13 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 		var expiresAt sql.NullTime
 		var completedAt sql.NullTime
 		var statusStr string
+		var operationStr sql.NullString
+		var payloadJSON sql.NullString
 		if err := rows.Scan(
 			&record.ID, &zoneName, &keyID, &nodeID,
 			&record.EncryptedKey, &record.EphemeralPubKey, &record.CreatedAt,
 			&expiresAt, &statusStr, &record.DistributionID, &completedAt,
+			&operationStr, &payloadJSON,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan distribution record: %v", err)
 		}
@@ -412,6 +449,18 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 		}
 		if completedAt.Valid {
 			record.CompletedAt = &completedAt.Time
+		}
+		if operationStr.Valid {
+			record.Operation = operationStr.String
+		}
+		if payloadJSON.Valid && payloadJSON.String != "" {
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(payloadJSON.String), &payload); err != nil {
+				log.Printf("KDC: Warning: Failed to unmarshal payload for record %s: %v", record.ID, err)
+				// Continue without payload rather than failing
+			} else {
+				record.Payload = payload
+			}
 		}
 		record.Status = hpke.DistributionStatus(statusStr)
 		records = append(records, record)

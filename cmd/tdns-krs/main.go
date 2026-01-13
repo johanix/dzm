@@ -155,6 +155,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	// Call SetupKrsAPIRoutes directly on the router (not via RegisterAPIRoute)
 	// because SetupAPIRouter has already been called and returned
 	krs.SetupKrsAPIRoutes(apirouter, krsDB, &krsConf, confMap, tdns.APIping(conf))
+	log.Printf("KRS: API routes setup")
 
 	// Start API dispatcher
 	go func() {
@@ -164,6 +165,8 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		}
 	}()
 
+	log.Printf("API dispatcher started")
+	
 	// Register debug query handler FIRST (for all queries) - logs all queries before processing
 	// This is optional - only register if debug mode is enabled
 	if tdns.Globals.Debug {
@@ -202,12 +205,14 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	} else {
 		log.Printf("KRS: WARNING: No DNS engine addresses configured, DnsEngine not started")
 	}
+	log.Printf("KRS: DnsEngine started")
 
 	if err := tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
 		return krs.KeyStateWorker(ctx, krsDB)
 	}); err != nil {
 		return fmt.Errorf("failed to register KeyStateWorker: %v", err)
 	}
+	log.Printf("KRS: KeyStateWorker started")
 
 	// Start all registered engines (including DnsEngine and KeyStateWorker)
 	tdns.StartRegisteredEngines(ctx)

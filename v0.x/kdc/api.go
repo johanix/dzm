@@ -719,11 +719,46 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "key_id is required for delete-key command")
 				return
 			}
+
+			// Check if key exists at KDC before deletion (safety check)
+			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
+			if err != nil {
+				// Check if it's a "not found" error
+				if strings.Contains(err.Error(), "not found") {
+					if !req.Force {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Key %s does not exist at KDC for zone %s. Use --force to delete anyway.", req.KeyID, req.ZoneName)
+						break
+					}
+					// Force flag is set - log warning and continue
+					log.Printf("KDC API: WARNING: Deleting key %s from zone %s at KDC that doesn't exist (force flag used)", req.KeyID, req.ZoneName)
+				} else {
+					// Actual database error
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Failed to get key: %v", err)
+					break
+				}
+			} else {
+				// Key exists - check if it's in a dangerous state
+				dangerousStates := map[KeyState]bool{
+					KeyStateActive:     true,
+					KeyStateActiveDist: true,
+					KeyStateActiveCE:   true,
+					KeyStateEdgeSigner: true,
+				}
+
+				if dangerousStates[key.State] && !req.Force {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Cannot delete key in state '%s' without force flag. Key is active.", key.State)
+					break
+				}
+			}
+
 			if err := kdcDB.DeleteDNSSECKey(req.ZoneName, req.KeyID); err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
-				resp.Msg = fmt.Sprintf("Key %s deleted successfully", req.KeyID)
+				resp.Msg = fmt.Sprintf("Key %s deleted successfully from KDC", req.KeyID)
 			}
 
 		case "purge-keys":
@@ -1738,6 +1773,282 @@ func computeKeyHash(privateKey []byte) (string, error) {
 	return hex.EncodeToString(hash[:]), nil
 }
 
+// APIKdcOperations handles operation requests (ping, delete_key, roll_key)
+func APIKdcOperations(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if tdns.Globals.Debug {
+			log.Printf("KDC: DEBUG: APIKdcOperations handler called")
+		}
+
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := map[string]interface{}{
+			"time":  time.Now(),
+			"error": false,
+		}
+
+		command, ok := req["command"].(string)
+		if !ok {
+			sendJSONError(w, http.StatusBadRequest, "command is required")
+			return
+		}
+
+		switch command {
+		case "ping":
+			// Handle ping operation
+			var nodeIDs []string
+
+			if all, ok := req["all"].(bool); ok && all {
+				// Ping all active nodes
+				nodes, err := kdcDB.GetActiveNodes()
+				if err != nil {
+					resp["error"] = true
+					resp["error_msg"] = fmt.Sprintf("Failed to get active nodes: %v", err)
+					break
+				}
+				for _, node := range nodes {
+					nodeIDs = append(nodeIDs, node.ID)
+				}
+			} else if nodeID, ok := req["node_id"].(string); ok && nodeID != "" {
+				// Ping specific node
+				nodeIDs = []string{nodeID}
+			} else {
+				sendJSONError(w, http.StatusBadRequest, "either 'node_id' or 'all' must be specified")
+				return
+			}
+
+			if len(nodeIDs) == 0 {
+				resp["error"] = true
+				resp["error_msg"] = "No nodes to ping"
+				break
+			}
+
+			// Create ping operations for each node
+			var distributionIDs []string
+			for _, nodeID := range nodeIDs {
+				distID, err := kdcDB.CreatePingOperation(nodeID, kdcConf)
+				if err != nil {
+					log.Printf("KDC API: Failed to create ping operation for node %s: %v", nodeID, err)
+					continue
+				}
+				distributionIDs = append(distributionIDs, distID)
+
+				// Send NOTIFY for this distribution
+				if err := kdcDB.SendNotifyWithDistributionID(distID, kdcConf.ControlZone); err != nil {
+					log.Printf("KDC API: Failed to send NOTIFY for distribution %s: %v", distID, err)
+				}
+			}
+
+			if len(distributionIDs) == 0 {
+				resp["error"] = true
+				resp["error_msg"] = "Failed to create any ping operations"
+			} else {
+				resp["msg"] = fmt.Sprintf("Ping operation sent to %d node(s)", len(distributionIDs))
+				resp["distribution_ids"] = distributionIDs
+			}
+
+		case "delete_key":
+			// Handle delete_key operation
+			zoneName, ok := req["zone_name"].(string)
+			if !ok || zoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required")
+				return
+			}
+			keyID, ok := req["key_id"].(string)
+			if !ok || keyID == "" {
+				sendJSONError(w, http.StatusBadRequest, "key_id is required")
+				return
+			}
+			reason, _ := req["reason"].(string)
+			force, _ := req["force"].(bool)
+
+			// Check if key exists at KDC before distributing delete operation
+			key, err := kdcDB.GetDNSSECKeyByID(zoneName, keyID)
+			if err != nil {
+				// Check if it's a "not found" error
+				if strings.Contains(err.Error(), "not found") {
+					if !force {
+						resp["error"] = true
+						resp["error_msg"] = fmt.Sprintf("Key %s does not exist at KDC for zone %s. Use --force to delete anyway (key may exist at nodes).", keyID, zoneName)
+						break
+					}
+					// Force flag is set - log warning and continue
+					log.Printf("KDC API: WARNING: Deleting key %s from zone %s that doesn't exist at KDC (force flag used)", keyID, zoneName)
+				} else {
+					// Actual database error
+					resp["error"] = true
+					resp["error_msg"] = fmt.Sprintf("Failed to get key: %v", err)
+					break
+				}
+			} else {
+				// Key exists - check if it's in a dangerous state
+				dangerousStates := map[KeyState]bool{
+					KeyStateActive:     true,
+					KeyStateActiveDist: true,
+					KeyStateActiveCE:   true,
+					KeyStateEdgeSigner: true,
+				}
+
+				if dangerousStates[key.State] && !force {
+					resp["error"] = true
+					resp["error_msg"] = fmt.Sprintf("Cannot delete key in state '%s' without force flag. Key is active.", key.State)
+					break
+				}
+			}
+
+			// Optional: specific node ID (if provided, only send to this node)
+			targetNodeID, _ := req["node_id"].(string)
+
+			// Determine which nodes to target
+			var nodes []*Node
+
+			if targetNodeID != "" {
+				// Single specific node
+				node, err := kdcDB.GetNode(targetNodeID)
+				if err != nil {
+					resp["error"] = true
+					resp["error_msg"] = fmt.Sprintf("Failed to get node %s: %v", targetNodeID, err)
+					break
+				}
+				nodes = append(nodes, node)
+			} else {
+				// All nodes serving this zone
+				nodes, err = kdcDB.GetActiveNodesForZone(zoneName)
+				if err != nil {
+					resp["error"] = true
+					resp["error_msg"] = fmt.Sprintf("Failed to get nodes for zone: %v", err)
+					break
+				}
+
+				if len(nodes) == 0 {
+					resp["error"] = true
+					resp["error_msg"] = fmt.Sprintf("No nodes serving zone %s", zoneName)
+					break
+				}
+			}
+
+			// Create delete_key operations for each target node
+			var distributionIDs []string
+			for _, node := range nodes {
+				distID, err := kdcDB.CreateDeleteKeyOperation(zoneName, keyID, node.ID, reason)
+				if err != nil {
+					log.Printf("KDC API: Failed to create delete_key operation for node %s: %v", node.ID, err)
+					continue
+				}
+				distributionIDs = append(distributionIDs, distID)
+
+				// Send NOTIFY for this distribution
+				if err := kdcDB.SendNotifyWithDistributionID(distID, kdcConf.ControlZone); err != nil {
+					log.Printf("KDC API: Failed to send NOTIFY for distribution %s: %v", distID, err)
+				}
+			}
+
+			if len(distributionIDs) == 0 {
+				resp["error"] = true
+				resp["error_msg"] = "Failed to create any delete_key operations"
+			} else {
+				resp["msg"] = fmt.Sprintf("Delete key operation sent to %d node(s)", len(distributionIDs))
+				resp["distribution_ids"] = distributionIDs
+				resp["nodes_notified"] = len(distributionIDs)
+			}
+
+		case "roll_key":
+			// Handle roll_key operation
+			zoneName, ok := req["zone_name"].(string)
+			if !ok || zoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required")
+				return
+			}
+			keyType, ok := req["key_type"].(string)
+			if !ok || keyType == "" {
+				sendJSONError(w, http.StatusBadRequest, "key_type is required")
+				return
+			}
+			oldKeyID, _ := req["old_key_id"].(string)
+
+			// Validate key type
+			var keyTypeEnum KeyType
+			switch strings.ToUpper(keyType) {
+			case "ZSK":
+				keyTypeEnum = KeyTypeZSK
+			case "KSK":
+				keyTypeEnum = KeyTypeKSK
+			case "CSK":
+				keyTypeEnum = KeyTypeCSK
+			default:
+				sendJSONError(w, http.StatusBadRequest, "key_type must be ZSK, KSK, or CSK")
+				return
+			}
+
+			// Generate new key using default algorithm
+			algorithm := kdcConf.DefaultAlgorithm
+			if algorithm == 0 {
+				algorithm = 15 // ED25519 as fallback default
+			}
+			newKey, err := kdcDB.GenerateDNSSECKey(zoneName, keyTypeEnum, algorithm, "API roll_key operation")
+			if err != nil {
+				resp["error"] = true
+				resp["error_msg"] = fmt.Sprintf("Failed to generate new key: %v", err)
+				break
+			}
+
+			// Get all nodes serving this zone
+			nodes, err := kdcDB.GetActiveNodesForZone(zoneName)
+			if err != nil {
+				resp["error"] = true
+				resp["error_msg"] = fmt.Sprintf("Failed to get nodes for zone: %v", err)
+				break
+			}
+
+			if len(nodes) == 0 {
+				resp["error"] = true
+				resp["error_msg"] = fmt.Sprintf("No nodes serving zone %s", zoneName)
+				break
+			}
+
+			// Create roll_key operations for each node
+			var distributionIDs []string
+			for _, node := range nodes {
+				distID, err := kdcDB.CreateRollKeyOperation(newKey, oldKeyID, node, kdcConf)
+				if err != nil {
+					log.Printf("KDC API: Failed to create roll_key operation for node %s: %v", node.ID, err)
+					continue
+				}
+				distributionIDs = append(distributionIDs, distID)
+
+				// Send NOTIFY for this distribution
+				if err := kdcDB.SendNotifyWithDistributionID(distID, kdcConf.ControlZone); err != nil {
+					log.Printf("KDC API: Failed to send NOTIFY for distribution %s: %v", distID, err)
+				}
+			}
+
+			if len(distributionIDs) == 0 {
+				resp["error"] = true
+				resp["error_msg"] = "Failed to create any roll_key operations"
+			} else {
+				resp["msg"] = fmt.Sprintf("Roll key operation sent to %d node(s)", len(distributionIDs))
+				resp["distribution_ids"] = distributionIDs
+				resp["new_key_id"] = newKey.KeyID
+				if oldKeyID != "" {
+					resp["old_key_id"] = oldKeyID
+				}
+				resp["nodes_notified"] = len(distributionIDs)
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
 // SetupKdcAPIRoutes sets up KDC-specific API routes
 // conf is *tdns.Config passed as interface{} to avoid circular import
 // APIKdcService handles service management endpoints
@@ -2709,6 +3020,7 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 			router.Path("/api/v1/kdc/service-transaction").Headers("X-API-Key", apikey).HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/config").Headers("X-API-Key", apikey).HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
 			router.Path("/api/v1/kdc/debug").Headers("X-API-Key", apikey).HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
+			router.Path("/api/v1/kdc/operations").Headers("X-API-Key", apikey).HandlerFunc(APIKdcOperations(kdcDB, kdcConf)).Methods("POST")
 		}
 	} else {
 		router.Path("/api/v1/kdc/zone").HandlerFunc(APIKdcZone(kdcDB, kdcConf)).Methods("POST")
@@ -2723,9 +3035,10 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 			router.Path("/api/v1/kdc/service-transaction").HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/config").HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
 			router.Path("/api/v1/kdc/debug").HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
+			router.Path("/api/v1/kdc/operations").HandlerFunc(APIKdcOperations(kdcDB, kdcConf)).Methods("POST")
 		}
 	}
-	
+
 	// Register catalog zone route (requires kdcConf)
 	if kdcConf != nil {
 		if apikey != "" {
@@ -2735,6 +3048,6 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 		}
 	}
 	
-	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/bootstrap, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug, /api/v1/kdc/catalog")
+	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/bootstrap, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug, /api/v1/kdc/catalog, /api/v1/kdc/operations")
 }
 

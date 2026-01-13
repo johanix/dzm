@@ -92,16 +92,17 @@ const (
 
 // Node represents an edge server that receives ZSK keys
 type Node struct {
-	ID              string    `json:"id"`              // Unique identifier for the node
-	Name            string    `json:"name"`            // Human-readable name
-	LongTermPubKey  []byte    `json:"long_term_pub_key"` // HPKE long-term public key (32 bytes, X25519)
-	Sig0PubKey     string    `json:"sig0_pub_key,omitempty"` // SIG(0) public key (DNSKEY RR format string)
-	NotifyAddress   string    `json:"notify_address"`  // Address:port for sending NOTIFY messages (e.g., "192.0.2.1:53")
-	RegisteredAt    time.Time `json:"registered_at"`
-	LastSeen        time.Time `json:"last_seen"`
-	State           NodeState `json:"state"`
-	Comment         string    `json:"comment"`         // Optional comment/description
-	Zones           []string  `json:"zones"`           // List of zone names this node serves (for future use)
+	ID              string     `json:"id"`              // Unique identifier for the node
+	Name            string     `json:"name"`            // Human-readable name
+	LongTermPubKey  []byte     `json:"long_term_pub_key"` // HPKE long-term public key (32 bytes, X25519)
+	Sig0PubKey      string     `json:"sig0_pub_key,omitempty"` // SIG(0) public key (DNSKEY RR format string)
+	NotifyAddress   string     `json:"notify_address"`  // Address:port for sending NOTIFY messages (e.g., "192.0.2.1:53")
+	RegisteredAt    time.Time  `json:"registered_at"`
+	LastSeen        time.Time  `json:"last_seen"`
+	LastContact     *time.Time `json:"last_contact,omitempty"` // Most recent confirmation of successful operation
+	State           NodeState  `json:"state"`
+	Comment         string     `json:"comment"`         // Optional comment/description
+	Zones           []string   `json:"zones"`           // List of zone names this node serves (for future use)
 }
 
 // BootstrapToken represents a bootstrap token for node registration
@@ -126,6 +127,16 @@ const (
 	KeyTypeKSK KeyType = "KSK"
 	KeyTypeZSK KeyType = "ZSK"
 	KeyTypeCSK KeyType = "CSK"
+)
+
+// OperationType represents the type of distribution operation
+type OperationType string
+
+const (
+	OperationPing           OperationType = "ping"            // Health check / nonce challenge-response
+	OperationRollKey        OperationType = "roll_key"        // Add new key (initial distribution or rollover)
+	OperationDeleteKey      OperationType = "delete_key"      // Remove key from node
+	OperationNodeComponents OperationType = "node_components" // Update node's component subscriptions
 )
 
 // KeyState represents the state of a DNSSEC key in the KDC
@@ -172,16 +183,18 @@ type DNSSECKey struct {
 // DistributionRecord represents a record of a key distribution to a node
 type DistributionRecord struct {
 	ID               string             // Unique ID for this distribution
-	ZoneName         string             // Zone name
-	KeyID            string             // DNSSEC key ID
+	ZoneName         string             // Zone name (NULL for non-key operations like ping, update_components)
+	KeyID            string             // DNSSEC key ID (NULL for non-key operations)
 	NodeID           string             // Target node ID (empty if to all nodes)
-	EncryptedKey     []byte             // HPKE-encrypted private key
-	EphemeralPubKey  []byte             // Ephemeral public key used for encryption
+	EncryptedKey     []byte             // HPKE-encrypted private key (NULL for unencrypted operations like delete_key)
+	EphemeralPubKey  []byte             // Ephemeral public key used for encryption (NULL for unencrypted operations)
 	CreatedAt        time.Time
 	ExpiresAt        *time.Time         // Optional expiration of the distributed key
 	Status           hpke.DistributionStatus
 	DistributionID   string             // HPKE distribution ID (for tracking)
 	CompletedAt      *time.Time         // When distribution was completed (nil if not completed)
+	Operation        string             // Operation type: ping, roll_key, delete_key, node_components
+	Payload          map[string]interface{} `json:"payload,omitempty"` // Operation-specific metadata (JSON)
 }
 
 // DistributionSummaryInfo represents summary information about a distribution for listing
@@ -189,6 +202,7 @@ type DistributionSummaryInfo struct {
 	DistributionID string            `json:"distribution_id"`
 	Nodes          []string          `json:"nodes"`          // Nodes this distribution applies to
 	Zones          []string          `json:"zones"`          // Zones in this distribution
+	ContentType    string            `json:"content_type"`   // node_operations, key_operations, mgmt_operations, or mixed_operations
 	ZSKCount       int               `json:"zsk_count"`     // Number of ZSK keys
 	KSKCount       int               `json:"ksk_count"`     // Number of KSK keys
 	Keys           map[string]string `json:"keys"`          // Map of zone -> key_id (for verbose mode)

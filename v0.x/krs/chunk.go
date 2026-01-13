@@ -302,6 +302,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 			*processTextResult = text
 		}
 		return nil
+
 	case "encrypted_text":
 		text, err := ProcessEncryptedText(krsDB, conf, reassembled)
 		if err != nil {
@@ -312,12 +313,26 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 			*processTextResult = text
 		}
 		return nil
+
 	case "zonelist":
 		return ProcessZoneList(krsDB, reassembled)
-	case "encrypted_keys":
-		return ProcessEncryptedKeys(krsDB, conf, reassembled, distributionID, retireTime)
-	case "node_components":
+
+	case "key_operations":
+		// Key operations: roll_key, delete_key
+		return ProcessEncryptedOperations(krsDB, conf, reassembled, distributionID, retireTime)
+
+	case "mgmt_operations":
+		// Management operations: ping, status, etc.
+		return ProcessEncryptedOperations(krsDB, conf, reassembled, distributionID, retireTime)
+
+	case "mixed_operations":
+		// Mixed operations: combination of key, node, and/or management operations
+		return ProcessEncryptedOperations(krsDB, conf, reassembled, distributionID, retireTime)
+
+	case "node_operations":
+		// Node operations: update_components
 		return ProcessNodeComponents(krsDB, conf, reassembled, distributionID)
+
 	default:
 		return fmt.Errorf("unknown content type: %s", contentType)
 	}
@@ -428,14 +443,16 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 	return nil
 }
 
-// ProcessEncryptedKeys processes encrypted_keys content
-// Data is base64-encoded encrypted payload containing the entire distribution (all keys in cleartext JSON)
+// ProcessEncryptedOperations processes operation-based distributions
+// Handles: key_operations, mgmt_operations, mixed_operations
+// Data is base64-encoded encrypted payload containing operation entries in JSON
 // The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
+// Operations can be: roll_key, delete_key (key operations), ping (management operations), or mixed
 // distributionID and retireTime are optional and can be passed from the manifest metadata
-func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string, retireTime string) error {
+func ProcessEncryptedOperations(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string, retireTime string) error {
 	distID := distributionID
 	// Step 1: Load node's private key for decryption
-	log.Printf("KRS: Processing encrypted_keys content (%d bytes base64)", len(data))
+	log.Printf("KRS: Processing operation-based distribution (key_operations, mgmt_operations, or mixed) (%d bytes base64)", len(data))
 	if conf.Node.LongTermPrivKey == "" {
 		return fmt.Errorf("node long-term private key not configured")
 	}
@@ -454,157 +471,111 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 
 	log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
 
-	// Step 3: Parse JSON structure (cleartext)
-	type KeyEntry struct {
-		ZoneName   string `json:"zone_name"`
-		KeyID      string `json:"key_id"`
-		KeyType    string `json:"key_type,omitempty"`
-		Algorithm  uint8  `json:"algorithm,omitempty"`
-		Flags      uint16 `json:"flags,omitempty"`
-		PublicKey  string `json:"public_key,omitempty"`
-		PrivateKey string `json:"private_key"` // Private key in cleartext
-	}
-
-	var entries []KeyEntry
+	// Step 3: Parse JSON structure as operation-based distribution entries
+	var entries []dzm.DistributionEntry
 	if err := json.Unmarshal(plaintextJSON, &entries); err != nil {
-		return fmt.Errorf("failed to unmarshal decrypted keys JSON: %v", err)
+		return fmt.Errorf("failed to unmarshal decrypted operations JSON: %v", err)
 	}
 
-	log.Printf("KRS: Parsed %d key entries from decrypted payload", len(entries))
+	log.Printf("KRS: Parsed %d operation entries from decrypted payload", len(entries))
 
 	// Debug logging: log cleartext content (masking private keys)
 	if tdns.Globals.Debug {
-		// Create a copy for logging with masked private keys
 		logEntries := make([]map[string]interface{}, len(entries))
 		for i, entry := range entries {
-			logEntries[i] = map[string]interface{}{
-				"zone_name":   entry.ZoneName,
-				"key_id":      entry.KeyID,
-				"key_type":    entry.KeyType,
-				"algorithm":   entry.Algorithm,
-				"flags":      entry.Flags,
-				"public_key":  entry.PublicKey,
-				"private_key": "***MASKED***",
+			logEntry := map[string]interface{}{
+				"operation": entry.Operation,
+				"zone_name": entry.ZoneName,
+				"key_id":    entry.KeyID,
 			}
+			if entry.Operation == "roll_key" {
+				logEntry["key_type"] = entry.KeyType
+				logEntry["algorithm"] = entry.Algorithm
+				logEntry["flags"] = entry.Flags
+				logEntry["public_key"] = entry.PublicKey
+				logEntry["private_key"] = "***MASKED***"
+			}
+			if entry.Metadata != nil {
+				logEntry["metadata"] = entry.Metadata
+			}
+			logEntries[i] = logEntry
 		}
 		logJSON, _ := json.Marshal(logEntries)
 		log.Printf("KRS: DEBUG: Decrypted distribution payload (private keys masked): %s", string(logJSON))
 	}
 
-	// Step 4: Process each key entry and store
-	// Note: AddEdgesignerKeyWithRetirement handles retiring existing edgesigner keys atomically
+	// Step 4: Process each operation entry by routing to appropriate handler
 	successCount := 0
 	var successfulKeys []edns0.KeyStatusEntry
 	var failedKeys []edns0.KeyStatusEntry
-	
+
 	for i, entry := range entries {
-		log.Printf("KRS: Processing key entry %d/%d: zone=%s, key_id=%s", i+1, len(entries), entry.ZoneName, entry.KeyID)
+		log.Printf("KRS: Processing operation %d/%d: operation=%s, zone=%s, key_id=%s", i+1, len(entries), entry.Operation, entry.ZoneName, entry.KeyID)
 
-		log.Printf("KRS: Key entry details - ZoneName: %s, KeyID: %s, KeyType: '%s', Algorithm: %d, Flags: %d", 
-			entry.ZoneName, entry.KeyID, entry.KeyType, entry.Algorithm, entry.Flags)
-
-		// Create ReceivedKey structure
-		// Parse key_id as uint16 (it's stored as string in JSON but should be a keytag)
-		var keyID uint16
-		if _, err := fmt.Sscanf(entry.KeyID, "%d", &keyID); err != nil {
-			// Try parsing as hex
-			if _, err2 := fmt.Sscanf(entry.KeyID, "%x", &keyID); err2 != nil {
-				log.Printf("KRS: Warning: Could not parse key_id '%s' as number, using 0", entry.KeyID)
-				keyID = 0
+		// Route operation to appropriate handler
+		var opErr error
+		switch entry.Operation {
+		case "ping":
+			opErr = handlePingOperation(entry, i)
+			if opErr == nil {
+				successCount++
+				successfulKeys = append(successfulKeys, edns0.KeyStatusEntry{
+					ZoneName: "ping",
+					KeyID:    fmt.Sprintf("op-%d", i),
+				})
+			} else {
+				failedKeys = append(failedKeys, edns0.KeyStatusEntry{
+					ZoneName: "ping",
+					KeyID:    fmt.Sprintf("op-%d", i),
+					Error:    opErr.Error(),
+				})
 			}
-		}
 
-		// Decode private key from base64 string
-		privateKeyBytes, err := base64.StdEncoding.DecodeString(entry.PrivateKey)
-		if err != nil {
-			log.Printf("KRS: Error: Failed to decode private_key for entry %d: %v", i+1, err)
+		case "roll_key":
+			opErr = handleRollKeyOperation(krsDB, entry, distID, retireTime, i)
+			if opErr == nil {
+				successCount++
+				successfulKeys = append(successfulKeys, edns0.KeyStatusEntry{
+					ZoneName: entry.ZoneName,
+					KeyID:    entry.KeyID,
+				})
+			} else {
+				failedKeys = append(failedKeys, edns0.KeyStatusEntry{
+					ZoneName: entry.ZoneName,
+					KeyID:    entry.KeyID,
+					Error:    opErr.Error(),
+				})
+			}
+
+		case "delete_key":
+			opErr = handleDeleteKeyOperation(krsDB, entry, i)
+			if opErr == nil {
+				successCount++
+				successfulKeys = append(successfulKeys, edns0.KeyStatusEntry{
+					ZoneName: entry.ZoneName,
+					KeyID:    entry.KeyID,
+				})
+			} else {
+				failedKeys = append(failedKeys, edns0.KeyStatusEntry{
+					ZoneName: entry.ZoneName,
+					KeyID:    entry.KeyID,
+					Error:    opErr.Error(),
+				})
+			}
+
+		default:
+			log.Printf("KRS: Warning: Unknown operation type '%s' for entry %d", entry.Operation, i+1)
 			failedKeys = append(failedKeys, edns0.KeyStatusEntry{
 				ZoneName: entry.ZoneName,
 				KeyID:    entry.KeyID,
-				Error:    fmt.Sprintf("Failed to decode private_key: %v", err),
+				Error:    fmt.Sprintf("Unknown operation: %s", entry.Operation),
 			})
-			continue
 		}
-
-		// Determine state based on key type
-		// ZSKs go to "edgesigner" state, KSKs go to "active" state
-		// Also check Flags: 257 = KSK, 256 = ZSK
-		keyState := "edgesigner"
-		isKSK := false
-		if entry.KeyType == "KSK" {
-			keyState = "active"
-			isKSK = true
-			log.Printf("KRS: Detected KSK from KeyType field")
-		} else if entry.Flags == 257 {
-			// Fallback: check flags if KeyType is missing or incorrect
-			keyState = "active"
-			isKSK = true
-			log.Printf("KRS: Detected KSK from Flags field (257), KeyType was '%s'", entry.KeyType)
-		} else {
-			log.Printf("KRS: Detected ZSK (KeyType: '%s', Flags: %d)", entry.KeyType, entry.Flags)
-		}
-
-		receivedKey := &ReceivedKey{
-			ID:             fmt.Sprintf("%s-%s", entry.ZoneName, entry.KeyID),
-			ZoneName:       entry.ZoneName,
-			KeyID:          keyID,
-			KeyType:        entry.KeyType,
-			Algorithm:      entry.Algorithm,
-			Flags:          entry.Flags,
-			PublicKey:      entry.PublicKey,
-			PrivateKey:     privateKeyBytes, // Decoded from base64 string
-			State:          keyState,
-			ReceivedAt:     time.Now(),
-			DistributionID: distID,
-			RetireTime:     retireTime, // From KDC metadata
-			Comment:        fmt.Sprintf("Received via encrypted_keys distribution"),
-		}
-
-		// Store in database atomically
-		// For ZSKs: retires existing edgesigner keys and adds new one (ensures only one ZSK per zone in edgesigner state)
-		// For KSKs: retires existing active KSKs and adds new one (ensures only one KSK per zone in active state)
-		var storeErr error
-		if isKSK {
-			// Ensure KeyType is set correctly for KSK
-			receivedKey.KeyType = "KSK"
-			storeErr = krsDB.AddActiveKeyWithRetirement(receivedKey)
-			if storeErr != nil {
-				log.Printf("KRS: Error: Failed to store KSK for entry %d: %v", i+1, storeErr)
-				failedKeys = append(failedKeys, edns0.KeyStatusEntry{
-					ZoneName: entry.ZoneName,
-					KeyID:    entry.KeyID,
-					Error:    storeErr.Error(),
-				})
-				continue
-			}
-			log.Printf("KRS: Successfully stored KSK (key_id %d) in 'active' state for zone %s", keyID, entry.ZoneName)
-		} else {
-			// Ensure KeyType is set correctly for ZSK
-			receivedKey.KeyType = "ZSK"
-			storeErr = krsDB.AddEdgesignerKeyWithRetirement(receivedKey)
-			if storeErr != nil {
-				log.Printf("KRS: Error: Failed to store ZSK for entry %d: %v", i+1, storeErr)
-				failedKeys = append(failedKeys, edns0.KeyStatusEntry{
-					ZoneName: entry.ZoneName,
-					KeyID:    entry.KeyID,
-					Error:    storeErr.Error(),
-				})
-				continue
-			}
-			log.Printf("KRS: Successfully stored ZSK (key_id %d) in 'edgesigner' state for zone %s", keyID, entry.ZoneName)
-		}
-
-		successCount++
-		successfulKeys = append(successfulKeys, edns0.KeyStatusEntry{
-			ZoneName: entry.ZoneName,
-			KeyID:    entry.KeyID,
-		})
-		log.Printf("KRS: Stored key for zone %s, key_id %s (keytag %d)", entry.ZoneName, entry.KeyID, keyID)
 	}
 
-	log.Printf("KRS: Successfully processed %d/%d encrypted keys", successCount, len(entries))
+	log.Printf("KRS: Successfully processed %d/%d operations", successCount, len(entries))
 	if successCount == 0 {
-		return fmt.Errorf("failed to process any encrypted keys")
+		return fmt.Errorf("failed to process any operations")
 	}
 
 	// Send confirmation NOTIFY back to KDC
@@ -642,14 +613,14 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 	return nil
 }
 
-// ProcessNodeComponents processes node_components content
+// ProcessNodeComponents processes node_operations content (update_components operations)
 // Data is base64-encoded encrypted payload containing the component list
 // The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
 // distributionID is optional and can be passed from the manifest metadata
 func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string) error {
 	distID := distributionID
 	// Step 1: Load node's private key for decryption
-	log.Printf("KRS: Processing node_components content (%d bytes base64)", len(data))
+	log.Printf("KRS: Processing node_operations content (update_components) (%d bytes base64)", len(data))
 	if conf.Node.LongTermPrivKey == "" {
 		return fmt.Errorf("node long-term private key not configured")
 	}
@@ -751,5 +722,152 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributio
 // This is a wrapper around dzm.LoadPrivateKey for backward compatibility
 func loadPrivateKey(keyPath string) ([]byte, error) {
 	return dzm.LoadPrivateKey(keyPath)
+}
+
+// handlePingOperation processes a ping operation
+func handlePingOperation(entry dzm.DistributionEntry, index int) error {
+	log.Printf("KRS: Processing ping operation (entry %d)", index+1)
+
+	// Extract nonce from metadata
+	if entry.Metadata == nil {
+		return fmt.Errorf("ping operation missing metadata")
+	}
+
+	nonce, ok := entry.Metadata["nonce"].(string)
+	if !ok || nonce == "" {
+		return fmt.Errorf("ping operation missing nonce in metadata")
+	}
+
+	timestamp, ok := entry.Metadata["timestamp"].(string)
+	if !ok || timestamp == "" {
+		log.Printf("KRS: Warning: Ping operation missing timestamp in metadata")
+	}
+
+	log.Printf("KRS: Ping operation successful - nonce: %s, timestamp: %s", nonce, timestamp)
+	return nil
+}
+
+// handleRollKeyOperation processes a roll_key operation
+func handleRollKeyOperation(krsDB *KrsDB, entry dzm.DistributionEntry, distID, retireTime string, index int) error {
+	log.Printf("KRS: Processing roll_key operation (entry %d): zone=%s, key_id=%s", index+1, entry.ZoneName, entry.KeyID)
+
+	// Parse key_id as uint16
+	var keyID uint16
+	if _, err := fmt.Sscanf(entry.KeyID, "%d", &keyID); err != nil {
+		if _, err2 := fmt.Sscanf(entry.KeyID, "%x", &keyID); err2 != nil {
+			return fmt.Errorf("could not parse key_id '%s' as number", entry.KeyID)
+		}
+	}
+
+	// Decode private key from base64 string
+	privateKeyBytes, err := base64.StdEncoding.DecodeString(entry.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to decode private_key: %v", err)
+	}
+
+	// Determine state based on key type
+	// ZSKs go to "edgesigner" state, KSKs go to "active" state
+	keyState := "edgesigner"
+	isKSK := false
+	if entry.KeyType == "KSK" || entry.Flags == 257 {
+		keyState = "active"
+		isKSK = true
+		log.Printf("KRS: Detected KSK (KeyType: '%s', Flags: %d)", entry.KeyType, entry.Flags)
+	} else {
+		log.Printf("KRS: Detected ZSK (KeyType: '%s', Flags: %d)", entry.KeyType, entry.Flags)
+	}
+
+	receivedKey := &ReceivedKey{
+		ID:             fmt.Sprintf("%s-%s", entry.ZoneName, entry.KeyID),
+		ZoneName:       entry.ZoneName,
+		KeyID:          keyID,
+		KeyType:        entry.KeyType,
+		Algorithm:      entry.Algorithm,
+		Flags:          entry.Flags,
+		PublicKey:      entry.PublicKey,
+		PrivateKey:     privateKeyBytes,
+		State:          keyState,
+		ReceivedAt:     time.Now(),
+		DistributionID: distID,
+		RetireTime:     retireTime,
+		Comment:        fmt.Sprintf("Received via roll_key operation"),
+	}
+
+	// Store in database atomically
+	var storeErr error
+	if isKSK {
+		receivedKey.KeyType = "KSK"
+		storeErr = krsDB.AddActiveKeyWithRetirement(receivedKey)
+		if storeErr != nil {
+			return fmt.Errorf("failed to store KSK: %v", storeErr)
+		}
+		log.Printf("KRS: Successfully stored KSK (key_id %d) in 'active' state for zone %s", keyID, entry.ZoneName)
+	} else {
+		receivedKey.KeyType = "ZSK"
+		storeErr = krsDB.AddEdgesignerKeyWithRetirement(receivedKey)
+		if storeErr != nil {
+			return fmt.Errorf("failed to store ZSK: %v", storeErr)
+		}
+		log.Printf("KRS: Successfully stored ZSK (key_id %d) in 'edgesigner' state for zone %s", keyID, entry.ZoneName)
+	}
+
+	// Check if this is a key rollover (old_key_id specified)
+	if entry.Metadata != nil {
+		if oldKeyIDStr, ok := entry.Metadata["old_key_id"].(string); ok && oldKeyIDStr != "" {
+			// Retire the old key
+			log.Printf("KRS: Rolling key - retiring old key %s for zone %s", oldKeyIDStr, entry.ZoneName)
+
+			// Parse old key ID as uint16
+			var oldKeyIDUint uint16
+			if _, err := fmt.Sscanf(oldKeyIDStr, "%d", &oldKeyIDUint); err != nil {
+				log.Printf("KRS: Warning: Could not parse old_key_id '%s' as number: %v", oldKeyIDStr, err)
+			} else {
+				// Find and retire the old key
+				oldKey, err := krsDB.GetReceivedKeyByZoneAndKeyID(entry.ZoneName, oldKeyIDUint)
+				if err != nil {
+					log.Printf("KRS: Warning: Could not find old key %s to retire: %v", oldKeyIDStr, err)
+					// Not fatal - new key is already stored
+				} else {
+					now := time.Now()
+					if err := krsDB.UpdateReceivedKeyState(oldKey.ID, "retired", nil, &now); err != nil {
+						log.Printf("KRS: Warning: Failed to retire old key %s: %v", oldKeyIDStr, err)
+					} else {
+						log.Printf("KRS: Successfully retired old key %s", oldKeyIDStr)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// handleDeleteKeyOperation processes a delete_key operation
+// This operation is idempotent: it succeeds whether or not the key exists
+func handleDeleteKeyOperation(krsDB *KrsDB, entry dzm.DistributionEntry, index int) error {
+	log.Printf("KRS: Processing delete_key operation (entry %d): zone=%s, key_id=%s", index+1, entry.ZoneName, entry.KeyID)
+
+	// Log reason if provided (do this before deletion attempt)
+	if entry.Metadata != nil {
+		if reason, ok := entry.Metadata["reason"].(string); ok && reason != "" {
+			log.Printf("KRS: Deletion reason: %s", reason)
+		}
+	}
+
+	// Delete the key from local storage
+	err := krsDB.DeleteReceivedKeyByZoneAndKeyID(entry.ZoneName, entry.KeyID)
+	if err != nil {
+		// Check if it's a "not found" error - this is idempotent success
+		if strings.Contains(err.Error(), "not found") {
+			log.Printf("KRS: Key %s not found in zone %s (idempotent delete - key may have been deleted already)", entry.KeyID, entry.ZoneName)
+			return nil
+		}
+		// Actual error - return it
+		return fmt.Errorf("failed to delete key: %v", err)
+	}
+
+	log.Printf("KRS: Successfully deleted key %s for zone %s", entry.KeyID, entry.ZoneName)
+
+	return nil
 }
 

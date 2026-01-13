@@ -450,9 +450,35 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		}
 	}
 
-	// Check if this is a node_components distribution (zone_name and key_id are empty/NULL)
-	isNodeComponents := len(records) > 0 && records[0].ZoneName == "" && records[0].KeyID == ""
-	
+	// Determine content type based on operations in the distribution records
+	// This mirrors the logic from prepareChunksForNode()
+	hasNodeOps := false    // update_components operations
+	hasKeyOps := false     // roll_key, delete_key operations
+	hasMgmtOps := false    // ping operations
+
+	for _, record := range records {
+		switch record.Operation {
+		case "update_components":
+			hasNodeOps = true
+		case "roll_key", "delete_key":
+			hasKeyOps = true
+		case "ping":
+			hasMgmtOps = true
+		}
+	}
+
+	// Determine content type based on operation mix
+	var contentType string
+	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
+		contentType = "node_operations"
+	} else if hasKeyOps && !hasNodeOps && !hasMgmtOps {
+		contentType = "key_operations"
+	} else if hasMgmtOps && !hasNodeOps && !hasKeyOps {
+		contentType = "mgmt_operations"
+	} else {
+		contentType = "mixed_operations"
+	}
+
 	// Extract failed keys/components from CHUNK EDNS(0) option if present
 	failedKeys := make(map[string]bool) // Map of "zone:keyID" -> true
 	failedComponents := make(map[string]bool) // Map of componentID -> true
@@ -463,73 +489,80 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		chunkOpt, found := edns0.ExtractChunkOption(opt)
 		if found {
 			log.Printf("KDC: Found CHUNK EDNS option in confirmation NOTIFY")
-			
-			if isNodeComponents {
+
+			if contentType == "node_operations" {
 				// Parse component status report from CHUNK option
-				contentType, compReport, err := edns0.ParseComponentStatusReport(chunkOpt)
+				reportContentType, compReport, err := edns0.ParseComponentStatusReport(chunkOpt)
 				if err != nil {
 					log.Printf("KDC: Warning: Failed to parse component status report from CHUNK option: %v", err)
-				} else if contentType == edns0.CHUNKContentTypeComponentStatus && compReport != nil {
-					log.Printf("KDC: Parsed component status report: %d successful, %d failed components", 
+				} else if reportContentType == edns0.CHUNKContentTypeComponentStatus && compReport != nil {
+					log.Printf("KDC: Parsed component status report: %d successful, %d failed components",
 						len(compReport.SuccessfulComponents), len(compReport.FailedComponents))
-					
+
 					// Build failed components map
 					for _, failedComp := range compReport.FailedComponents {
 						failedComponents[failedComp.ComponentID] = true
 						log.Printf("KDC: Component %s failed to install: %s", failedComp.ComponentID, failedComp.Error)
 					}
-					
+
 					// Log successful components for debugging
 					for _, successComp := range compReport.SuccessfulComponents {
 						log.Printf("KDC: Component %s successfully installed", successComp.ComponentID)
 					}
 				} else {
-					log.Printf("KDC: CHUNK option has unsupported content type: %d (expected %d for components)", contentType, edns0.CHUNKContentTypeComponentStatus)
+					log.Printf("KDC: CHUNK option has unsupported content type: %d (expected %d for components)", reportContentType, edns0.CHUNKContentTypeComponentStatus)
 				}
-			} else {
+			} else if contentType == "key_operations" {
 				// Parse key status report from CHUNK option
-				contentType, report, err := edns0.ParseKeyStatusReport(chunkOpt)
+				reportContentType, report, err := edns0.ParseKeyStatusReport(chunkOpt)
 				if err != nil {
 					log.Printf("KDC: Warning: Failed to parse key status report from CHUNK option: %v", err)
-				} else if contentType == edns0.CHUNKContentTypeKeyStatus && report != nil {
-					log.Printf("KDC: Parsed key status report: %d successful, %d failed keys", 
+				} else if reportContentType == edns0.CHUNKContentTypeKeyStatus && report != nil {
+					log.Printf("KDC: Parsed key status report: %d successful, %d failed keys",
 						len(report.SuccessfulKeys), len(report.FailedKeys))
-					
+
 					// Build failed keys map
 					for _, failedKey := range report.FailedKeys {
 						keyKey := fmt.Sprintf("%s:%s", failedKey.ZoneName, failedKey.KeyID)
 						failedKeys[keyKey] = true
 						log.Printf("KDC: Key %s (zone %s) failed to install: %s", failedKey.KeyID, failedKey.ZoneName, failedKey.Error)
 					}
-					
+
 					// Log successful keys for debugging
 					for _, successKey := range report.SuccessfulKeys {
 						log.Printf("KDC: Key %s (zone %s) successfully installed", successKey.KeyID, successKey.ZoneName)
 					}
 				} else {
-					log.Printf("KDC: CHUNK option has unsupported content type: %d", contentType)
+					log.Printf("KDC: CHUNK option has unsupported content type: %d", reportContentType)
 				}
+			} else if contentType == "mgmt_operations" {
+				// For management operations (ping), no status report is expected
+				log.Printf("KDC: Received confirmation for mgmt_operations (ping) - no status report needed")
 			}
 		} else {
-			if isNodeComponents {
+			if contentType == "node_operations" {
 				log.Printf("KDC: No CHUNK EDNS option in confirmation NOTIFY (assuming all components succeeded)")
-			} else {
+			} else if contentType == "key_operations" {
 				log.Printf("KDC: No CHUNK EDNS option in confirmation NOTIFY (assuming all keys succeeded)")
+			} else if contentType == "mgmt_operations" {
+				log.Printf("KDC: No CHUNK EDNS option in confirmation NOTIFY for mgmt_operations (expected)")
 			}
 		}
 	} else {
-		if isNodeComponents {
+		if contentType == "node_operations" {
 			log.Printf("KDC: No EDNS(0) in confirmation NOTIFY (assuming all components succeeded)")
-		} else {
+		} else if contentType == "key_operations" {
 			log.Printf("KDC: No EDNS(0) in confirmation NOTIFY (assuming all keys succeeded)")
+		} else if contentType == "mgmt_operations" {
+			log.Printf("KDC: No EDNS(0) in confirmation NOTIFY for mgmt_operations (expected)")
 		}
 	}
 
-	if isNodeComponents {
-		// For node_components distributions, we need to:
+	if contentType == "node_operations" {
+		// For node_operations distributions, we need to:
 		// 1. Record the confirmation
 		// 2. Apply the component changes to the DB (sync DB with the intended component list from distribution)
-		log.Printf("KDC: Recording component confirmation for distribution %s, node %s", 
+		log.Printf("KDC: Recording node_operations confirmation for distribution %s, node %s",
 			distributionID, confirmedNodeID)
 
 		// Get the distribution record to extract the intended component list
@@ -597,9 +630,9 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 			}
 		}
 
-		log.Printf("KDC: Confirmed node_components distribution %s for node %s", distributionID, confirmedNodeID)
+		log.Printf("KDC: Confirmed node_operations distribution %s for node %s", distributionID, confirmedNodeID)
 
-		// Check if all nodes have confirmed (use empty string for node_components - zoneName is not used in the query)
+		// Check if all nodes have confirmed (use empty string for node_operations - zoneName is not used in the query)
 		allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, "")
 		if err != nil {
 			log.Printf("KDC: Error checking if all nodes confirmed: %v", err)
@@ -609,7 +642,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 			if err := kdcDB.MarkDistributionComplete(distributionID); err != nil {
 				log.Printf("KDC: Warning: Failed to mark distribution %s as complete: %v", distributionID, err)
 			} else {
-				log.Printf("KDC: Marked node_components distribution %s as complete", distributionID)
+				log.Printf("KDC: Marked node_operations distribution %s as complete", distributionID)
 			}
 		} else {
 			// Get list of confirmed nodes for logging
@@ -628,53 +661,99 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		return nil
 	}
 
-	// Confirm all keys in the distribution (except those in failedKeys)
+	// Confirm all operations in the distribution (except those in failedKeys)
 	confirmedCount := 0
 	for _, record := range records {
-		// Skip if this key is in the failed list
-		keyKey := fmt.Sprintf("%s:%s", record.ZoneName, record.KeyID)
-		if failedKeys[keyKey] {
-			log.Printf("KDC: Skipping confirmation for failed key: zone %s, key %s", record.ZoneName, record.KeyID)
-			continue
-		}
+		// Handle different operation types
+		switch record.Operation {
+		case "ping":
+			log.Printf("KDC: Recording confirmation for ping operation in distribution %s from node %s",
+				distributionID, confirmedNodeID)
+			// Record confirmation with empty zone/key for ping (similar to node_operations)
+			if err := kdcDB.AddDistributionConfirmation(distributionID, "", "", confirmedNodeID); err != nil {
+				log.Printf("KDC: Warning: Failed to record ping confirmation: %v", err)
+				continue
+			}
+			log.Printf("KDC: Ping operation confirmed successfully from node %s", confirmedNodeID)
+			confirmedCount++
 
-		log.Printf("KDC: Recording confirmation for distribution %s, zone %s, key %s, node %s", 
-			distributionID, record.ZoneName, record.KeyID, confirmedNodeID)
+		case "roll_key":
+			// Skip if this key is in the failed list
+			keyKey := fmt.Sprintf("%s:%s", record.ZoneName, record.KeyID)
+			if failedKeys[keyKey] {
+				log.Printf("KDC: Skipping confirmation for failed roll_key: zone %s, key %s", record.ZoneName, record.KeyID)
+				continue
+			}
 
-		// Record the confirmation for this specific key
-		if err := kdcDB.AddDistributionConfirmation(distributionID, record.ZoneName, record.KeyID, confirmedNodeID); err != nil {
-			log.Printf("KDC: Warning: Failed to record confirmation for zone %s, key %s: %v", record.ZoneName, record.KeyID, err)
-			continue
+			log.Printf("KDC: Recording confirmation for roll_key operation in distribution %s, zone %s, key %s, node %s",
+				distributionID, record.ZoneName, record.KeyID, confirmedNodeID)
+
+			// Record the confirmation for this specific key
+			if err := kdcDB.AddDistributionConfirmation(distributionID, record.ZoneName, record.KeyID, confirmedNodeID); err != nil {
+				log.Printf("KDC: Warning: Failed to record confirmation for zone %s, key %s: %v", record.ZoneName, record.KeyID, err)
+				continue
+			}
+			confirmedCount++
+
+		case "delete_key":
+			// Skip if this key is in the failed list
+			keyKey := fmt.Sprintf("%s:%s", record.ZoneName, record.KeyID)
+			if failedKeys[keyKey] {
+				log.Printf("KDC: Skipping confirmation for failed delete_key: zone %s, key %s", record.ZoneName, record.KeyID)
+				continue
+			}
+
+			log.Printf("KDC: Recording confirmation for delete_key operation in distribution %s, zone %s, key %s, node %s",
+				distributionID, record.ZoneName, record.KeyID, confirmedNodeID)
+
+			// Record the confirmation for this specific key deletion
+			if err := kdcDB.AddDistributionConfirmation(distributionID, record.ZoneName, record.KeyID, confirmedNodeID); err != nil {
+				log.Printf("KDC: Warning: Failed to record confirmation for zone %s, key %s: %v", record.ZoneName, record.KeyID, err)
+				continue
+			}
+			log.Printf("KDC: Delete key operation confirmed - key %s deleted from node %s", record.KeyID, confirmedNodeID)
+			confirmedCount++
+
+		default:
+			log.Printf("KDC: Warning: Unknown operation type '%s' in distribution %s", record.Operation, distributionID)
 		}
-		confirmedCount++
 	}
 
-	log.Printf("KDC: Confirmed %d/%d keys in distribution %s for node %s", confirmedCount, len(records), distributionID, confirmedNodeID)
+	log.Printf("KDC: Confirmed %d/%d operations in distribution %s for node %s", confirmedCount, len(records), distributionID, confirmedNodeID)
 
 	// Check if all nodes have confirmed (use first record's zone for compatibility, but function doesn't actually need it)
-	allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, records[0].ZoneName)
+	var zoneForCheck string
+	if len(records) > 0 && records[0].ZoneName != "" {
+		zoneForCheck = records[0].ZoneName
+	}
+	allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, zoneForCheck)
 	if err != nil {
 		log.Printf("KDC: Error checking if all nodes confirmed: %v", err)
 		// Don't fail - we've recorded the confirmation
 	} else if allConfirmed {
-		// All nodes have confirmed - update state for each key in the distribution
+		// All nodes have confirmed - update state for roll_key operations only
 		// Collect unique zone/key pairs to avoid duplicate updates
 		processedKeys := make(map[string]bool) // Map of "zone:keyID" -> true
-		
+
 		for _, record := range records {
+			// Only process roll_key operations for state transitions
+			if record.Operation != "roll_key" {
+				continue
+			}
+
 			keyKey := fmt.Sprintf("%s:%s", record.ZoneName, record.KeyID)
 			if processedKeys[keyKey] {
 				continue // Already processed this key
 			}
 			processedKeys[keyKey] = true
-			
+
 			// Get the key to check its type
 			key, err := kdcDB.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
 			if err != nil {
 				log.Printf("KDC: Error getting key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
 				continue
 			}
-			
+
 			var newState KeyState
 			if key.KeyType == KeyTypeKSK {
 				// KSK transitions from active_dist to active_ce (all confirmations received)
@@ -683,25 +762,25 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 					log.Printf("KDC: Warning: KSK %s is in state '%s', expected 'active_dist' for confirmation", record.KeyID, key.State)
 				}
 				newState = KeyStateActiveCE
-				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning KSK %s (zone %s) state from 'active_dist' to 'active_ce'", 
+				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning KSK %s (zone %s) state from 'active_dist' to 'active_ce'",
 					distributionID, record.KeyID, record.ZoneName)
 			} else {
 				// ZSK transitions from distributed to edgesigner
 				// State flow: standby -> distributed -> edgesigner
 				newState = KeyStateEdgeSigner
-				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning ZSK %s (zone %s) state from 'distributed' to 'edgesigner'", 
+				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning ZSK %s (zone %s) state from 'distributed' to 'edgesigner'",
 					distributionID, record.KeyID, record.ZoneName)
 			}
-			
+
 			// Transition key state
 			if err := kdcDB.UpdateKeyState(record.ZoneName, record.KeyID, newState); err != nil {
 				log.Printf("KDC: Error transitioning key %s (zone %s) state: %v", record.KeyID, record.ZoneName, err)
 				// Don't fail - continue with other keys
 				continue
 			}
-			
+
 			log.Printf("KDC: Successfully transitioned key %s (zone %s) to '%s' state", record.KeyID, record.ZoneName, newState)
-			
+
 			// Retire old keys in the same state for the same zone and key type
 			// This ensures only one key per zone/key-type is in edgesigner/active_ce state
 			if err := kdcDB.RetireOldKeysForZone(record.ZoneName, key.KeyType, record.KeyID, newState); err != nil {

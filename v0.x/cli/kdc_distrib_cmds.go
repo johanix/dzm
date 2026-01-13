@@ -239,29 +239,32 @@ var kdcDistribListCmd = &cobra.Command{
 						
 						zoneStr := ""
 						zoneCount := 0
-						isNodeComponents := false
+						contentType := ""
+						if ct, ok := s["content_type"].(string); ok {
+							contentType = ct
+						}
+
 						if zones, ok := s["zones"].([]interface{}); ok {
 							zoneList := make([]string, len(zones))
 							for i, z := range zones {
 								zoneList[i] = fmt.Sprintf("%v", z)
-								// Check if this is a node_components distribution
-								if zoneList[i] == "_node_components" {
-									isNodeComponents = true
-								}
 							}
 							zoneCount = len(zoneList)
-							if zoneCount > 0 && !isNodeComponents {
+							if zoneCount > 0 {
 								zoneStr = strings.Join(zoneList, ", ")
 								if zoneCount > 3 {
 									zoneStr = strings.Join(zoneList[:3], ", ") + fmt.Sprintf(" (+%d more)", zoneCount-3)
 								}
 							}
 						}
-						
+
 						contents := ""
-						if isNodeComponents {
-							// For node_components distributions, show components for the node
+						if contentType == "node_operations" {
+							// For node_operations distributions, show components for the node
 							contents = "updated list of node components"
+						} else if contentType == "mgmt_operations" {
+							// For management operations
+							contents = "management operations"
 						} else if zoneCount > 0 {
 							contents = fmt.Sprintf("%s keys for %d zone(s), including %s", keyTypeStr, zoneCount, zoneStr)
 						} else {
