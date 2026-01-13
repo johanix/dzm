@@ -310,7 +310,12 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 	if err := kdc.migrateAddSig0PubkeyToNodes(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
 	}
-	
+
+	// Migrate: Add operation and payload columns to distribution_records
+	if err := kdc.migrateAddOperationAndPayload(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate operation and payload columns: %v", err)
+	}
+
 	// Migrate: Create bootstrap_tokens table
 	// This is critical - if it fails, log as error and return error (don't just warn)
 	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
@@ -582,7 +587,12 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 	if err := kdc.migrateAddSig0PubkeyToNodes(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
 	}
-	
+
+	// Migrate: Add operation and payload columns to distribution_records
+	if err := kdc.migrateAddOperationAndPayload(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate operation and payload columns: %v", err)
+	}
+
 	// Migrate: Create bootstrap_tokens table
 	// This is critical - if it fails, log as error (don't just warn)
 	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
@@ -1324,6 +1334,15 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 		if notifyAddr.Valid {
 			n.NotifyAddress = notifyAddr.String
 		}
+
+		// Get latest confirmation timestamp for this node
+		lastConfirmStr, _ := kdc.GetLatestConfirmationForNode(n.ID)
+		if lastConfirmStr != "" {
+			if t, err := time.Parse(time.RFC3339, lastConfirmStr); err == nil {
+				n.LastContact = &t
+			}
+		}
+
 		nodes = append(nodes, &n)
 	}
 	return nodes, rows.Err()
@@ -1656,13 +1675,32 @@ func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 	} else {
 		keyID = record.KeyID
 	}
-	
+
+	// Serialize payload to JSON if present
+	var payloadJSON interface{}
+	if record.Payload != nil && len(record.Payload) > 0 {
+		payloadBytes, err := json.Marshal(record.Payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %v", err)
+		}
+		payloadJSON = string(payloadBytes)
+	} else {
+		payloadJSON = nil
+	}
+
+	// Set operation to default if empty
+	operation := record.Operation
+	if operation == "" {
+		operation = string(OperationPing)
+	}
+
 	_, err := kdc.DB.Exec(
-		`INSERT INTO distribution_records 
-			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO distribution_records
+			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id, operation, payload)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
 		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
+		operation, payloadJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to add distribution record: %v", err)
@@ -1684,13 +1722,32 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 	} else {
 		keyID = record.KeyID
 	}
-	
+
+	// Serialize payload to JSON if present
+	var payloadJSON interface{}
+	if record.Payload != nil && len(record.Payload) > 0 {
+		payloadBytes, err := json.Marshal(record.Payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %v", err)
+		}
+		payloadJSON = string(payloadBytes)
+	} else {
+		payloadJSON = nil
+	}
+
+	// Set operation to default if empty
+	operation := record.Operation
+	if operation == "" {
+		operation = string(OperationPing)
+	}
+
 	_, err := tx.Exec(
-		`INSERT INTO distribution_records 
-			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO distribution_records
+			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id, operation, payload)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
 		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
+		operation, payloadJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to add distribution record: %v", err)
@@ -1849,8 +1906,8 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	// - All non-completed distributions (regardless of age - they're still pending)
 	// - Completed distributions less than 5 minutes old (before GC)
 	rows, err := kdc.DB.Query(
-		`SELECT distribution_id, zone_name, key_id, node_id, created_at, completed_at, status
-		 FROM distribution_records 
+		`SELECT distribution_id, zone_name, key_id, node_id, created_at, completed_at, status, operation
+		 FROM distribution_records
 		 WHERE status != 'completed' OR (status = 'completed' AND completed_at > datetime('now', '-5 minutes'))
 		 ORDER BY distribution_id, zone_name, key_id`,
 	)
@@ -1862,6 +1919,7 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	// Group by distribution_id
 	distMap := make(map[string]*DistributionSummaryInfo)
 	zoneKeyMap := make(map[string]map[string]bool) // distID -> zone:key -> bool
+	operationMap := make(map[string]map[string]bool) // distID -> operation -> bool
 
 	for rows.Next() {
 		var distID string
@@ -1871,8 +1929,9 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 		var createdAt time.Time
 		var completedAt sql.NullTime
 		var status string
+		var operation sql.NullString
 
-		if err := rows.Scan(&distID, &zoneName, &keyID, &nodeID, &createdAt, &completedAt, &status); err != nil {
+		if err := rows.Scan(&distID, &zoneName, &keyID, &nodeID, &createdAt, &completedAt, &status, &operation); err != nil {
 			return nil, fmt.Errorf("failed to scan distribution record: %v", err)
 		}
 
@@ -1885,12 +1944,19 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 				Keys:           make(map[string]string),
 				CreatedAt:      createdAt.Format(time.RFC3339),
 				AllConfirmed:   status == "completed",
+				ContentType:    "key_operations", // default
 			}
 			if completedAt.Valid {
 				completedAtStr := completedAt.Time.Format(time.RFC3339)
 				distMap[distID].CompletedAt = &completedAtStr
 			}
 			zoneKeyMap[distID] = make(map[string]bool)
+			operationMap[distID] = make(map[string]bool)
+		}
+
+		// Track operations for content type determination
+		if operation.Valid && operation.String != "" {
+			operationMap[distID][operation.String] = true
 		}
 
 		// Add node if not already present
@@ -1907,35 +1973,27 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 			}
 		}
 
-		// Handle node_components distributions (zone_name and key_id are NULL)
-		var zoneNameStr, keyIDStr string
-		if !zoneName.Valid && !keyID.Valid {
-			// This is a node_components distribution
-			zoneNameStr = "_node_components"
-			keyIDStr = ""
-		} else {
-			zoneNameStr = zoneName.String
-			keyIDStr = keyID.String
-		}
+		// Only include zones for key operations (not for node_operations or mgmt_operations)
+		zoneNameStr := zoneName.String
+		keyIDStr := keyID.String
 
-		// Track zone-key pairs
-		zoneKey := zoneNameStr + ":" + keyIDStr
-		if !zoneKeyMap[distID][zoneKey] {
-			zoneKeyMap[distID][zoneKey] = true
-			// Add zone if not already present
-			found := false
-			for _, z := range distMap[distID].Zones {
-				if z == zoneNameStr {
-					found = true
-					break
+		if zoneNameStr != "" {
+			// Track zone-key pairs (only for non-empty zones)
+			zoneKey := zoneNameStr + ":" + keyIDStr
+			if !zoneKeyMap[distID][zoneKey] {
+				zoneKeyMap[distID][zoneKey] = true
+				// Add zone if not already present
+				found := false
+				for _, z := range distMap[distID].Zones {
+					if z == zoneNameStr {
+						found = true
+						break
+					}
 				}
-			}
-			if !found {
-				distMap[distID].Zones = append(distMap[distID].Zones, zoneNameStr)
-			}
-			// Store key for zone (for verbose mode - show first key, or comma-separated if multiple)
-			// For node_components, don't store a key
-			if zoneNameStr != "_node_components" {
+				if !found {
+					distMap[distID].Zones = append(distMap[distID].Zones, zoneNameStr)
+				}
+				// Store key for zone (for verbose mode)
 				if distMap[distID].Keys[zoneNameStr] == "" {
 					distMap[distID].Keys[zoneNameStr] = keyIDStr
 				} else {
@@ -1950,18 +2008,37 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 		return nil, err
 	}
 
+	// Determine content type for each distribution based on operations
+	for distID, summary := range distMap {
+		ops := operationMap[distID]
+
+		// Categorize operations
+		hasNodeOps := ops["update_components"]
+		hasKeyOps := ops["roll_key"] || ops["delete_key"]
+		hasMgmtOps := ops["ping"]
+
+		// Set content type based on operation mix
+		if hasNodeOps && !hasKeyOps && !hasMgmtOps {
+			summary.ContentType = "node_operations"
+		} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
+			summary.ContentType = "key_operations"
+		} else if !hasNodeOps && !hasKeyOps && hasMgmtOps {
+			summary.ContentType = "mgmt_operations"
+		} else if (hasNodeOps || hasKeyOps || hasMgmtOps) {
+			summary.ContentType = "mixed_operations"
+		}
+		// If no operations were found, keep default (key_operations)
+		log.Printf("KDC: Distribution %s: operations found: %v -> ContentType=%s", distID, ops, summary.ContentType)
+		distMap[distID] = summary
+	}
+
 	// Get key types to count ZSK/KSK - count all unique zone:key pairs from zoneKeyMap
-	// Skip node_components distributions (they don't have keys)
 	for distID, zoneKeys := range zoneKeyMap {
 		for zoneKey := range zoneKeys {
 			parts := strings.Split(zoneKey, ":")
 			if len(parts) == 2 {
 				zoneName := parts[0]
 				keyID := parts[1]
-				// Skip node_components distributions
-				if zoneName == "_node_components" {
-					continue
-				}
 				key, err := kdc.GetDNSSECKeyByID(zoneName, keyID)
 				if err == nil {
 					if key.KeyType == KeyTypeZSK {
@@ -1976,62 +2053,28 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 
 	// For each distribution, get confirmed and pending nodes
 	for distID, summary := range distMap {
-		if len(summary.Zones) > 0 {
-			zoneName := summary.Zones[0]
-			
-			// Handle node_components distributions differently
-			if zoneName == "_node_components" {
-				// For node_components, target nodes come from the distribution records themselves
-				// Get the node_id from the distribution records
-				nodeRows, err := kdc.DB.Query(
-					`SELECT DISTINCT node_id FROM distribution_records 
-					 WHERE distribution_id = ? AND node_id IS NOT NULL`,
-					distID,
-				)
-				if err == nil {
-					defer nodeRows.Close()
-					var targetNodes []string
-					for nodeRows.Next() {
-						var nodeID string
-						if err := nodeRows.Scan(&nodeID); err == nil && nodeID != "" {
-							targetNodes = append(targetNodes, nodeID)
-						}
-					}
-					
-					// Get confirmed nodes
-					confirmedNodes, _ := kdc.GetDistributionConfirmations(distID)
-					summary.ConfirmedNodes = confirmedNodes
-					
-					// Calculate pending nodes
-					confirmedMap := make(map[string]bool)
-					for _, nodeID := range confirmedNodes {
-						confirmedMap[nodeID] = true
-					}
-					var pendingNodes []string
-					for _, nodeID := range targetNodes {
-						if !confirmedMap[nodeID] {
-							pendingNodes = append(pendingNodes, nodeID)
-						}
-					}
-					summary.PendingNodes = pendingNodes
-					
-					// Update AllConfirmed based on actual confirmations
-					summary.AllConfirmed = len(pendingNodes) == 0 && len(targetNodes) > 0
-				}
-			} else {
-				// Use first zone to get target nodes (all zones in same distribution should have same target nodes)
-				zoneNodes, _ := kdc.GetActiveNodesForZone(zoneName)
+		// Handle node_operations distributions differently
+		if summary.ContentType == "node_operations" {
+			// For node_operations, target nodes come from the distribution records themselves
+			nodeRows, err := kdc.DB.Query(
+				`SELECT DISTINCT node_id FROM distribution_records
+				 WHERE distribution_id = ? AND node_id IS NOT NULL`,
+				distID,
+			)
+			if err == nil {
+				defer nodeRows.Close()
 				var targetNodes []string
-				for _, node := range zoneNodes {
-					if node.NotifyAddress != "" {
-						targetNodes = append(targetNodes, node.ID)
+				for nodeRows.Next() {
+					var nodeID string
+					if err := nodeRows.Scan(&nodeID); err == nil && nodeID != "" {
+						targetNodes = append(targetNodes, nodeID)
 					}
 				}
-				
+
 				// Get confirmed nodes
 				confirmedNodes, _ := kdc.GetDistributionConfirmations(distID)
 				summary.ConfirmedNodes = confirmedNodes
-				
+
 				// Calculate pending nodes
 				confirmedMap := make(map[string]bool)
 				for _, nodeID := range confirmedNodes {
@@ -2044,7 +2087,39 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 					}
 				}
 				summary.PendingNodes = pendingNodes
-				
+
+				// Update AllConfirmed based on actual confirmations
+				summary.AllConfirmed = len(pendingNodes) == 0 && len(targetNodes) > 0
+			}
+		} else {
+			// For key_operations, mgmt_operations, and mixed_operations: use first zone to get target nodes
+			if len(summary.Zones) > 0 {
+				zoneName := summary.Zones[0]
+				zoneNodes, _ := kdc.GetActiveNodesForZone(zoneName)
+				var targetNodes []string
+				for _, node := range zoneNodes {
+					if node.NotifyAddress != "" {
+						targetNodes = append(targetNodes, node.ID)
+					}
+				}
+
+				// Get confirmed nodes
+				confirmedNodes, _ := kdc.GetDistributionConfirmations(distID)
+				summary.ConfirmedNodes = confirmedNodes
+
+				// Calculate pending nodes
+				confirmedMap := make(map[string]bool)
+				for _, nodeID := range confirmedNodes {
+					confirmedMap[nodeID] = true
+				}
+				var pendingNodes []string
+				for _, nodeID := range targetNodes {
+					if !confirmedMap[nodeID] {
+						pendingNodes = append(pendingNodes, nodeID)
+					}
+				}
+				summary.PendingNodes = pendingNodes
+
 				// Update AllConfirmed based on actual confirmations
 				summary.AllConfirmed = len(pendingNodes) == 0 && len(targetNodes) > 0
 			}
@@ -2081,10 +2156,10 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 // Returns the most recent active/pending distribution record, or nil if none exists
 func (kdc *KdcDB) GetDistributionRecordsForZoneKey(zoneName, keyID string) ([]*DistributionRecord, error) {
 	rows, err := kdc.DB.Query(
-		`SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, 
-			created_at, expires_at, status, distribution_id
-			FROM distribution_records 
-			WHERE zone_name = ? AND key_id = ? 
+		`SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key,
+			created_at, expires_at, status, distribution_id, completed_at, operation, payload
+			FROM distribution_records
+			WHERE zone_name = ? AND key_id = ?
 			ORDER BY created_at DESC`,
 		zoneName, keyID,
 	)
@@ -2098,11 +2173,15 @@ func (kdc *KdcDB) GetDistributionRecordsForZoneKey(zoneName, keyID string) ([]*D
 		record := &DistributionRecord{}
 		var nodeID sql.NullString
 		var expiresAt sql.NullTime
+		var completedAt sql.NullTime
 		var statusStr string
+		var operationStr sql.NullString
+		var payloadJSON sql.NullString
 		if err := rows.Scan(
 			&record.ID, &record.ZoneName, &record.KeyID, &nodeID,
 			&record.EncryptedKey, &record.EphemeralPubKey, &record.CreatedAt,
-			&expiresAt, &statusStr, &record.DistributionID,
+			&expiresAt, &statusStr, &record.DistributionID, &completedAt,
+			&operationStr, &payloadJSON,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan distribution record: %v", err)
 		}
@@ -2111,6 +2190,20 @@ func (kdc *KdcDB) GetDistributionRecordsForZoneKey(zoneName, keyID string) ([]*D
 		}
 		if expiresAt.Valid {
 			record.ExpiresAt = &expiresAt.Time
+		}
+		if completedAt.Valid {
+			record.CompletedAt = &completedAt.Time
+		}
+		if operationStr.Valid {
+			record.Operation = operationStr.String
+		}
+		if payloadJSON.Valid && payloadJSON.String != "" {
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(payloadJSON.String), &payload); err != nil {
+				log.Printf("KDC: Warning: Failed to unmarshal payload for record %s: %v", record.ID, err)
+			} else {
+				record.Payload = payload
+			}
 		}
 		record.Status = hpke.DistributionStatus(statusStr)
 		records = append(records, record)
@@ -2201,6 +2294,256 @@ func (kdc *KdcDB) CreateDistributionIDForKeys(zoneName string, keyIDs []string) 
 	return kdc.GetNextDistributionID()
 }
 
+// CreatePingOperation creates a ping operation for a specific node
+// Returns the distribution ID
+// The ping operation is not encrypted - it includes a nonce in the payload metadata
+func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *KdcConf) (string, error) {
+	if nodeID == "" {
+		return "", fmt.Errorf("nodeID is required")
+	}
+
+	// Generate distribution ID
+	distributionID, err := kdc.GetNextDistributionID()
+	if err != nil {
+		return "", fmt.Errorf("failed to get distribution ID: %v", err)
+	}
+
+	// Get the node to access its long-term public key for HPKE encryption
+	node, err := kdc.GetNode(nodeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
+	}
+	if len(node.LongTermPubKey) != 32 {
+		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	}
+
+	// Generate random 32-byte nonce
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("failed to generate nonce: %v", err)
+	}
+
+	// Encrypt the nonce using HPKE with the node's public key
+	// This tests the full crypto pipeline
+	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, nonce)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt nonce: %v", err)
+	}
+
+	// Create payload with nonce (for validation on confirmation) and timestamp
+	payload := map[string]interface{}{
+		"nonce":     hex.EncodeToString(nonce),
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	// Calculate expires_at based on DistributionTTL if config is provided
+	var expiresAt *time.Time
+	if kdcConf != nil {
+		ttl := kdcConf.GetDistributionTTL()
+		if ttl > 0 {
+			expires := time.Now().Add(ttl)
+			expiresAt = &expires
+		}
+	}
+
+	// Generate a unique ID for this distribution record
+	distRecordID := make([]byte, 16)
+	if _, err := rand.Read(distRecordID); err != nil {
+		return "", fmt.Errorf("failed to generate distribution record ID: %v", err)
+	}
+	distRecordIDHex := hex.EncodeToString(distRecordID)
+
+	// Create distribution record with encrypted nonce
+	distRecord := &DistributionRecord{
+		ID:             distRecordIDHex,
+		ZoneName:       "", // NULL for ping operation
+		KeyID:          "", // NULL for ping operation
+		NodeID:         nodeID,
+		EncryptedKey:   ciphertext, // Encrypted nonce
+		EphemeralPubKey: ephemeralPub, // Ephemeral key for HPKE
+		CreatedAt:      time.Now(),
+		ExpiresAt:      expiresAt,
+		Status:         hpke.DistributionStatusPending,
+		DistributionID: distributionID,
+		Operation:      string(OperationPing),
+		Payload:        payload,
+	}
+
+	if err := kdc.AddDistributionRecord(distRecord); err != nil {
+		return "", fmt.Errorf("failed to add distribution record: %v", err)
+	}
+
+	log.Printf("KDC: Created ping operation for node %s (distribution ID: %s)", nodeID, distributionID)
+	return distributionID, nil
+}
+
+// CreateDeleteKeyOperation creates a delete_key operation for a specific node
+// Returns the distribution ID
+func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason string) (string, error) {
+	if zoneName == "" {
+		return "", fmt.Errorf("zoneName is required")
+	}
+	if keyID == "" {
+		return "", fmt.Errorf("keyID is required")
+	}
+	if nodeID == "" {
+		return "", fmt.Errorf("nodeID is required")
+	}
+
+	// Generate distribution ID
+	distributionID, err := kdc.GetNextDistributionID()
+	if err != nil {
+		return "", fmt.Errorf("failed to get distribution ID: %v", err)
+	}
+
+	// Create payload with reason and confirmation flag
+	payload := map[string]interface{}{
+		"reason":               reason,
+		"pending_confirmation": true,
+	}
+
+	// Generate a unique ID for this distribution record
+	distRecordID := make([]byte, 16)
+	if _, err := rand.Read(distRecordID); err != nil {
+		return "", fmt.Errorf("failed to generate distribution record ID: %v", err)
+	}
+	distRecordIDHex := hex.EncodeToString(distRecordID)
+
+	// Get node to retrieve its public key for encryption
+	node, err := kdc.GetNode(nodeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get node: %v", err)
+	}
+
+	// Encrypt the key ID using HPKE (so the node can verify it's deleting the right key)
+	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, []byte(keyID))
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt key ID: %v", err)
+	}
+
+	// Check if key exists at KDC
+	// If it doesn't exist, we'll use NULL for the key_id field in the distribution record
+	// to avoid FK constraint violations. The actual key ID is still encrypted in the payload.
+	recordKeyID := keyID
+	_, err = kdc.GetDNSSECKeyByID(zoneName, keyID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			// Key doesn't exist - use empty string which will be stored as NULL
+			recordKeyID = ""
+			log.Printf("KDC: Creating delete_key operation for non-existent key %s in zone %s (FK constraint will use NULL)", keyID, zoneName)
+		} else {
+			// Actual error
+			return "", fmt.Errorf("failed to check if key exists: %v", err)
+		}
+	}
+
+	// Create distribution record
+	distRecord := &DistributionRecord{
+		ID:              distRecordIDHex,
+		ZoneName:        zoneName,
+		KeyID:           recordKeyID,         // May be empty/NULL if key doesn't exist at KDC
+		NodeID:          nodeID,
+		EncryptedKey:    ciphertext,           // Encrypted key ID (always present)
+		EphemeralPubKey: ephemeralPub,         // Ephemeral public key for decryption
+		CreatedAt:       time.Now(),
+		ExpiresAt:       nil,
+		Status:          hpke.DistributionStatusPending,
+		DistributionID:  distributionID,
+		Operation:       string(OperationDeleteKey),
+		Payload:         payload,
+	}
+
+	if err := kdc.AddDistributionRecord(distRecord); err != nil {
+		return "", fmt.Errorf("failed to add distribution record: %v", err)
+	}
+
+	log.Printf("KDC: Created delete_key operation for zone %s, key %s, node %s (distribution ID: %s)",
+		zoneName, keyID, nodeID, distributionID)
+	return distributionID, nil
+}
+
+// CreateRollKeyOperation creates a roll_key operation for a specific node
+// If oldKeyID is empty, this is an initial key distribution
+// If oldKeyID is specified, this is a key rollover and the old key will be retired
+// Returns the distribution ID
+func (kdc *KdcDB) CreateRollKeyOperation(newKey *DNSSECKey, oldKeyID string, node *Node, kdcConf *KdcConf) (string, error) {
+	if newKey == nil {
+		return "", fmt.Errorf("newKey is required")
+	}
+	if node == nil {
+		return "", fmt.Errorf("node is required")
+	}
+
+	// Generate distribution ID
+	distributionID, err := kdc.GetNextDistributionID()
+	if err != nil {
+		return "", fmt.Errorf("failed to get distribution ID: %v", err)
+	}
+
+	// Encrypt the new key using HPKE
+	encryptedKey, ephemeralPubKey, _, err := kdc.EncryptKeyForNode(newKey, node, kdcConf, distributionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt key: %v", err)
+	}
+
+	// Create payload with old_key_id if this is a rollover
+	payload := map[string]interface{}{}
+	if oldKeyID != "" {
+		payload["old_key_id"] = oldKeyID
+		payload["retire_old_key"] = true
+	} else {
+		payload["old_key_id"] = nil
+		payload["retire_old_key"] = false
+	}
+
+	// Calculate expires_at based on DistributionTTL if config is provided
+	var expiresAt *time.Time
+	if kdcConf != nil {
+		ttl := kdcConf.GetDistributionTTL()
+		if ttl > 0 {
+			expires := time.Now().Add(ttl)
+			expiresAt = &expires
+		}
+	}
+
+	// Generate a unique ID for this distribution record
+	distRecordID := make([]byte, 16)
+	if _, err := rand.Read(distRecordID); err != nil {
+		return "", fmt.Errorf("failed to generate distribution record ID: %v", err)
+	}
+	distRecordIDHex := hex.EncodeToString(distRecordID)
+
+	// Create distribution record
+	distRecord := &DistributionRecord{
+		ID:             distRecordIDHex,
+		ZoneName:       newKey.ZoneName,
+		KeyID:          newKey.ID,
+		NodeID:         node.ID,
+		EncryptedKey:   encryptedKey,
+		EphemeralPubKey: ephemeralPubKey,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      expiresAt,
+		Status:         hpke.DistributionStatusPending,
+		DistributionID: distributionID,
+		Operation:      string(OperationRollKey),
+		Payload:        payload,
+	}
+
+	if err := kdc.AddDistributionRecord(distRecord); err != nil {
+		return "", fmt.Errorf("failed to add distribution record: %v", err)
+	}
+
+	if oldKeyID != "" {
+		log.Printf("KDC: Created roll_key operation for zone %s, new key %s (will retire old key %s), node %s (distribution ID: %s)",
+			newKey.ZoneName, newKey.ID, oldKeyID, node.ID, distributionID)
+	} else {
+		log.Printf("KDC: Created roll_key operation for zone %s, new key %s (initial distribution), node %s (distribution ID: %s)",
+			newKey.ZoneName, newKey.ID, node.ID, distributionID)
+	}
+
+	return distributionID, nil
+}
+
 // AddDistributionConfirmation records that a node has confirmed receipt of a distributed key
 // For node_components distributions, zoneName and keyID should be empty strings (will be stored as NULL)
 func (kdc *KdcDB) AddDistributionConfirmation(distributionID, zoneName, keyID, nodeID string) error {
@@ -2265,6 +2608,34 @@ func (kdc *KdcDB) GetDistributionConfirmations(distributionID string) ([]string,
 		nodeIDs = append(nodeIDs, nodeID)
 	}
 	return nodeIDs, rows.Err()
+}
+
+// GetLatestConfirmationForNode returns the timestamp of the most recent confirmation from a node
+// Returns the timestamp string (RFC3339 format) or empty string if no confirmations found
+func (kdc *KdcDB) GetLatestConfirmationForNode(nodeID string) (string, error) {
+	var confirmedAtStr sql.NullString
+	err := kdc.DB.QueryRow(
+		`SELECT MAX(confirmed_at) FROM distribution_confirmations WHERE node_id = ?`,
+		nodeID,
+	).Scan(&confirmedAtStr)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to query latest confirmation: %v", err)
+	}
+
+	if confirmedAtStr.Valid && confirmedAtStr.String != "" {
+		// SQLite returns datetime as "YYYY-MM-DD HH:MM:SS", parse and convert to RFC3339
+		t, err := time.Parse("2006-01-02 15:04:05", confirmedAtStr.String)
+		if err != nil {
+			// Try parsing as RFC3339 in case it was stored differently
+			t, err = time.Parse(time.RFC3339, confirmedAtStr.String)
+			if err != nil {
+				return "", fmt.Errorf("failed to parse confirmation timestamp %s: %v", confirmedAtStr.String, err)
+			}
+		}
+		return t.Format(time.RFC3339), nil
+	}
+	return "", nil // No confirmations found
 }
 
 // CheckAllNodesConfirmed checks if all nodes that are part of this distribution have confirmed receipt
@@ -3102,6 +3473,8 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 		ExpiresAt:      expiresAt,
 		Status:         hpke.DistributionStatusPending,
 		DistributionID: distributionID,
+		Operation:      "update_components",
+		Payload:        make(map[string]interface{}),
 	}
 	
 	// Insert the new distribution record

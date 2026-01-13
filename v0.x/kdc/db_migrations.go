@@ -1024,6 +1024,146 @@ func (kdc *KdcDB) migrateMakeDistributionConfirmationsZoneKeyNullable() error {
 			log.Printf("KDC: Made key_id nullable in distribution_confirmations")
 		}
 	}
-	
+
+	return nil
+}
+
+// migrateAddOperationAndPayload adds operation and payload columns to distribution_records
+// This enables operation-based distributions (ping, roll_key, delete_key, update_components)
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateAddOperationAndPayload() error {
+	var operationExists, payloadExists bool
+
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if columns exist using pragma
+		var count int
+		err := kdc.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('distribution_records') WHERE name='operation'").Scan(&count)
+		operationExists = (err == nil && count > 0)
+
+		err = kdc.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('distribution_records') WHERE name='payload'").Scan(&count)
+		payloadExists = (err == nil && count > 0)
+	} else {
+		// MySQL/MariaDB: Check if columns exist by querying information_schema
+		var count int
+		err := kdc.DB.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_records' AND COLUMN_NAME = 'operation'",
+		).Scan(&count)
+		operationExists = (err == nil && count > 0)
+
+		err = kdc.DB.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_records' AND COLUMN_NAME = 'payload'",
+		).Scan(&count)
+		payloadExists = (err == nil && count > 0)
+	}
+
+	// If both columns already exist, nothing to do
+	if operationExists && payloadExists {
+		return nil
+	}
+
+	// Add operation column if it doesn't exist
+	if !operationExists {
+		var alterStmt string
+		if kdc.DBType == "sqlite" {
+			alterStmt = "ALTER TABLE distribution_records ADD COLUMN operation TEXT NOT NULL DEFAULT 'ping'"
+		} else {
+			alterStmt = "ALTER TABLE distribution_records ADD COLUMN operation VARCHAR(50) NOT NULL DEFAULT 'ping'"
+		}
+
+		_, err := kdc.DB.Exec(alterStmt)
+		if err != nil {
+			// Check if error is "duplicate column" (column already exists - race condition)
+			if strings.Contains(err.Error(), "duplicate column") ||
+			   strings.Contains(err.Error(), "already exists") ||
+			   strings.Contains(err.Error(), "Duplicate column name") {
+				// Column already exists, that's fine
+			} else {
+				return fmt.Errorf("failed to add operation column: %v", err)
+			}
+		} else {
+			log.Printf("KDC: Added operation column to distribution_records table")
+		}
+	}
+
+	// Add payload column if it doesn't exist
+	if !payloadExists {
+		var alterStmt string
+		if kdc.DBType == "sqlite" {
+			alterStmt = "ALTER TABLE distribution_records ADD COLUMN payload TEXT NULL"
+		} else {
+			alterStmt = "ALTER TABLE distribution_records ADD COLUMN payload JSON NULL"
+		}
+
+		_, err := kdc.DB.Exec(alterStmt)
+		if err != nil {
+			// Check if error is "duplicate column" (column already exists - race condition)
+			if strings.Contains(err.Error(), "duplicate column") ||
+			   strings.Contains(err.Error(), "already exists") ||
+			   strings.Contains(err.Error(), "Duplicate column name") {
+				// Column already exists, that's fine
+			} else {
+				return fmt.Errorf("failed to add payload column: %v", err)
+			}
+		} else {
+			log.Printf("KDC: Added payload column to distribution_records table")
+		}
+	}
+
+	// Update existing records to set appropriate operation types
+	// Records with NULL zone_name AND NULL key_id are node_components operations
+	// All other records are roll_key operations (key distributions)
+	if !operationExists {
+		log.Printf("KDC: Updating existing distribution records with operation types...")
+
+		// Update node_components distributions (zone_name IS NULL AND key_id IS NULL)
+		nodeComponentsStmt := "UPDATE distribution_records SET operation = 'node_components' WHERE zone_name IS NULL AND key_id IS NULL AND operation = 'ping'"
+		result, err := kdc.DB.Exec(nodeComponentsStmt)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to update node_components records: %v", err)
+		} else {
+			rowsAffected, _ := result.RowsAffected()
+			if rowsAffected > 0 {
+				log.Printf("KDC: Updated %d records to operation='node_components'", rowsAffected)
+			}
+		}
+
+		// Update key distributions (zone_name IS NOT NULL OR key_id IS NOT NULL)
+		rollKeyStmt := "UPDATE distribution_records SET operation = 'roll_key' WHERE (zone_name IS NOT NULL OR key_id IS NOT NULL) AND operation = 'ping'"
+		result, err = kdc.DB.Exec(rollKeyStmt)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to update roll_key records: %v", err)
+		} else {
+			rowsAffected, _ := result.RowsAffected()
+			if rowsAffected > 0 {
+				log.Printf("KDC: Updated %d records to operation='roll_key'", rowsAffected)
+			}
+		}
+	}
+
+	// Create index on operation column
+	var indexExists bool
+	if kdc.DBType == "sqlite" {
+		var count int
+		err := kdc.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_distribution_records_operation'").Scan(&count)
+		indexExists = (err == nil && count > 0)
+	} else {
+		var count int
+		err := kdc.DB.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_records' AND INDEX_NAME = 'idx_distribution_records_operation'",
+		).Scan(&count)
+		indexExists = (err == nil && count > 0)
+	}
+
+	if !indexExists {
+		_, err := kdc.DB.Exec("CREATE INDEX idx_distribution_records_operation ON distribution_records(operation)")
+		if err != nil {
+			// Don't fail migration if index creation fails
+			log.Printf("KDC: Warning: Failed to create operation index: %v", err)
+		} else {
+			log.Printf("KDC: Created index on operation column")
+		}
+	}
+
+	log.Printf("KDC: Successfully migrated distribution_records to support operation-based distributions")
 	return nil
 }

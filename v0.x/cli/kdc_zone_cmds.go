@@ -493,8 +493,14 @@ var kdcZoneDnssecGenerateCmd = &cobra.Command{
 }
 
 var kdcZoneDnssecDeleteCmd = &cobra.Command{
-	Use:   "delete --zone <zone-id> --keyid <key-id>",
-	Short: "Delete a DNSSEC key",
+	Use:   "delete --zone <zone-id> --keyid <key-id> [--kdc|--all|--nodeid <node-id>] [--reason <reason>] [--force]",
+	Short: "Delete a DNSSEC key from KDC and/or nodes",
+	Long: `Delete a DNSSEC key with control over scope:
+  --kdc          Delete only at KDC (default if no flag specified)
+  --all          Delete at KDC and distribute to all nodes serving zone
+  --nodeid       Distribute delete operation to specific node only
+  --reason       Optional reason for deletion (e.g., "compromise", "rotation")
+  --force        Required for deleting active keys (active, active_dist, active_ce, or edgesigner state)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 		keyid := cmd.Flag("keyid").Value.String()
@@ -502,27 +508,222 @@ var kdcZoneDnssecDeleteCmd = &cobra.Command{
 			log.Fatalf("Error: --keyid is required")
 		}
 
+		// Get flags for scope
+		kdcOnly, _ := cmd.Flags().GetBool("kdc")
+		all, _ := cmd.Flags().GetBool("all")
+		nodeID, _ := cmd.Flags().GetString("nodeid")
+		reason, _ := cmd.Flags().GetString("reason")
+		force, _ := cmd.Flags().GetBool("force")
+
+		// Check for mutually exclusive flags
+		flagCount := 0
+		if kdcOnly {
+			flagCount++
+		}
+		if all {
+			flagCount++
+		}
+		if nodeID != "" {
+			flagCount++
+		}
+
+		if flagCount > 1 {
+			log.Fatalf("Error: --kdc, --all, and --nodeid are mutually exclusive")
+		}
+
 		api, err := getApiClient(true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		req := map[string]interface{}{
-			"command": "delete-key",
+		// Fetch key details to check current state (safety check)
+		keyReq := map[string]interface{}{
+			"command":   "get-keys",
 			"zone_name": tdns.Globals.Zonename,
-			"key_id":  keyid,
 		}
-
-		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		keyResp, err := sendKdcRequest(api, "/kdc/zone", keyReq)
 		if err != nil {
-			log.Fatalf("Error: %v", err)
+			log.Fatalf("Error fetching key details: %v", err)
+		}
+		if keyResp["error"] == true {
+			log.Fatalf("Error: %v", keyResp["error_msg"])
 		}
 
-		if resp["error"] == true {
-			log.Fatalf("Error: %v", resp["error_msg"])
+		// Find the key and check its state
+		var keyState string
+		if keys, ok := keyResp["keys"].([]interface{}); ok {
+			for _, k := range keys {
+				if keyMap, ok := k.(map[string]interface{}); ok {
+					// Handle key_id as either string or integer
+					var kid string
+					if kidStr, ok := keyMap["key_id"].(string); ok {
+						kid = kidStr
+					} else if kidNum, ok := keyMap["key_id"].(float64); ok {
+						kid = fmt.Sprintf("%.0f", kidNum)
+					} else if kidInt, ok := keyMap["key_id"].(int); ok {
+						kid = fmt.Sprintf("%d", kidInt)
+					}
+
+					if kid == keyid {
+						if state, ok := keyMap["state"].(string); ok {
+							keyState = state
+						}
+						break
+					}
+				}
+			}
 		}
 
-		fmt.Printf("%s\n", resp["msg"])
+		if keyState == "" {
+			// Key doesn't exist at KDC
+			if !force {
+				log.Fatalf("Error: Key %s not found in zone %s. Use --force to delete anyway (key may exist at nodes).", keyid, tdns.Globals.Zonename)
+			}
+			// Force flag is set - warn and allow proceeding to backend
+			fmt.Printf("WARNING: Key %s does not exist at KDC for zone %s. Proceeding with --force.\n", keyid, tdns.Globals.Zonename)
+		} else {
+			// Key exists - check if it's in a dangerous state
+			safeStates := map[string]bool{
+				"removed":      true,
+				"distributed":  true,
+			}
+
+			dangerousStates := map[string]bool{
+				"active":      true,
+				"active_dist": true,
+				"active_ce":   true,
+				"edgesigner":  true,
+			}
+
+			if dangerousStates[keyState] {
+				if !force {
+					log.Fatalf("Error: Cannot delete key in state '%s' without --force flag.\n"+
+						"This is an active key. Use --force if you really want to delete it.\n"+
+						"Current state: %s", keyState, keyState)
+				}
+				// Warn even with --force
+				fmt.Printf("WARNING: Deleting key in active state '%s'. This is a dangerous operation.\n", keyState)
+			} else if !safeStates[keyState] {
+				// Unknown state - be cautious
+				if !force {
+					fmt.Printf("WARNING: Key is in state '%s'. Use --force to confirm deletion.\n", keyState)
+					log.Fatalf("Deletion requires --force flag for state '%s'", keyState)
+				}
+			}
+		}
+
+		// Default to --kdc if no flag specified
+		if flagCount == 0 {
+			kdcOnly = true
+		}
+
+		if kdcOnly {
+			// Delete only at KDC via zone endpoint
+			req := map[string]interface{}{
+				"command":   "delete-key",
+				"zone_name": tdns.Globals.Zonename,
+				"key_id":    keyid,
+				"force":     force,
+			}
+
+			resp, err := sendKdcRequest(api, "/kdc/zone", req)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+
+			if resp["error"] == true {
+				log.Fatalf("Error: %v", resp["error_msg"])
+			}
+
+			fmt.Printf("Key deleted at KDC: %s\n", resp["msg"])
+		} else if all {
+			// Distribute to nodes FIRST, then delete at KDC
+			// This ensures validation happens before deletion and avoids race conditions
+			req := map[string]interface{}{
+				"command":   "delete_key",
+				"zone_name": tdns.Globals.Zonename,
+				"key_id":    keyid,
+				"force":     force,
+			}
+			if reason != "" {
+				req["reason"] = reason
+			}
+
+			resp, err := sendKdcRequest(api, "/kdc/operations", req)
+			if err != nil {
+				log.Fatalf("Error distributing delete to nodes: %v", err)
+			}
+
+			if resp["error"] == true {
+				log.Fatalf("Error: %v", resp["error_msg"])
+			}
+
+			fmt.Printf("Distribution sent: %s\n", resp["msg"])
+
+			// Show distribution IDs if provided
+			if distIDs, ok := resp["distribution_ids"].([]interface{}); ok && len(distIDs) > 0 {
+				fmt.Printf("Distribution IDs: ")
+				for i, id := range distIDs {
+					if i > 0 {
+						fmt.Printf(", ")
+					}
+					fmt.Printf("%v", id)
+				}
+				fmt.Printf("\n")
+			}
+
+			// Show nodes notified count if provided
+			if nodesCount, ok := resp["nodes_notified"].(float64); ok {
+				fmt.Printf("Nodes notified: %d\n", int(nodesCount))
+			}
+
+			// Now delete from KDC (after nodes have been notified)
+			req = map[string]interface{}{
+				"command":   "delete-key",
+				"zone_name": tdns.Globals.Zonename,
+				"key_id":    keyid,
+				"force":     force,
+			}
+
+			resp, err = sendKdcRequest(api, "/kdc/zone", req)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+
+			if resp["error"] == true {
+				log.Fatalf("Error: %v", resp["error_msg"])
+			}
+
+			fmt.Printf("Key deleted at KDC: %s\n", resp["msg"])
+		} else if nodeID != "" {
+			// Distribute delete_key to specific node only
+			req := map[string]interface{}{
+				"command":   "delete_key",
+				"zone_name": tdns.Globals.Zonename,
+				"key_id":    keyid,
+				"node_id":   nodeID,
+				"force":     force,
+			}
+			if reason != "" {
+				req["reason"] = reason
+			}
+
+			resp, err := sendKdcRequest(api, "/kdc/operations", req)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+
+			if resp["error"] == true {
+				log.Fatalf("Error: %v", resp["error_msg"])
+			}
+
+			fmt.Printf("Distribution sent to node %s: %s\n", nodeID, resp["msg"])
+
+			// Show distribution IDs if provided
+			if distIDs, ok := resp["distribution_ids"].([]interface{}); ok && len(distIDs) > 0 {
+				fmt.Printf("Distribution ID: %v\n", distIDs[0])
+			}
+		}
 	},
 }
 
@@ -801,11 +1002,158 @@ The catalog zone name must be configured in the KDC config file as 'kdc.catalog_
 	},
 }
 
+var kdcZoneDeleteKeyCmd = &cobra.Command{
+	Use:   "delete-key --zone <zone> --keyid <key-id> [--reason <reason>]",
+	Short: "Delete a DNSSEC key from nodes serving a zone",
+	Long: `Send delete_key operation to all nodes serving the specified zone.
+The key will be removed from node storage. This operation is immediate and cannot be undone.
+Use --reason to document why the key is being deleted (e.g., "compromise", "rotation").`,
+	Run: func(cmd *cobra.Command, args []string) {
+		zoneName, _ := cmd.Flags().GetString("zone")
+		keyID, _ := cmd.Flags().GetString("keyid")
+		reason, _ := cmd.Flags().GetString("reason")
+
+		if zoneName == "" {
+			log.Fatalf("Error: --zone is required")
+		}
+		if keyID == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+
+		// Normalize zone name to FQDN
+		zoneName = dns.Fqdn(zoneName)
+
+		api, err := getApiClient(true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command":   "delete_key",
+			"zone_name": zoneName,
+			"key_id":    keyID,
+		}
+		if reason != "" {
+			req["reason"] = reason
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/operations", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+
+		// Show distribution IDs if provided
+		if distIDs, ok := resp["distribution_ids"].([]interface{}); ok && len(distIDs) > 0 {
+			fmt.Printf("Distribution IDs: ")
+			for i, id := range distIDs {
+				if i > 0 {
+					fmt.Printf(", ")
+				}
+				fmt.Printf("%v", id)
+			}
+			fmt.Printf("\n")
+		}
+
+		// Show nodes notified count if provided
+		if nodesCount, ok := resp["nodes_notified"].(float64); ok {
+			fmt.Printf("Nodes notified: %d\n", int(nodesCount))
+		}
+	},
+}
+
+var kdcZoneRollKeyCmd = &cobra.Command{
+	Use:   "roll-key --zone <zone> --keytype <ZSK|KSK> [--old-keyid <key-id>]",
+	Short: "Roll a DNSSEC key for a zone",
+	Long: `Roll a DNSSEC key by generating a new key and distributing it to nodes.
+For initial key distribution: omit --old-keyid
+For key rollover: specify --old-keyid to retire the old key (it will be marked as retired).
+
+The new key will be generated, distributed to all nodes serving the zone, and activated.
+The old key (if specified) will be retired but not deleted.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		zoneName, _ := cmd.Flags().GetString("zone")
+		keyType, _ := cmd.Flags().GetString("keytype")
+		oldKeyID, _ := cmd.Flags().GetString("old-keyid")
+
+		if zoneName == "" {
+			log.Fatalf("Error: --zone is required")
+		}
+		if keyType == "" {
+			log.Fatalf("Error: --keytype is required")
+		}
+
+		// Validate key type
+		keyType = strings.ToUpper(keyType)
+		if keyType != "ZSK" && keyType != "KSK" && keyType != "CSK" {
+			log.Fatalf("Error: --keytype must be ZSK, KSK, or CSK")
+		}
+
+		// Normalize zone name to FQDN
+		zoneName = dns.Fqdn(zoneName)
+
+		api, err := getApiClient(true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command":   "roll_key",
+			"zone_name": zoneName,
+			"key_type":  keyType,
+		}
+		if oldKeyID != "" {
+			req["old_key_id"] = oldKeyID
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/operations", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+
+		// Show new and old key IDs if provided
+		if newKeyID, ok := resp["new_key_id"].(string); ok && newKeyID != "" {
+			fmt.Printf("New key ID: %s\n", newKeyID)
+		}
+		if oldKeyID, ok := resp["old_key_id"].(string); ok && oldKeyID != "" {
+			fmt.Printf("Old key ID: %s (retired)\n", oldKeyID)
+		}
+
+		// Show distribution IDs if provided
+		if distIDs, ok := resp["distribution_ids"].([]interface{}); ok && len(distIDs) > 0 {
+			fmt.Printf("Distribution IDs: ")
+			for i, id := range distIDs {
+				if i > 0 {
+					fmt.Printf(", ")
+				}
+				fmt.Printf("%v", id)
+			}
+			fmt.Printf("\n")
+		}
+
+		// Show nodes notified count if provided
+		if nodesCount, ok := resp["nodes_notified"].(float64); ok {
+			fmt.Printf("Nodes notified: %d\n", int(nodesCount))
+		}
+	},
+}
+
 func init() {
 	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd, kdcZoneDnssecDeleteCmd, kdcZoneDnssecHashCmd, kdcZoneDnssecPurgeCmd)
 	KdcZoneCatalogCmd.AddCommand(kdcZoneCatalogGenerateCmd)
 	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd,
-		kdcZoneTransitionCmd, kdcZoneSetStateCmd, kdcZoneServiceCmd, kdcZoneComponentCmd, KdcZoneCatalogCmd)
+		kdcZoneTransitionCmd, kdcZoneSetStateCmd, kdcZoneServiceCmd, kdcZoneComponentCmd, kdcZoneDeleteKeyCmd, kdcZoneRollKeyCmd, KdcZoneCatalogCmd)
 	
 	kdcZoneDnssecPurgeCmd.Flags().Bool("force", false, "Also delete keys in 'distributed' state")
 	
@@ -814,6 +1162,11 @@ func init() {
 	
 	kdcZoneDnssecDeleteCmd.Flags().StringP("keyid", "k", "", "Key ID to delete")
 	kdcZoneDnssecDeleteCmd.MarkFlagRequired("keyid")
+	kdcZoneDnssecDeleteCmd.Flags().Bool("kdc", false, "Delete only at KDC (default if no flag specified)")
+	kdcZoneDnssecDeleteCmd.Flags().Bool("all", false, "Delete at KDC and distribute to all nodes serving zone")
+	kdcZoneDnssecDeleteCmd.Flags().String("nodeid", "", "Distribute delete operation to specific node ID only")
+	kdcZoneDnssecDeleteCmd.Flags().String("reason", "", "Optional reason for deletion (e.g., 'compromise', 'rotation')")
+	kdcZoneDnssecDeleteCmd.Flags().Bool("force", false, "Required for deleting active keys (active, active_dist, active_ce, or edgesigner state)")
 
 	kdcZoneDnssecHashCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	kdcZoneDnssecHashCmd.MarkFlagRequired("keyid")
@@ -842,4 +1195,16 @@ func init() {
 	kdcZoneDnssecGenerateCmd.Flags().StringP("type", "t", "ZSK", "Key type: KSK, ZSK, or CSK")
 	kdcZoneDnssecGenerateCmd.Flags().StringP("algorithm", "a", "", "DNSSEC algorithm (number or name, e.g., 15 or ED25519)")
 	kdcZoneDnssecGenerateCmd.Flags().StringP("comment", "c", "", "Optional comment for the key")
+
+	kdcZoneDeleteKeyCmd.Flags().String("zone", "", "Zone name")
+	kdcZoneDeleteKeyCmd.MarkFlagRequired("zone")
+	kdcZoneDeleteKeyCmd.Flags().String("keyid", "", "Key ID to delete")
+	kdcZoneDeleteKeyCmd.MarkFlagRequired("keyid")
+	kdcZoneDeleteKeyCmd.Flags().String("reason", "", "Reason for deleting the key")
+
+	kdcZoneRollKeyCmd.Flags().String("zone", "", "Zone name")
+	kdcZoneRollKeyCmd.MarkFlagRequired("zone")
+	kdcZoneRollKeyCmd.Flags().String("keytype", "", "Key type: ZSK, KSK, or CSK")
+	kdcZoneRollKeyCmd.MarkFlagRequired("keytype")
+	kdcZoneRollKeyCmd.Flags().String("old-keyid", "", "Old key ID to retire (optional, omit for initial distribution)")
 }

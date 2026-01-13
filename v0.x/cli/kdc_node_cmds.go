@@ -156,7 +156,7 @@ var kdcNodeListCmd = &cobra.Command{
 			}
 			
 			// Build table rows for columnize
-			lines := []string{"ID | Name | Notify Address | State | Comment"}
+			lines := []string{"ID | Name | Notify Address | State | Last Contact | Comment"}
 			for _, n := range nodes {
 				if node, ok := n.(map[string]interface{}); ok {
 					id := fmt.Sprintf("%v", node["id"])
@@ -167,7 +167,17 @@ var kdcNodeListCmd = &cobra.Command{
 					}
 					state := fmt.Sprintf("%v", node["state"])
 					comment := fmt.Sprintf("%v", node["comment"])
-					lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s", id, name, notifyAddr, state, comment))
+					lastContact := ""
+					if lc, ok := node["last_contact"]; ok && lc != nil {
+						lcStr := fmt.Sprintf("%v", lc)
+						// Parse and reformat the timestamp to a more readable format
+						if t, err := time.Parse(time.RFC3339, lcStr); err == nil {
+							lastContact = t.Format("2006-01-02 15:04:05")
+						} else {
+							lastContact = lcStr
+						}
+					}
+					lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s | %s", id, name, notifyAddr, state, lastContact, comment))
 				}
 			}
 			
@@ -919,10 +929,69 @@ var kdcNodeEnrollStatusCmd = &cobra.Command{
 	},
 }
 
+var kdcNodePingCmd = &cobra.Command{
+	Use:   "ping [--nodeid <node-id> | --all]",
+	Short: "Send ping operation to node(s)",
+	Long: `Send a ping operation to one or all edge nodes.
+The ping operation validates the cryptographic pipeline and confirms node connectivity.
+Either --nodeid or --all must be specified.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		all, _ := cmd.Flags().GetBool("all")
+		nodeIDFlag, _ := cmd.Flags().GetString("nodeid")
+
+		if !all && nodeIDFlag == "" {
+			log.Fatalf("Error: Either --nodeid or --all must be specified")
+		}
+		if all && nodeIDFlag != "" {
+			log.Fatalf("Error: Cannot specify both --nodeid and --all")
+		}
+
+		api, err := getApiClient(true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "ping",
+		}
+
+		if all {
+			req["all"] = true
+		} else {
+			// Normalize node ID to FQDN
+			nodeID := dns.Fqdn(nodeIDFlag)
+			req["node_id"] = nodeID
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/operations", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+
+		// Show distribution IDs if provided
+		if distIDs, ok := resp["distribution_ids"].([]interface{}); ok && len(distIDs) > 0 {
+			fmt.Printf("Distribution IDs: ")
+			for i, id := range distIDs {
+				if i > 0 {
+					fmt.Printf(", ")
+				}
+				fmt.Printf("%v", id)
+			}
+			fmt.Printf("\n")
+		}
+	},
+}
+
 func init() {
 	KdcNodeComponentCmd.AddCommand(kdcNodeComponentAddCmd, kdcNodeComponentDeleteCmd, kdcNodeComponentListCmd)
 	KdcNodeEnrollCmd.AddCommand(kdcNodeEnrollGenerateCmd, kdcNodeEnrollActivateCmd, kdcNodeEnrollListCmd, kdcNodeEnrollPurgeCmd, kdcNodeEnrollStatusCmd)
-	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd, KdcNodeComponentCmd, KdcNodeEnrollCmd)
+	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd, kdcNodePingCmd, KdcNodeComponentCmd, KdcNodeEnrollCmd)
 	
 	// Node-component command flags
 	kdcNodeComponentAddCmd.Flags().StringP("cid", "c", "", "Component ID")
@@ -955,4 +1024,7 @@ func init() {
 	
 	kdcNodeEnrollStatusCmd.Flags().String("nodeid", "", "Node ID")
 	kdcNodeEnrollStatusCmd.MarkFlagRequired("nodeid")
+
+	kdcNodePingCmd.Flags().String("nodeid", "", "Node ID to ping")
+	kdcNodePingCmd.Flags().Bool("all", false, "Ping all active nodes")
 }

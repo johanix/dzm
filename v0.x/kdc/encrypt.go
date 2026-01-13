@@ -78,6 +78,8 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf
 		ExpiresAt:      expiresAt,
 		Status:         hpke.DistributionStatusPending,
 		DistributionID: distID,
+		Operation:      "roll_key",
+		Payload:        make(map[string]interface{}),
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
