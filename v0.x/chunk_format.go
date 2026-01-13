@@ -4,7 +4,7 @@
  * Shared CHUNK format marshaling/unmarshaling functions
  */
 
-package dzm
+package tnm
 
 import (
 	"crypto/hmac"

@@ -4,7 +4,7 @@
  * Shared HPKE key loading functions
  */
 
-package dzm
+package tnm
 
 import (
 	"encoding/hex"

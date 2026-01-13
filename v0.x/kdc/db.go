@@ -19,8 +19,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // MariaDB driver
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns/v0.x/hpke"
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"github.com/miekg/dns"
 )
 
@@ -33,7 +33,7 @@ type KdcDB struct {
 // NewKdcDB creates a new KDC database connection
 // dbType should be "sqlite" or "mariadb"
 // dsn should be a file path for SQLite or a MySQL DSN for MariaDB
-func NewKdcDB(dbType, dsn string) (*KdcDB, error) {
+func NewKdcDB(dbType, dsn string, kdcConf *tnm.KdcConf) (*KdcDB, error) {
 	var driverName string
 	switch strings.ToLower(dbType) {
 	case "sqlite", "sqlite3":
@@ -2297,7 +2297,7 @@ func (kdc *KdcDB) CreateDistributionIDForKeys(zoneName string, keyIDs []string) 
 // CreatePingOperation creates a ping operation for a specific node
 // Returns the distribution ID
 // The ping operation is not encrypted - it includes a nonce in the payload metadata
-func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *KdcConf) (string, error) {
+func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf) (string, error) {
 	if nodeID == "" {
 		return "", fmt.Errorf("nodeID is required")
 	}
@@ -2466,7 +2466,7 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 // If oldKeyID is empty, this is an initial key distribution
 // If oldKeyID is specified, this is a key rollover and the old key will be retired
 // Returns the distribution ID
-func (kdc *KdcDB) CreateRollKeyOperation(newKey *DNSSECKey, oldKeyID string, node *Node, kdcConf *KdcConf) (string, error) {
+func (kdc *KdcDB) CreateRollKeyOperation(newKey *DNSSECKey, oldKeyID string, node *Node, kdcConf *tnm.KdcConf) (string, error) {
 	if newKey == nil {
 		return "", fmt.Errorf("newKey is required")
 	}
@@ -3302,7 +3302,7 @@ func (kdc *KdcDB) GetComponentsForService(serviceID string) ([]string, error) {
 // This creates a distribution with the new component list, but does NOT update the DB yet.
 // The DB will be updated when the confirmation is received from KRS.
 // If kdcConf is provided, it will automatically trigger key distribution for newly served zones
-func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf *KdcConf) error {
+func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf *tnm.KdcConf) error {
 	// Get current components for this node (from DB)
 	currentComponents, err := kdc.GetComponentsForNode(nodeID)
 	if err != nil {
@@ -3356,7 +3356,7 @@ func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf
 // This creates a distribution record with content type "node_components"
 // components: The intended component list (may differ from current DB state if pending changes)
 // Returns the distribution ID
-func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []string, kdcConf *KdcConf) (string, error) {
+func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []string, kdcConf *tnm.KdcConf) (string, error) {
 	// Get the node
 	node, err := kdc.GetNode(nodeID)
 	if err != nil {
@@ -3504,7 +3504,7 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 // This creates a distribution with the new component list, but does NOT update the DB yet.
 // The DB will be updated when the confirmation is received from KRS.
 // If kdcConf is provided, it will log zones that are no longer served (key deletion can be handled separately)
-func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcConf *KdcConf) error {
+func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcConf *tnm.KdcConf) error {
 	// Get current components for this node (from DB)
 	currentComponents, err := kdc.GetComponentsForNode(nodeID)
 	if err != nil {
@@ -4598,7 +4598,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 }
 
 // CommitServiceTransaction applies the transaction changes and creates distributions
-func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *KdcConf, dryRun bool) (*DeltaReport, error) {
+func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dryRun bool) (*DeltaReport, error) {
 	tx, err := kdc.GetServiceTransaction(txID)
 	if err != nil {
 		return nil, err
@@ -4737,7 +4737,7 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *KdcConf, dryRun
 
 // distributeKeysForZone distributes standby ZSK keys for a zone to a specific node
 // This is a helper function called when a node starts serving a zone
-func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *KdcConf) error {
+func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *tnm.KdcConf) error {
 	// Check zone signing mode - only distribute keys for edgesigned zones
 	signingMode, err := kdc.GetZoneSigningMode(zoneName)
 	if err != nil {

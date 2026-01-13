@@ -13,8 +13,8 @@ import (
 	"net/http"
 	"time"
 
-	dzm "github.com/johanix/tdns-nm/v0.x"
-	"github.com/johanix/tdns/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 )
 
@@ -42,7 +42,7 @@ type KdcDebugResponse struct {
 }
 
 // APIKdcDebug handles debug API requests
-func APIKdcDebug(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcDebug handler called")
@@ -95,7 +95,7 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 						resp.DistributionID = req.DistributionID
 						// Get chunk count from first CHUNK (manifest)
 						if len(prepared.chunks) > 0 && prepared.chunks[0].Total == 0 {
-							manifestData, err := dzm.ExtractManifestData(prepared.chunks[0])
+							manifestData, err := tnm.ExtractManifestData(prepared.chunks[0])
 							if err == nil {
 								resp.ChunkCount = manifestData.ChunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, manifestData.ChunkCount)

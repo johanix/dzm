@@ -18,8 +18,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns-nm/v0.x/krs"
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/johanix/tdns/v0.x/hpke"
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +38,12 @@ func main() {
 	err := conf.MainInit(ctx, tdns.DefaultKrsCfgFile)
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
+	}
+
+	// Parse KRS configuration section from config file
+	// This must be done after MainInit (which calls ParseConfig) but before startKrs
+	if err := tnm.ParseKrsConfigFromFile(conf); err != nil {
+		tdns.Shutdowner(conf, fmt.Sprintf("Error parsing KRS config: %v", err))
 	}
 
 	apirouter, err := conf.SetupAPIRouter(ctx)
@@ -75,17 +82,17 @@ func main() {
 // This replaces the tdns.StartKrs() function but uses tdns-nm packages
 func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
 	// Parse KRS configuration from stored YAML bytes
-	var krsConf krs.KrsConf
+	var krsConf tnm.KrsConf
 
-	// conf.Internal.KrsConf is either []byte (YAML) or already *krs.KrsConf
+	// conf.Internal.KrsConf is either []byte (YAML) or already *tnm.KrsConf
 	switch v := conf.Internal.KrsConf.(type) {
 	case []byte:
-		// Unmarshal YAML bytes into krs.KrsConf
+		// Unmarshal YAML bytes into tnm.KrsConf
 		if err := yaml.Unmarshal(v, &krsConf); err != nil {
 			return fmt.Errorf("failed to unmarshal KRS config: %v", err)
 		}
 		conf.Internal.KrsConf = &krsConf
-	case *krs.KrsConf:
+	case *tnm.KrsConf:
 		krsConf = *v
 	default:
 		return fmt.Errorf("KRS configuration not found or invalid type (got %T)", conf.Internal.KrsConf)

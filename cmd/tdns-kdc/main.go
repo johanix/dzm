@@ -16,8 +16,10 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
+	//	"github.com/johanix/tdns-nm/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns-nm/v0.x/kdc"
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/johanix/tdns/v0.x/core"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
@@ -36,6 +38,12 @@ func main() {
 	err := conf.MainInit(ctx, tdns.DefaultKdcCfgFile)
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
+	}
+
+	// Parse KDC configuration section from config file
+	// This must be done after MainInit (which calls ParseConfig) but before startKdc
+	if err := tnm.ParseKdcConfigFromFile(conf); err != nil {
+		tdns.Shutdowner(conf, fmt.Sprintf("Error parsing KDC config: %v", err))
 	}
 
 	apirouter, err := conf.SetupAPIRouter(ctx)
@@ -75,17 +83,17 @@ func main() {
 // This replaces the tdns.StartKdc() function but uses tdns-nm packages
 func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
 	// Parse KDC configuration from stored YAML bytes
-	var kdcConf kdc.KdcConf
+	var kdcConf tnm.KdcConf
 
-	// conf.Internal.KdcConf is either []byte (YAML) or already *kdc.KdcConf
+	// conf.Internal.KdcConf is either []byte (YAML) or already *tnm.KdcConf
 	switch v := conf.Internal.KdcConf.(type) {
 	case []byte:
-		// Unmarshal YAML bytes into kdc.KdcConf
+		// Unmarshal YAML bytes into tnm.KdcConf
 		if err := yaml.Unmarshal(v, &kdcConf); err != nil {
 			return fmt.Errorf("failed to unmarshal KDC config: %v", err)
 		}
 		conf.Internal.KdcConf = &kdcConf
-	case *kdc.KdcConf:
+	case *tnm.KdcConf:
 		kdcConf = *v
 	default:
 		return fmt.Errorf("KDC configuration not found or invalid type (got %T)", conf.Internal.KdcConf)
@@ -134,7 +142,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	pubKeyHex := fmt.Sprintf("%x", hpkeKeys.PublicKey)
 	log.Printf("KDC: Loaded HPKE keypair from %s (public key: %s...)", kdcConf.KdcHpkePrivKey, pubKeyHex[:16])
 
-	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN)
+	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, &kdcConf)
 	if err != nil {
 		return fmt.Errorf("failed to initialize KDC database: %v", err)
 	}

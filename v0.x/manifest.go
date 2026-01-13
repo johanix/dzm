@@ -4,7 +4,7 @@
  * Shared manifest creation helper functions
  */
 
-package dzm
+package tnm
 
 import (
 	"encoding/json"

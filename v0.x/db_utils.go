@@ -4,7 +4,7 @@
  * Database utility functions for TDNS Node Management
  */
 
-package dzm
+package tnm
 
 import (
 	"fmt"

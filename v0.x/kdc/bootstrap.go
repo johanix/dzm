@@ -18,7 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/johanix/tdns/v0.x/core"
 	"github.com/johanix/tdns/v0.x/edns0"
 	"github.com/johanix/tdns/v0.x/hpke"
@@ -39,7 +40,7 @@ type BootstrapBlob struct {
 // token: The bootstrap token
 // kdcConf: KDC configuration
 // Returns: base64-encoded blob content, error
-func GenerateBootstrapBlobContent(nodeID string, token *BootstrapToken, kdcConf *KdcConf) (string, error) {
+func GenerateBootstrapBlobContent(nodeID string, token *BootstrapToken, kdcConf *tnm.KdcConf) (string, error) {
 	// Validate required configuration fields
 	if kdcConf.KdcBootstrapAddress == "" {
 		return "", fmt.Errorf("kdc_bootstrap_address is not configured in KDC config file - this is required for bootstrap blob generation")
@@ -84,7 +85,7 @@ func GenerateBootstrapBlobContent(nodeID string, token *BootstrapToken, kdcConf 
 // kdcConf: KDC configuration
 // outDir: Output directory (must exist)
 // Returns: path to generated file, error
-func GenerateBootstrapBlob(nodeID string, token *BootstrapToken, kdcConf *KdcConf, outDir string) (string, error) {
+func GenerateBootstrapBlob(nodeID string, token *BootstrapToken, kdcConf *tnm.KdcConf, outDir string) (string, error) {
 	// Verify output directory exists
 	info, err := os.Stat(outDir)
 	if err != nil {
@@ -172,7 +173,7 @@ type BootstrapRequest struct {
 
 // HandleBootstrapUpdate handles bootstrap DNS UPDATE requests
 // This is called by the UPDATE handler registration API when a bootstrap UPDATE is detected
-func HandleBootstrapUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdcDB *KdcDB, kdcConf *KdcConf) error {
+func HandleBootstrapUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdcDB *KdcDB, kdcConf *tnm.KdcConf) error {
 	w := dur.ResponseWriter
 	r := dur.Msg
 	zone := dur.Qname // Zone is in the question section for UPDATE

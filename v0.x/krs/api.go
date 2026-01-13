@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	tnm "github.com/johanix/tdns-nm/v0.x"
 )
 
 // KrsKeysPost represents a request to the KRS keys API
@@ -107,7 +108,7 @@ func sendJSONError(w http.ResponseWriter, statusCode int, errorMsg string) {
 // SetupKrsAPIRoutes sets up API routes for KRS management
 // tdnsConf is *tdns.Config passed as interface{} to avoid circular import
 // pingHandler is the ping endpoint handler function
-func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *KrsConf, tdnsConf interface{}, pingHandler http.HandlerFunc) {
+func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *tnm.KrsConf, tdnsConf interface{}, pingHandler http.HandlerFunc) {
 	// Extract API key from config
 	apikey := ""
 	if configMap, ok := tdnsConf.(map[string]interface{}); ok {
@@ -253,7 +254,7 @@ func APIKrsKeys(krsDB *KrsDB) http.HandlerFunc {
 
 // APIKrsConfig handles node configuration endpoints
 // tdnsConf is *tdns.Config passed as interface{} to avoid circular import
-func APIKrsConfig(krsDB *KrsDB, conf *KrsConf, tdnsConf interface{}) http.HandlerFunc {
+func APIKrsConfig(krsDB *KrsDB, conf *tnm.KrsConf, tdnsConf interface{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req KrsConfigPost
 
@@ -307,7 +308,7 @@ func APIKrsConfig(krsDB *KrsDB, conf *KrsConf, tdnsConf interface{}) http.Handle
 }
 
 // APIKrsQuery handles query endpoints (deprecated - kept for compatibility)
-func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
+func APIKrsQuery(krsDB *KrsDB, conf *tnm.KrsConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req KrsQueryPost
 
@@ -340,7 +341,7 @@ func computeKeyHash(privateKey []byte) (string, error) {
 }
 
 // APIKrsDebug handles debug endpoints
-func APIKrsDebug(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
+func APIKrsDebug(krsDB *KrsDB, conf *tnm.KrsConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req KrsDebugPost
 

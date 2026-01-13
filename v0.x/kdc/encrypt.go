@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns/v0.x/hpke"
 )
 
@@ -21,7 +22,7 @@ import (
 // This function also stores the distribution record in the database
 // kdcConf is optional - if provided, expires_at will be set based on DistributionTTL
 // distributionID is optional - if provided, uses that ID; otherwise generates one for this key
-func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf, distributionID ...string) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
+func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *tnm.KdcConf, distributionID ...string) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
 	if key == nil {
 		return nil, nil, "", fmt.Errorf("key is nil")
 	}

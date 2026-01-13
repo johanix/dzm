@@ -5,7 +5,7 @@
  * Handles the ephemeralPub + ciphertext format used for transport
  */
 
-package dzm
+package tnm
 
 import (
 	"encoding/base64"

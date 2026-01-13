@@ -12,8 +12,9 @@ import (
 	"os"
 	"time"
 
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns-nm/v0.x/kdc"
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"gopkg.in/yaml.v3"
 )
 
@@ -160,7 +161,7 @@ func getKdcConfigPath() (string, error) {
 }
 
 // Helper function to load KDC config from file
-func loadKdcConfigFromFile(configPath string) (*kdc.KdcConf, error) {
+func loadKdcConfigFromFile(configPath string) (*tnm.KdcConf, error) {
 	// Read config file
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -169,7 +170,7 @@ func loadKdcConfigFromFile(configPath string) (*kdc.KdcConf, error) {
 	
 	// The KDC config file has the kdc section nested, so we need to unmarshal into a wrapper
 	type KdcConfigWrapper struct {
-		Kdc kdc.KdcConf `yaml:"kdc"`
+		Kdc tnm.KdcConf `yaml:"kdc"`
 	}
 	
 	var wrapper KdcConfigWrapper
@@ -211,7 +212,7 @@ func getKdcDB() (*kdc.KdcDB, error) {
 	}
 	
 	// Create database connection
-	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN)
+	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to KDC database: %v", err)
 	}
@@ -220,7 +221,7 @@ func getKdcDB() (*kdc.KdcDB, error) {
 }
 
 // Helper function to get KDC config from file
-func getKdcConfig() (*kdc.KdcConf, error) {
+func getKdcConfig() (*tnm.KdcConf, error) {
 	// Get config file path
 	configPath, err := getKdcConfigPath()
 	if err != nil {
@@ -278,7 +279,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 	}
 	
 	// Create database connection
-	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN)
+	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}

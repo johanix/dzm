@@ -4,7 +4,7 @@
  * Shared data structures for tdns-nm (KDC and KRS)
  */
 
-package dzm
+package tnm
 
 // DistributionEntry represents a single operation entry in a distribution
 // This is the JSON structure used for HPKE-encrypted payloads between KDC and KRS

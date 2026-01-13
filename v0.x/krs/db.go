@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	dzm "github.com/johanix/tdns-nm/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
@@ -29,7 +29,7 @@ type KrsDB struct {
 // dsn should be a SQLite file path
 func NewKrsDB(dsn string) (*KrsDB, error) {
 	// Ensure the database directory exists
-	if err := dzm.EnsureDatabaseDirectory(dsn); err != nil {
+	if err := tnm.EnsureDatabaseDirectory(dsn); err != nil {
 		return nil, err
 	}
 	dbDir := filepath.Dir(dsn)

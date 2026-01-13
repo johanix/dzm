@@ -15,7 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/johanix/tdns/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/johanix/tdns/v0.x/core"
 	"github.com/johanix/tdns/v0.x/edns0"
 	"github.com/miekg/dns"
@@ -33,7 +34,7 @@ type KdcQueryRequest struct {
 
 // HandleKdcQuery processes DNS queries for the KDC
 // This function is called by QueryHandler when DnsQueryQ is non-nil
-func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, conf *KdcConf) error {
+func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, conf *tnm.KdcConf) error {
 	msg := dqr.Msg
 	qname := dqr.Qname
 	qtype := dqr.Qtype
@@ -248,7 +249,7 @@ func ParseQnameForOLDCHUNK(qname string, controlZone string) (chunkID uint16, no
 // handleCHUNKQuery processes CHUNK queries
 // QNAME format for manifest: <nodeid>.<distributionID>.<controlzone> (chunkID=0 implied)
 // QNAME format for data chunks: <chunkid>.<nodeid>.<distributionID>.<controlzone>
-func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *tnm.KdcConf) error {
 	log.Printf("KDC: Processing CHUNK query for %s", qname)
 
 	// Try to parse as data chunk first (has chunk ID prefix)
@@ -361,7 +362,7 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 
 // handleConfirmationNotify handles NOTIFY(CHUNK) messages from KRS confirming receipt of keys
 // The NOTIFY QNAME format is: <distributionID>.<controlzone>
-func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, qtype uint16, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, qtype uint16, w dns.ResponseWriter, kdcDB *KdcDB, conf *tnm.KdcConf) error {
 	// Only handle CHUNK NOTIFYs as confirmations
 	if qtype != core.TypeCHUNK {
 		log.Printf("KDC: Ignoring NOTIFY for non-CHUNK type %s", dns.TypeToString[qtype])

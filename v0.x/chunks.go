@@ -4,7 +4,7 @@
  * Shared chunk splitting and reassembly functions
  */
 
-package dzm
+package tnm
 
 import (
 	"fmt"

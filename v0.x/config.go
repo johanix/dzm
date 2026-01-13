@@ -1,10 +1,10 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * Configuration structures for tdns-kdc
+ * Configuration structures for tdns-kdc and tdns-krs
  */
 
-package kdc
+package tnm
 
 import (
 	"time"
@@ -27,10 +27,37 @@ type KdcConf struct {
 	CatalogZone string `yaml:"catalog_zone" mapstructure:"catalog_zone"` // Catalog zone name (e.g., "catalog.example.com.")
 }
 
-// DatabaseConf represents database configuration
+// KrsConf represents the KRS configuration
+type KrsConf struct {
+	Database    KrsDatabaseConf `yaml:"database" mapstructure:"database"`
+	Node        NodeConf     `yaml:"node" mapstructure:"node"`
+	ControlZone string       `yaml:"control_zone" mapstructure:"control_zone"` // DNS zone for distribution events
+	DnsEngine   DnsEngineConf `yaml:"dnsengine" mapstructure:"dnsengine"`       // DNS engine config for NOTIFY
+}
+
+// DatabaseConf represents database configuration for KDC
 type DatabaseConf struct {
 	Type string `yaml:"type" mapstructure:"type" validate:"required,oneof=sqlite mariadb"` // Database type: "sqlite" or "mariadb"
 	DSN  string `yaml:"dsn" mapstructure:"dsn" validate:"required"`                        // DSN: SQLite file path or MariaDB "user:password@tcp(host:port)/dbname"
+}
+
+// KrsDatabaseConf represents database configuration for KRS (SQLite only for edge nodes)
+type KrsDatabaseConf struct {
+	DSN string `yaml:"dsn" mapstructure:"dsn" validate:"required"` // SQLite file path
+}
+
+// NodeConf represents the edge node's identity and connection info
+type NodeConf struct {
+	ID              string `yaml:"id" mapstructure:"id" validate:"required"`              // Node ID (must match KDC)
+	LongTermPrivKey string `yaml:"long_term_priv_key" mapstructure:"long_term_priv_key" validate:"required"` // Path to HPKE long-term private key file
+	KdcAddress      string `yaml:"kdc_address" mapstructure:"kdc_address" validate:"required"` // KDC server address (IP:port)
+	KdcHpkePubKey   string `yaml:"kdc_hpke_pubkey,omitempty" mapstructure:"kdc_hpke_pubkey"` // KDC HPKE public key (hex encoded, for future communications)
+}
+
+// DnsEngineConf represents DNS engine configuration for NOTIFY receiver
+type DnsEngineConf struct {
+	Addresses []string `yaml:"addresses" mapstructure:"addresses" validate:"required"` // Addresses to listen on
+	Transports []string `yaml:"transports" mapstructure:"transports" validate:"required,min=1,dive,oneof=do53"` // Only do53 for now
 }
 
 // GetChunkMaxSize returns the configured chunk size, or default (60000) if not set
@@ -56,4 +83,3 @@ func (conf *KdcConf) GetBootstrapExpirationWindow() time.Duration {
 	}
 	return conf.BootstrapExpirationWindow
 }
-

@@ -20,7 +20,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/johanix/tdns/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 )
 
@@ -210,7 +211,7 @@ func sendJSONError(w http.ResponseWriter, statusCode int, errorMsg string) {
 }
 
 // APIKdcZone handles zone management endpoints
-func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcZone handler called")
@@ -1316,7 +1317,7 @@ type KdcConfigResponse struct {
 }
 
 // APIKdcBootstrap handles bootstrap token management endpoints
-func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcBootstrap handler called")
@@ -1516,8 +1517,8 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 
 // APIKdcConfig handles KDC configuration endpoints
 // conf is *tdns.Config passed as interface{} to avoid circular import
-// kdcConf is *KdcConf
-func APIKdcConfig(kdcConf *KdcConf, tdnsConf interface{}) http.HandlerFunc {
+// kdcConf is *tnm.KdcConf
+func APIKdcConfig(kdcConf *tnm.KdcConf, tdnsConf interface{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcConfig handler called")
@@ -1606,7 +1607,7 @@ type KdcDistribResponse struct {
 }
 
 // APIKdcDistrib handles distribution management endpoints
-func APIKdcDistrib(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcDistrib(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcDistrib handler called")
@@ -1774,7 +1775,7 @@ func computeKeyHash(privateKey []byte) (string, error) {
 }
 
 // APIKdcOperations handles operation requests (ping, delete_key, roll_key)
-func APIKdcOperations(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcOperations(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcOperations handler called")
@@ -2556,7 +2557,7 @@ func APIKdcServiceComponent(kdcDB *KdcDB) http.HandlerFunc {
 }
 
 // APIKdcNodeComponent handles node-component assignment endpoints
-func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcNodeComponent handler called")
@@ -2732,7 +2733,7 @@ func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 }
 
 // APIKdcServiceTransaction handles service transaction endpoints
-func APIKdcServiceTransaction(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcServiceTransaction(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcServiceTransaction handler called")
@@ -2916,7 +2917,7 @@ func APIKdcServiceTransaction(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 }
 
 // APIKdcCatalog handles catalog zone generation endpoints
-func APIKdcCatalog(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
+func APIKdcCatalog(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
 			log.Printf("KDC: DEBUG: APIKdcCatalog handler called")
@@ -2978,7 +2979,7 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 
 	// Extract API key and KDC config from config
 	apikey := ""
-	var kdcConf *KdcConf
+	var kdcConf *tnm.KdcConf
 	if configMap, ok := conf.(map[string]interface{}); ok {
 		if apiServer, ok := configMap["ApiServer"].(map[string]interface{}); ok {
 			if key, ok := apiServer["ApiKey"].(string); ok {
@@ -2986,10 +2987,10 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 			}
 		}
 		if kdcConfRaw, ok := configMap["KdcConf"]; ok {
-			if kdcConfPtr, ok := kdcConfRaw.(*KdcConf); ok {
+			if kdcConfPtr, ok := kdcConfRaw.(*tnm.KdcConf); ok {
 				kdcConf = kdcConfPtr
 			} else {
-				log.Printf("SetupKdcAPIRoutes: WARNING: KdcConf in config map is not *KdcConf (got %T)", kdcConfRaw)
+				log.Printf("SetupKdcAPIRoutes: WARNING: KdcConf in config map is not *tnm.KdcConf (got %T)", kdcConfRaw)
 			}
 		} else {
 			log.Printf("SetupKdcAPIRoutes: WARNING: KdcConf not found in config map")

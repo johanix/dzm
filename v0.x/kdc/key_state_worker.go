@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	tnm "github.com/johanix/tdns-nm/v0.x"
 )
 
 // KeyStateWorker runs periodic checks for automatic state transitions
-func KeyStateWorker(ctx context.Context, kdcDB *KdcDB, conf *KdcConf) error {
+func KeyStateWorker(ctx context.Context, kdcDB *KdcDB, conf *tnm.KdcConf) error {
 	ticker := time.NewTicker(1 * time.Minute) // Check every minute
 	defer ticker.Stop()
 
@@ -34,7 +36,7 @@ func KeyStateWorker(ctx context.Context, kdcDB *KdcDB, conf *KdcConf) error {
 }
 
 // checkAndTransitionKeys checks for keys that need automatic state transitions
-func checkAndTransitionKeys(kdcDB *KdcDB, conf *KdcConf) error {
+func checkAndTransitionKeys(kdcDB *KdcDB, conf *tnm.KdcConf) error {
 	now := time.Now()
 
 	// Check published -> standby transition
@@ -104,7 +106,7 @@ func checkAndTransitionKeys(kdcDB *KdcDB, conf *KdcConf) error {
 // maintainStandbyKeyCount ensures each zone has the configured number of standby ZSKs
 // If a zone has fewer than standby_key_count standby keys and no published keys,
 // it generates a new ZSK and immediately sets it to published state
-func maintainStandbyKeyCount(kdcDB *KdcDB, conf *KdcConf) error {
+func maintainStandbyKeyCount(kdcDB *KdcDB, conf *tnm.KdcConf) error {
 	// Get all active zones
 	zones, err := kdcDB.GetAllZones()
 	if err != nil {
@@ -178,7 +180,7 @@ func maintainStandbyKeyCount(kdcDB *KdcDB, conf *KdcConf) error {
 
 // ensureActiveKSK ensures each active zone has at least one active KSK
 // If no active KSK exists, it generates a new KSK, publishes it, and transitions it directly to active
-func ensureActiveKSK(kdcDB *KdcDB, conf *KdcConf) error {
+func ensureActiveKSK(kdcDB *KdcDB, conf *tnm.KdcConf) error {
 	// Get all active zones
 	zones, err := kdcDB.GetAllZones()
 	if err != nil {

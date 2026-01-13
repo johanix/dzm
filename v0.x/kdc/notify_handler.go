@@ -11,13 +11,14 @@ import (
 	"context"
 	"log"
 
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns/v0.x/core"
 	"github.com/miekg/dns"
 )
 
 // HandleKdcNotify processes NOTIFY messages for the KDC
 // This function is called by the NOTIFY handler engine when DnsNotifyQ is non-nil
-func HandleKdcNotify(ctx context.Context, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+func HandleKdcNotify(ctx context.Context, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *tnm.KdcConf) error {
 
 	log.Printf("KDC: Received NOTIFY message for %s from %s", qname, w.RemoteAddr())
 	log.Printf("KDC: NOTIFY details - ID: %d, Opcode: %s, Question count: %d", 

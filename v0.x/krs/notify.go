@@ -14,14 +14,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 )
 
 // HandleKrsNotify processes NOTIFY messages for KRS.
 // This function is called by TDNS's NOTIFY handler registration system.
 // It handles NOTIFYs for the control zone and distribution events.
-func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *KrsDB, conf *KrsConf) error {
+func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *KrsDB, conf *tnm.KrsConf) error {
 	msg := dnr.Msg
 	qname := dnr.Qname
 	w := dnr.ResponseWriter
@@ -105,7 +106,7 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 // StartNotifyReceiver starts a minimal DNS server that only handles NOTIFYs
 // DEPRECATED: Use HandleKrsNotify with RegisterNotifyHandler instead
 // Similar to tdns.NotifyReporter but adapted for KRS
-func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *KrsConf) error {
+func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsConf) error {
 	addr := conf.DnsEngine.Addresses[0]
 	if addr == "" {
 		addr = ":53"

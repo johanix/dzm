@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	dzm "github.com/johanix/tdns-nm/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
 	"github.com/johanix/tdns-nm/v0.x/kdc"
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/johanix/tdns/v0.x/core"
 	"github.com/johanix/tdns/v0.x/edns0"
 	"github.com/johanix/tdns/v0.x/hpke"
@@ -69,8 +69,8 @@ type DnsEngineConfig struct {
 }
 
 type KrsBootstrapConf struct {
-	Database    DatabaseConf `yaml:"database"`
-	Node        NodeConf     `yaml:"node"`
+	Database    tnm.KrsDatabaseConf `yaml:"database"`
+	Node        tnm.NodeConf     `yaml:"node"`
 	ControlZone string       `yaml:"control_zone"`
 }
 
@@ -337,7 +337,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	// 14. Ensure database directory exists (before generating config)
 	// The database DSN is hardcoded in the config, so we check it here
 	dbDSN := "/var/lib/tdns/krs.db"
-	if err := dzm.EnsureDatabaseDirectory(dbDSN); err != nil {
+	if err := tnm.EnsureDatabaseDirectory(dbDSN); err != nil {
 		return fmt.Errorf("failed to ensure database directory: %v", err)
 	}
 	log.Printf("KRS: Database directory ready: %s", filepath.Dir(dbDSN))
@@ -371,10 +371,10 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 			KeyFile:    keyFile,
 		},
 		Krs: KrsBootstrapConf{
-			Database: DatabaseConf{
+			Database: tnm.KrsDatabaseConf{
 				DSN: "/var/lib/tdns/krs.db",
 			},
-			Node: NodeConf{
+			Node: tnm.NodeConf{
 				ID:              blob.NodeID,
 				LongTermPrivKey: hpkeKeyFile,
 				KdcAddress:      blob.KdcBootstrapAddress,

@@ -15,19 +15,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/johanix/tdns/v0.x/core"
 	"github.com/johanix/tdns/v0.x/edns0"
 	"github.com/johanix/tdns/v0.x/hpke"
 	"github.com/miekg/dns"
 
-	dzm "github.com/johanix/tdns-nm/v0.x"
+	tnm "github.com/johanix/tdns-nm/v0.x"
 )
 
 // QueryCHUNK queries the KDC for a CHUNK record
 // sequence: 0 for manifest, 1+ for data chunks
 // chunkSize is the expected chunk size from the manifest (0 if unknown, used for TCP decision)
-func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, sequence uint16, chunkSize uint16) (*core.CHUNK, error) {
+func QueryCHUNK(krsDB *KrsDB, conf *tnm.KrsConf, nodeID, distributionID string, sequence uint16, chunkSize uint16) (*core.CHUNK, error) {
 	nodeConfig, err := krsDB.GetNodeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node config: %v", err)
@@ -141,19 +141,19 @@ func QueryCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, sequ
 }
 
 // ExtractManifestFromCHUNK extracts manifest data from a CHUNK manifest chunk
-// This is a wrapper around dzm.ExtractManifestData for backward compatibility
-func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*dzm.ManifestData, error) {
-	return dzm.ExtractManifestData(chunk)
+// This is a wrapper around tnm.ExtractManifestData for backward compatibility
+func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*tnm.ManifestData, error) {
+	return tnm.ExtractManifestData(chunk)
 }
 
 // ReassembleCHUNKChunks reassembles CHUNK chunks into complete data
-// This is a wrapper around dzm.ReassembleCHUNKChunks for backward compatibility
+// This is a wrapper around tnm.ReassembleCHUNKChunks for backward compatibility
 func ReassembleCHUNKChunks(chunks []*core.CHUNK) ([]byte, error) {
-	return dzm.ReassembleCHUNKChunks(chunks)
+	return tnm.ReassembleCHUNKChunks(chunks)
 }
 
 // ProcessDistribution processes a distribution using CHUNK format
-func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, processTextResult *string) error {
+func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string, processTextResult *string) error {
 	// Use node ID from config file, not database
 	// Ensure it's an FQDN
 	nodeID := conf.Node.ID
@@ -191,7 +191,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		}
 
 		// Verify HMAC using the public key
-		valid, err := dzm.VerifyCHUNKHMAC(manifestChunk, publicKey)
+		valid, err := tnm.VerifyCHUNKHMAC(manifestChunk, publicKey)
 		if err != nil {
 			return fmt.Errorf("failed to verify CHUNK manifest HMAC: %v", err)
 		}
@@ -357,7 +357,7 @@ func ProcessClearText(data []byte) (string, error) {
 
 // ProcessEncryptedText processes encrypted_text content
 // Displays base64 transport, ciphertext, and decrypted cleartext
-func ProcessEncryptedText(krsDB *KrsDB, conf *KrsConf, data []byte) (string, error) {
+func ProcessEncryptedText(krsDB *KrsDB, conf *tnm.KrsConf, data []byte) (string, error) {
 	// Step 1: Display base64 transport encoded message
 	log.Printf("KRS: ===== ENCRYPTED TEXT CONTENT =====")
 	log.Printf("KRS: --- Base64 Transport Encoded (as received, %d bytes) ---", len(data))
@@ -387,7 +387,7 @@ func ProcessEncryptedText(krsDB *KrsDB, conf *KrsConf, data []byte) (string, err
 		return "", fmt.Errorf("node long-term private key not configured")
 	}
 
-	privateKey, err := dzm.LoadPrivateKey(conf.Node.LongTermPrivKey)
+	privateKey, err := tnm.LoadPrivateKey(conf.Node.LongTermPrivKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to load private key: %v", err)
 	}
@@ -405,7 +405,7 @@ func ProcessEncryptedText(krsDB *KrsDB, conf *KrsConf, data []byte) (string, err
 
 	// Decrypt using shared function
 	log.Printf("KRS: Attempting HPKE decryption...")
-	plaintext, err := dzm.DecodeAndDecrypt(privateKey, data)
+	plaintext, err := tnm.DecodeAndDecrypt(privateKey, data)
 	if err != nil {
 		log.Printf("KRS: HPKE decryption failed: %v", err)
 		return "", fmt.Errorf("failed to decrypt encrypted text: %v", err)
@@ -449,7 +449,7 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 // The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
 // Operations can be: roll_key, delete_key (key operations), ping (management operations), or mixed
 // distributionID and retireTime are optional and can be passed from the manifest metadata
-func ProcessEncryptedOperations(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string, retireTime string) error {
+func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distributionID string, retireTime string) error {
 	distID := distributionID
 	// Step 1: Load node's private key for decryption
 	log.Printf("KRS: Processing operation-based distribution (key_operations, mgmt_operations, or mixed) (%d bytes base64)", len(data))
@@ -457,14 +457,14 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *KrsConf, data []byte, distri
 		return fmt.Errorf("node long-term private key not configured")
 	}
 
-	privateKey, err := dzm.LoadPrivateKey(conf.Node.LongTermPrivKey)
+	privateKey, err := tnm.LoadPrivateKey(conf.Node.LongTermPrivKey)
 	if err != nil {
 		return fmt.Errorf("failed to load private key: %v", err)
 	}
 	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
 
 	// Step 2: Decrypt the entire payload using shared function
-	plaintextJSON, err := dzm.DecodeAndDecrypt(privateKey, data)
+	plaintextJSON, err := tnm.DecodeAndDecrypt(privateKey, data)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt distribution payload: %v", err)
 	}
@@ -472,7 +472,7 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *KrsConf, data []byte, distri
 	log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
 
 	// Step 3: Parse JSON structure as operation-based distribution entries
-	var entries []dzm.DistributionEntry
+	var entries []tnm.DistributionEntry
 	if err := json.Unmarshal(plaintextJSON, &entries); err != nil {
 		return fmt.Errorf("failed to unmarshal decrypted operations JSON: %v", err)
 	}
@@ -617,7 +617,7 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *KrsConf, data []byte, distri
 // Data is base64-encoded encrypted payload containing the component list
 // The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
 // distributionID is optional and can be passed from the manifest metadata
-func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string) error {
+func ProcessNodeComponents(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distributionID string) error {
 	distID := distributionID
 	// Step 1: Load node's private key for decryption
 	log.Printf("KRS: Processing node_operations content (update_components) (%d bytes base64)", len(data))
@@ -625,14 +625,14 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributio
 		return fmt.Errorf("node long-term private key not configured")
 	}
 
-	privateKey, err := dzm.LoadPrivateKey(conf.Node.LongTermPrivKey)
+	privateKey, err := tnm.LoadPrivateKey(conf.Node.LongTermPrivKey)
 	if err != nil {
 		return fmt.Errorf("failed to load private key: %v", err)
 	}
 	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
 
 	// Step 2: Decrypt the entire payload using shared function
-	plaintextJSON, err := dzm.DecodeAndDecrypt(privateKey, data)
+	plaintextJSON, err := tnm.DecodeAndDecrypt(privateKey, data)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt distribution payload: %v", err)
 	}
@@ -719,13 +719,13 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *KrsConf, data []byte, distributio
 
 // loadPrivateKey loads a private key from a file path
 // The file should contain a hex-encoded 32-byte HPKE private key
-// This is a wrapper around dzm.LoadPrivateKey for backward compatibility
+// This is a wrapper around tnm.LoadPrivateKey for backward compatibility
 func loadPrivateKey(keyPath string) ([]byte, error) {
-	return dzm.LoadPrivateKey(keyPath)
+	return tnm.LoadPrivateKey(keyPath)
 }
 
 // handlePingOperation processes a ping operation
-func handlePingOperation(entry dzm.DistributionEntry, index int) error {
+func handlePingOperation(entry tnm.DistributionEntry, index int) error {
 	log.Printf("KRS: Processing ping operation (entry %d)", index+1)
 
 	// Extract nonce from metadata
@@ -748,7 +748,7 @@ func handlePingOperation(entry dzm.DistributionEntry, index int) error {
 }
 
 // handleRollKeyOperation processes a roll_key operation
-func handleRollKeyOperation(krsDB *KrsDB, entry dzm.DistributionEntry, distID, retireTime string, index int) error {
+func handleRollKeyOperation(krsDB *KrsDB, entry tnm.DistributionEntry, distID, retireTime string, index int) error {
 	log.Printf("KRS: Processing roll_key operation (entry %d): zone=%s, key_id=%s", index+1, entry.ZoneName, entry.KeyID)
 
 	// Parse key_id as uint16
@@ -844,7 +844,7 @@ func handleRollKeyOperation(krsDB *KrsDB, entry dzm.DistributionEntry, distID, r
 
 // handleDeleteKeyOperation processes a delete_key operation
 // This operation is idempotent: it succeeds whether or not the key exists
-func handleDeleteKeyOperation(krsDB *KrsDB, entry dzm.DistributionEntry, index int) error {
+func handleDeleteKeyOperation(krsDB *KrsDB, entry tnm.DistributionEntry, index int) error {
 	log.Printf("KRS: Processing delete_key operation (entry %d): zone=%s, key_id=%s", index+1, entry.ZoneName, entry.KeyID)
 
 	// Log reason if provided (do this before deletion attempt)
