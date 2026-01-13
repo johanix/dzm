@@ -11,7 +11,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/johanix/tdns/v0.x/tdns/core"
+	"github.com/johanix/tdns/v0.x/core"
 	"github.com/miekg/dns"
 )
 

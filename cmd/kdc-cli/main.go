@@ -15,7 +15,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns-nm/v0.x/cli"
-	"github.com/johanix/tdns/v0.x/tdns"
+	"github.com/johanix/tdns/v0.x"
 )
 
 var cfgFile, cfgFileUsed string

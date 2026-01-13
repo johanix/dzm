@@ -7,7 +7,7 @@ import (
 	"log"
 
 	"github.com/go-playground/validator/v10"
-	"github.com/johanix/tdns/v0.x/tdns"
+	"github.com/johanix/tdns/v0.x"
 	"github.com/spf13/viper"
 )
 

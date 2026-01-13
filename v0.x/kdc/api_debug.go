@@ -14,7 +14,7 @@ import (
 	"time"
 
 	dzm "github.com/johanix/tdns-nm/v0.x"
-	"github.com/johanix/tdns/v0.x/tdns"
+	"github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 )
 

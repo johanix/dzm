@@ -19,8 +19,8 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/johanix/tdns-nm/v0.x/krs"
-	"github.com/johanix/tdns/v0.x/tdns"
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x"
+	"github.com/johanix/tdns/v0.x/hpke"
 	"gopkg.in/yaml.v3"
 )
 

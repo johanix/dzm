@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v0.x/tdns/core"
-	"github.com/johanix/tdns/v0.x/tdns/edns0"
+	"github.com/johanix/tdns/v0.x/core"
+	"github.com/johanix/tdns/v0.x/edns0"
 	"github.com/miekg/dns"
 )
 

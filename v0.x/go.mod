@@ -3,19 +3,19 @@ module github.com/johanix/tdns-nm/v0.x
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/v0.x/tdns => ../../tdns/v0.x/tdns
-	github.com/johanix/tdns/v0.x/tdns/cache => ../../tdns/v0.x/tdns/cache
-	github.com/johanix/tdns/v0.x/tdns/core => ../../tdns/v0.x/tdns/core
-	github.com/johanix/tdns/v0.x/tdns/edns0 => ../../tdns/v0.x/tdns/edns0
-	github.com/johanix/tdns/v0.x/tdns/hpke => ../../tdns/v0.x/tdns/hpke
+	github.com/johanix/tdns/v0.x => ../../tdns/v0.x
+	github.com/johanix/tdns/v0.x/cache => ../../tdns/v0.x/cache
+	github.com/johanix/tdns/v0.x/core => ../../tdns/v0.x/core
+	github.com/johanix/tdns/v0.x/edns0 => ../../tdns/v0.x/edns0
+	github.com/johanix/tdns/v0.x/hpke => ../../tdns/v0.x/hpke
 )
 
 require (
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns/v0.x/tdns v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v0.x/tdns/core v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v0.x v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v0.x/core v0.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.16
 	github.com/miekg/dns v1.1.68
 	github.com/ryanuber/columnize v2.1.2+incompatible
@@ -34,8 +34,8 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns/v0.x/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
-	github.com/johanix/tdns/v0.x/tdns/edns0 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v0.x/cache v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v0.x/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect

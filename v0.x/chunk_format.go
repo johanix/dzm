@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/johanix/tdns/v0.x/tdns/core"
+	"github.com/johanix/tdns/v0.x/core"
 )
 
 // ManifestData represents the JSON structure stored in a CHUNK manifest's Data field

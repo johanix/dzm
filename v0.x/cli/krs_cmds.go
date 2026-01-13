@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-nm/v0.x/krs"
-	"github.com/johanix/tdns/v0.x/tdns"
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x"
+	"github.com/johanix/tdns/v0.x/hpke"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"

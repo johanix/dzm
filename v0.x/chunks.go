@@ -9,7 +9,7 @@ package dzm
 import (
 	"fmt"
 
-	"github.com/johanix/tdns/v0.x/tdns/core"
+	"github.com/johanix/tdns/v0.x/core"
 )
 
 // SplitIntoCHUNKs splits data into CHUNK records of specified size

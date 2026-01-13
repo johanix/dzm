@@ -19,7 +19,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // MariaDB driver
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x/hpke"
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"github.com/miekg/dns"
 )

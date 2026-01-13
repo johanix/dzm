@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johanix/tdns/v0.x/tdns"
-	"github.com/johanix/tdns/v0.x/tdns/core"
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x"
+	"github.com/johanix/tdns/v0.x/core"
+	"github.com/johanix/tdns/v0.x/hpke"
 
 	dzm "github.com/johanix/tdns-nm/v0.x"
 )

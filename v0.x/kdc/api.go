@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/johanix/tdns/v0.x/tdns"
+	"github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 )
 

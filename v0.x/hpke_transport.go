@@ -11,7 +11,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x/hpke"
 )
 
 // EncryptAndEncode encrypts plaintext using HPKE and encodes it for transport

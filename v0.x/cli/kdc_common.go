@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-nm/v0.x/kdc"
-	"github.com/johanix/tdns/v0.x/tdns"
+	"github.com/johanix/tdns/v0.x"
 	"gopkg.in/yaml.v3"
 )
 

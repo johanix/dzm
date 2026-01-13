@@ -9,7 +9,7 @@ package kdc
 import (
 	"time"
 
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x/hpke"
 )
 
 // ZoneSigningMode represents how a zone is signed

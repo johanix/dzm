@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v0.x/tdns"
+	"github.com/johanix/tdns/v0.x"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

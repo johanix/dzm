@@ -11,7 +11,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/johanix/tdns/v0.x/tdns/hpke"
+	"github.com/johanix/tdns/v0.x/hpke"
 )
 
 // DecryptAndStoreKey decrypts encrypted key data and stores the key in the database
