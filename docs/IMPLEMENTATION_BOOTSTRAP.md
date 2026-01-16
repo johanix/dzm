@@ -41,8 +41,8 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - `MigrateNodesTableAddSig0Pubkey()`
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/kdc/db.go` - Add migration functions
-- `tdns-nm/v0.x/kdc/db_migrations.go` - Add bootstrap tokens migration
+- `tdns-nm/tnm/kdc/db.go` - Add migration functions
+- `tdns-nm/tnm/kdc/db_migrations.go` - Add bootstrap tokens migration
 
 **Testing**:
 - Verify table creation
@@ -71,8 +71,8 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - `GetKdcHpkePubKey()` - Get public key for bootstrap blob
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/kdc/config.go` - Add HPKE key config fields
-- `tdns-nm/v0.x/kdc/keygen.go` or new `hpke_keys.go` - KDC HPKE key management
+- `tdns-nm/tnm/kdc/config.go` - Add HPKE key config fields
+- `tdns-nm/tnm/kdc/keygen.go` or new `hpke_keys.go` - KDC HPKE key management
 
 **Testing**:
 - Generate KDC HPKE keypair
@@ -101,7 +101,7 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - Test with existing HPKE test infrastructure
 
 **Files to Create/Modify**:
-- `tdns/v0.x/tdns/hpke/hpke_wrapper.go` - Add `EncryptAuth()` and `DecryptAuth()`
+- `tdns/v2/tdns/hpke/hpke_wrapper.go` - Add `EncryptAuth()` and `DecryptAuth()`
 
 **Testing**:
 - Test Auth mode encryption/decryption
@@ -147,8 +147,8 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - Set `used = true`, `used_at = now`
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/kdc/db.go` - Add bootstrap token functions
-- `tdns-nm/v0.x/kdc/structs.go` - Add `BootstrapToken` struct
+- `tdns-nm/tnm/kdc/db.go` - Add bootstrap token functions
+- `tdns-nm/tnm/kdc/structs.go` - Add `BootstrapToken` struct
 
 **Testing**:
 - Test token generation
@@ -182,8 +182,8 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - Handle file write errors
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/cli/kdc_cmds.go` - Add bootstrap generate command
-- `tdns-nm/v0.x/kdc/bootstrap.go` - Add bootstrap blob generation logic (new file)
+- `tdns-nm/tnm/cli/kdc_cmds.go` - Add bootstrap generate command
+- `tdns-nm/tnm/kdc/bootstrap.go` - Add bootstrap blob generation logic (new file)
 
 **Testing**:
 - Generate bootstrap blob
@@ -211,7 +211,7 @@ This document outlines the step-by-step implementation plan for the node bootstr
 3. Add success/error messages
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/cli/kdc_cmds.go` - Add bootstrap activate command
+- `tdns-nm/tnm/cli/kdc_cmds.go` - Add bootstrap activate command
 
 **Testing**:
 - Activate bootstrap token
@@ -244,7 +244,7 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - Show detailed status for specific token
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/cli/kdc_cmds.go` - Add list, purge, status commands
+- `tdns-nm/tnm/cli/kdc_cmds.go` - Add list, purge, status commands
 
 **Testing**:
 - List tokens with various statuses
@@ -288,8 +288,8 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - Log errors
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/kdc/dns_handler.go` - Add bootstrap UPDATE handler
-- `tdns-nm/v0.x/kdc/bootstrap.go` - Add bootstrap processing logic
+- `tdns-nm/tnm/kdc/dns_handler.go` - Add bootstrap UPDATE handler
+- `tdns-nm/tnm/kdc/bootstrap.go` - Add bootstrap processing logic
 
 **Testing**:
 - Send bootstrap UPDATE
@@ -318,7 +318,7 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - `CreateBootstrapConfirmationOption()` function
 
 **Files to Create/Modify**:
-- `tdns/v0.x/tdns/edns0/edns0_chunk.go` - Add bootstrap confirmation content type
+- `tdns/v2/tdns/edns0/edns0_chunk.go` - Add bootstrap confirmation content type
 
 **Testing**:
 - Create bootstrap confirmation option
@@ -376,8 +376,8 @@ This document outlines the step-by-step implementation plan for the node bootstr
      - Key storage paths
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/cli/krs_cmds.go` - Add bootstrap command
-- `tdns-nm/v0.x/krs/bootstrap.go` - Add bootstrap client logic (new file)
+- `tdns-nm/tnm/cli/krs_cmds.go` - Add bootstrap command
+- `tdns-nm/tnm/krs/bootstrap.go` - Add bootstrap client logic (new file)
 
 **Testing**:
 - Parse bootstrap blob file
@@ -416,8 +416,8 @@ This document outlines the step-by-step implementation plan for the node bootstr
    - Concurrent bootstrap attempts
 
 **Files to Create/Modify**:
-- `tdns-nm/v0.x/kdc/bootstrap_test.go` - Integration tests
-- `tdns-nm/v0.x/krs/bootstrap_test.go` - Integration tests
+- `tdns-nm/tnm/kdc/bootstrap_test.go` - Integration tests
+- `tdns-nm/tnm/krs/bootstrap_test.go` - Integration tests
 
 **Testing**:
 - Run full bootstrap flow

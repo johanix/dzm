@@ -16,11 +16,11 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
-	//	"github.com/johanix/tdns-nm/v0.x"
-	tnm "github.com/johanix/tdns-nm/v0.x"
-	"github.com/johanix/tdns-nm/v0.x/kdc"
-	tdns "github.com/johanix/tdns/v0.x"
-	"github.com/johanix/tdns/v0.x/core"
+	//	"github.com/johanix/tdns-nm/tnm"
+	tnm "github.com/johanix/tdns-nm/tnm"
+	"github.com/johanix/tdns-nm/tnm/kdc"
+	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )

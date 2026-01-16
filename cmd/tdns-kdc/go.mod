@@ -1,22 +1,22 @@
 module github.com/johanix/tdns-nm/cmd/tdns-kdc
 
-go 1.24.0
+go 1.25.4
 
 replace (
-	github.com/johanix/tdns-nm/v0.x => ../../v0.x
-	github.com/johanix/tdns/v0.x => ../../../tdns/v0.x
-	github.com/johanix/tdns/v0.x/cache => ../../../tdns/v0.x/cache
-	github.com/johanix/tdns/v0.x/core => ../../../tdns/v0.x/core
-	github.com/johanix/tdns/v0.x/edns0 => ../../../tdns/v0.x/edns0
-	github.com/johanix/tdns/v0.x/hpke => ../../../tdns/v0.x/hpke
+	github.com/johanix/tdns-nm/tnm => ../../tnm
+	github.com/johanix/tdns/v2 => ../../../tdns/v2
+	github.com/johanix/tdns/v2/cache => ../../../tdns/v2/cache
+	github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
+	github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
+	github.com/johanix/tdns/v2/hpke => ../../../tdns/v2/hpke
 )
 
 require (
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-nm/v0.x v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v0.x v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v0.x/core v0.0.0-20251215204415-08e1f7d4ef39
-	github.com/miekg/dns v1.1.68
+	github.com/johanix/tdns-nm/tnm v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
+	github.com/miekg/dns v1.1.70
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -32,8 +32,9 @@ require (
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns/v0.x/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/v0.x/edns0 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v2/hpke v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
@@ -51,12 +52,12 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
-	golang.org/x/mod v0.30.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/mod v0.31.0 // indirect
+	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
-	golang.org/x/tools v0.39.0 // indirect
+	golang.org/x/tools v0.40.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 )

@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	tnm "github.com/johanix/tdns-nm/v0.x"
-	"github.com/johanix/tdns-nm/v0.x/krs"
-	tdns "github.com/johanix/tdns/v0.x"
-	"github.com/johanix/tdns/v0.x/hpke"
+	tnm "github.com/johanix/tdns-nm/tnm"
+	"github.com/johanix/tdns-nm/tnm/krs"
+	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/hpke"
 	"gopkg.in/yaml.v3"
 )
 
