@@ -148,6 +148,11 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	}
 	conf.Internal.KdcDB = kdcDB
 
+	// Initialize catalog zone if configured (auto-generate on startup)
+	if err := kdc.InitializeCatalogZone(ctx, kdcDB, &kdcConf); err != nil {
+		return fmt.Errorf("failed to initialize catalog zone: %v", err)
+	}
+
 	// Register KDC API routes directly on the router
 	// Pass conf as map to avoid circular import, and pass ping handler
 	confMap := map[string]interface{}{
