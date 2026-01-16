@@ -14,8 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/johanix/tdns-nm/v0.x/cli"
-	"github.com/johanix/tdns/v0.x"
+	"github.com/johanix/tdns-nm/tnm/cli"
+	"github.com/johanix/tdns/v2"
 )
 
 var cfgFile, cfgFileUsed string
