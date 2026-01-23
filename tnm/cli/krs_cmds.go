@@ -918,7 +918,7 @@ func init() {
 	krsDebugHpkeDecryptCmd.MarkFlagRequired("encrypted-file")
 	krsDebugHpkeDecryptCmd.MarkFlagRequired("private-key-file")
 
-	// Bootstrap command flags
+	// Enrollment command flags
 	KrsEnrollCmd.Flags().String("package", "", "Path to enrollment blob file (required)")
 	KrsEnrollCmd.MarkFlagRequired("package")
 	KrsEnrollCmd.Flags().String("configdir", "", "Config directory (default: /etc/tdns)")

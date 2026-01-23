@@ -156,7 +156,7 @@ var kdcNodeListCmd = &cobra.Command{
 			}
 			
 			// Build table rows for columnize
-			lines := []string{"ID | Name | Notify Address | State | Last Contact | Comment"}
+			lines := []string{"ID | Name | Notify Address | State | Crypto | Last Contact | Comment"}
 			for _, n := range nodes {
 				if node, ok := n.(map[string]interface{}); ok {
 					id := fmt.Sprintf("%v", node["id"])
@@ -177,7 +177,23 @@ var kdcNodeListCmd = &cobra.Command{
 							lastContact = lcStr
 						}
 					}
-					lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s | %s", id, name, notifyAddr, state, lastContact, comment))
+					// Extract supported_crypto
+					supportedCrypto := ""
+					if crypto, ok := node["supported_crypto"]; ok && crypto != nil {
+						if cryptoList, ok := crypto.([]interface{}); ok {
+							var cryptoStrs []string
+							for _, c := range cryptoList {
+								cryptoStrs = append(cryptoStrs, fmt.Sprintf("%v", c))
+							}
+							supportedCrypto = strings.Join(cryptoStrs, ",")
+						} else {
+							supportedCrypto = fmt.Sprintf("%v", crypto)
+						}
+					}
+					if supportedCrypto == "" {
+						supportedCrypto = "(none)"
+					}
+					lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s", id, name, notifyAddr, state, supportedCrypto, lastContact, comment))
 				}
 			}
 			
@@ -605,6 +621,12 @@ The output directory must exist.`,
 		}
 		
 		comment, _ := cmd.Flags().GetString("comment")
+		cryptoBackend, _ := cmd.Flags().GetString("crypto")
+		
+		// Validate crypto backend if provided
+		if cryptoBackend != "" && cryptoBackend != "hpke" && cryptoBackend != "jose" {
+			log.Fatalf("Error: --crypto must be either 'hpke' or 'jose' (got: %s)", cryptoBackend)
+		}
 		
 		// Call API (with fallback to DB)
 		// Note: outdir is not sent to API - CLI writes the file locally
@@ -614,6 +636,9 @@ The output directory must exist.`,
 		}
 		if comment != "" {
 			req["comment"] = comment
+		}
+		if cryptoBackend != "" {
+			req["crypto"] = cryptoBackend
 		}
 		
 		resp, err := callEnrollAPI("generate", req)
@@ -631,9 +656,9 @@ The output directory must exist.`,
 			log.Fatalf("Error: No token in response")
 		}
 		
-		// Convert token to BootstrapToken struct
+		// Convert token to EnrollmentToken struct
 		tokenJSON, _ := json.Marshal(tokenRaw)
-		var token kdc.BootstrapToken
+		var token kdc.EnrollmentToken
 		if err := json.Unmarshal(tokenJSON, &token); err != nil {
 			log.Fatalf("Error parsing token: %v", err)
 		}
@@ -755,11 +780,11 @@ var kdcNodeEnrollListCmd = &cobra.Command{
 			return
 		}
 		
-		// Convert to BootstrapToken structs
-		var tokens []*kdc.BootstrapToken
+		// Convert to EnrollmentToken structs
+		var tokens []*kdc.EnrollmentToken
 		for _, tokenRaw := range tokensArray {
 			tokenJSON, _ := json.Marshal(tokenRaw)
-			var token kdc.BootstrapToken
+			var token kdc.EnrollmentToken
 			if err := json.Unmarshal(tokenJSON, &token); err == nil {
 				tokens = append(tokens, &token)
 			}
@@ -895,15 +920,15 @@ var kdcNodeEnrollStatusCmd = &cobra.Command{
 			return
 		}
 		
-		// Convert token to BootstrapToken struct
+		// Convert token to EnrollmentToken struct
 		tokenJSON, _ := json.Marshal(tokenRaw)
-		var token kdc.BootstrapToken
+		var token kdc.EnrollmentToken
 		if err := json.Unmarshal(tokenJSON, &token); err != nil {
 			log.Fatalf("Error parsing token: %v", err)
 		}
 		
 		// Display detailed status
-		fmt.Printf("Bootstrap Token Status for Node: %s\n", nodeID)
+		fmt.Printf("Enrollment Token Status for Node: %s\n", nodeID)
 		fmt.Printf("  Status: %s\n", status)
 		fmt.Printf("  Token ID: %s\n", token.TokenID)
 		fmt.Printf("  Created: %s\n", token.CreatedAt.Format(time.RFC3339))
@@ -962,6 +987,15 @@ Either --nodeid or --all must be specified.`,
 			nodeID := dns.Fqdn(nodeIDFlag)
 			req["node_id"] = nodeID
 		}
+		
+		// Add crypto flag if specified
+		cryptoBackend, _ := cmd.Flags().GetString("crypto")
+		if cryptoBackend != "" {
+			if cryptoBackend != "hpke" && cryptoBackend != "jose" {
+				log.Fatalf("Error: --crypto must be either 'hpke' or 'jose' (got: %s)", cryptoBackend)
+			}
+			req["crypto"] = cryptoBackend
+		}
 
 		resp, err := sendKdcRequest(api, "/kdc/operations", req)
 		if err != nil {
@@ -1015,6 +1049,7 @@ func init() {
 	kdcNodeEnrollGenerateCmd.Flags().String("outdir", "", "Output directory (must exist)")
 	kdcNodeEnrollGenerateCmd.MarkFlagRequired("outdir")
 	kdcNodeEnrollGenerateCmd.Flags().String("comment", "", "Optional comment")
+	kdcNodeEnrollGenerateCmd.Flags().String("crypto", "", "Crypto backend to use (hpke or jose). If not specified, both are included.")
 	
 	kdcNodeEnrollActivateCmd.Flags().String("nodeid", "", "Node ID")
 	kdcNodeEnrollActivateCmd.MarkFlagRequired("nodeid")
@@ -1027,4 +1062,5 @@ func init() {
 
 	kdcNodePingCmd.Flags().String("nodeid", "", "Node ID to ping")
 	kdcNodePingCmd.Flags().Bool("all", false, "Ping all active nodes")
+	kdcNodePingCmd.Flags().String("crypto", "", "Force crypto backend (hpke or jose). If not specified, uses any backend the node supports.")
 }

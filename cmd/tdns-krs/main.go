@@ -107,7 +107,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	conf.Internal.KrsDB = krsDB
 
 	// Load node configuration (long-term HPKE private key)
-	privKeyData, err := os.ReadFile(krsConf.Node.LongTermPrivKey)
+	privKeyData, err := os.ReadFile(krsConf.Node.LongTermHpkePrivKey)
 	if err != nil {
 		return fmt.Errorf("failed to read long-term private key: %v", err)
 	}

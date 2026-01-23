@@ -58,8 +58,8 @@ func init() {
 	cli.SetClientKey("tdns-kdc")
 
 	// Add all KDC commands directly to root (no "kdc" prefix needed)
-	rootCmd.AddCommand(cli.KdcZoneCmd, cli.KdcNodeCmd, cli.KdcConfigCmd, cli.KdcDebugCmd, 
-		cli.KdcDistribCmd, cli.KdcServiceCmd, cli.KdcComponentCmd, cli.KdcHpkeCmd, cli.PingCmd, cli.DaemonCmd)
+	rootCmd.AddCommand(cli.KdcZoneCmd, cli.KdcNodeCmd, cli.KdcConfigCmd, cli.KdcDebugCmd,
+		cli.KdcDistribCmd, cli.KdcServiceCmd, cli.KdcComponentCmd, cli.KdcKeysCmd, cli.PingCmd, cli.DaemonCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.

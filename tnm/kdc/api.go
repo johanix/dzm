@@ -42,6 +42,7 @@ type KdcZonePost struct {
 	NewState      string   `json:"new_state,omitempty"`      // For setstate: target state
 	Zones         []string `json:"zones,omitempty"`           // For distrib-multi: list of zone names
 	Force         bool     `json:"force,omitempty"`          // For purge-keys: also delete distributed keys
+	Crypto        string   `json:"crypto,omitempty"`         // For distrib-multi and ping: force crypto backend ("hpke" or "jose")
 }
 
 // DistributionResult represents the result of distributing a key for a zone
@@ -1078,9 +1079,11 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				}
 				
 				// Encrypt keys for all nodes (each node gets all keys from all zones in this distribution)
+				// Use forced crypto if specified
+				forcedCrypto := req.Crypto
 				for _, node := range allNodes {
 					if zoneInfo.StandbyZSK != nil {
-						_, _, _, err := kdcDB.EncryptKeyForNode(zoneInfo.StandbyZSK, node, kdcConf, sharedDistributionID)
+						_, _, _, err := kdcDB.EncryptKeyForNodeWithCrypto(zoneInfo.StandbyZSK, node, kdcConf, forcedCrypto, sharedDistributionID)
 						if err != nil {
 							log.Printf("KDC: Warning: Failed to encrypt ZSK %s for node %s: %v", zoneInfo.StandbyZSK.ID, node.ID, err)
 							continue
@@ -1089,7 +1092,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					}
 					
 					if zoneInfo.ActiveKSK != nil {
-						_, _, _, err := kdcDB.EncryptKeyForNode(zoneInfo.ActiveKSK, node, kdcConf, sharedDistributionID)
+						_, _, _, err := kdcDB.EncryptKeyForNodeWithCrypto(zoneInfo.ActiveKSK, node, kdcConf, forcedCrypto, sharedDistributionID)
 						if err != nil {
 							log.Printf("KDC: Warning: Failed to encrypt KSK %s for node %s: %v", zoneInfo.ActiveKSK.ID, node.ID, err)
 							continue
@@ -1278,27 +1281,27 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 	}
 }
 
-// KdcBootstrapPost represents a request to the KDC bootstrap API
-type KdcBootstrapPost struct {
+// KdcEnrollmentPost represents a request to the KDC enrollment API
+type KdcEnrollmentPost struct {
 	Command          string        `json:"command"`           // "generate", "activate", "list", "status", "purge", "mark-used"
 	NodeID           string        `json:"node_id,omitempty"` // For generate, activate, status commands
 	TokenValue       string        `json:"token_value,omitempty"` // For mark-used command
 	ExpirationWindow string        `json:"expiration_window,omitempty"` // For activate command (e.g., "5m", "1h")
 	Comment          string        `json:"comment,omitempty"` // For generate command
-	OutDir           string        `json:"outdir,omitempty"` // Deprecated: CLI writes the file, not the API
+	Crypto           string        `json:"crypto,omitempty"` // For generate command: "hpke" or "jose" to include only that backend's public key
 	DeleteFiles      bool          `json:"delete_files,omitempty"` // For purge command
 }
 
-// KdcBootstrapResponse represents a response from the KDC bootstrap API
-type KdcBootstrapResponse struct {
+// KdcEnrollmentResponse represents a response from the KDC enrollment API
+type KdcEnrollmentResponse struct {
 	Time        time.Time        `json:"time"`
 	Error       bool             `json:"error,omitempty"`
 	ErrorMsg    string           `json:"error_msg,omitempty"`
 	Msg         string           `json:"msg,omitempty"`
-	Token       *BootstrapToken  `json:"token,omitempty"`
-	Tokens      []*BootstrapToken `json:"tokens,omitempty"`
+	Token       *EnrollmentToken  `json:"token,omitempty"`
+	Tokens      []*EnrollmentToken `json:"tokens,omitempty"`
 	Status      string           `json:"status,omitempty"`
-	BlobPath    string           `json:"blob_path,omitempty"`    // For generate command (deprecated - use blob_content)
+	// BlobPath    string           `json:"blob_path,omitempty"`    // For generate command (deprecated - use blob_content)
 	BlobContent string           `json:"blob_content,omitempty"` // For generate command: base64-encoded blob content
 	Count       int              `json:"count,omitempty"`        // For purge command
 }
@@ -1316,20 +1319,20 @@ type KdcConfigResponse struct {
 	Config   map[string]interface{} `json:"config,omitempty"`
 }
 
-// APIKdcBootstrap handles bootstrap token management endpoints
-func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
+// APIKdcEnrollment handles enrollment token management endpoints
+func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tdns.Globals.Debug {
-			log.Printf("KDC: DEBUG: APIKdcBootstrap handler called")
+			log.Printf("KDC: DEBUG: APIKdcEnrollment handler called")
 		}
-		var req KdcBootstrapPost
+		var req KdcEnrollmentPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
 			return
 		}
 
-		resp := KdcBootstrapResponse{
+		resp := KdcEnrollmentResponse{
 			Time: time.Now(),
 		}
 
@@ -1346,40 +1349,45 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				// Node exists - check if it's in an active state
 				if existingNode.State == NodeStateOnline {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Node %s already exists and is online. Cannot generate bootstrap blob for an active node. Delete the node first (kdc-cli node delete --nodeid %s) or set it to a non-active state (suspended/offline) before re-bootstrapping.", req.NodeID, req.NodeID)
+					resp.ErrorMsg = fmt.Sprintf("Node %s already exists and is online. Cannot generate enrollment package for an active node. Delete the node first (kdc-cli node delete --nodeid %s) or set it to a non-active state (suspended/offline) before re-enrolling.", req.NodeID, req.NodeID)
 					break
 				}
-				// Node exists but is not online (offline, suspended, compromised) - allow re-bootstrap
-				// This is intentional - nodes in these states may need to re-bootstrap
+				// Node exists but is not online (offline, suspended, compromised) - allow re-enrollment
+				// This is intentional - nodes in these states may need to re-enroll
 			}
 			// If node doesn't exist (err != nil), that's fine - it's a new node
 			
 			// Check if token already exists
-			status, err := kdcDB.GetBootstrapTokenStatus(req.NodeID)
+			status, err := kdcDB.GetEnrollmentTokenStatus(req.NodeID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else if status != "not_found" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Bootstrap token already exists for node %s (status: %s)", req.NodeID, status)
+				resp.ErrorMsg = fmt.Sprintf("Enrollment token already exists for node %s (status: %s)", req.NodeID, status)
 			} else {
 				// Generate token
-				token, err := kdcDB.GenerateBootstrapToken(req.NodeID)
+				token, err := kdcDB.GenerateEnrollmentToken(req.NodeID)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				} else {
 					resp.Token = token
-					resp.Msg = fmt.Sprintf("Bootstrap token generated for node: %s", req.NodeID)
+					resp.Msg = fmt.Sprintf("Enrollment token generated for node: %s", req.NodeID)
 					
-					// Generate bootstrap blob content (CLI will write the file)
-					blobContent, err := GenerateBootstrapBlobContent(req.NodeID, token, kdcConf)
+					// Generate enrollment blob content (CLI will write the file)
+					// Get crypto backend from request (optional, defaults to both if empty)
+					cryptoBackend := ""
+					if req.Crypto != "" {
+						cryptoBackend = req.Crypto
+					}
+					blobContent, err := GenerateEnrollmentBlobContent(req.NodeID, token, kdcConf, cryptoBackend)
 					if err != nil {
 						// Set error in response - blob generation is required
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 						// Token was already created, but blob generation failed
-						// This is a critical error since the blob is required for bootstrap
+						// This is a critical error since the blob is required for enrollment
 					} else {
 						resp.BlobContent = blobContent
 					}
@@ -1392,7 +1400,7 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				return
 			}
 			
-			expirationWindow := kdcConf.GetBootstrapExpirationWindow()
+			expirationWindow := kdcConf.GetEnrollmentExpirationWindow()
 			if req.ExpirationWindow != "" {
 				var err error
 				expirationWindow, err = time.ParseDuration(req.ExpirationWindow)
@@ -1404,37 +1412,37 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			}
 			
 			// Check token status
-			status, err := kdcDB.GetBootstrapTokenStatus(req.NodeID)
+			status, err := kdcDB.GetEnrollmentTokenStatus(req.NodeID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else if status == "not_found" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("No bootstrap token found for node %s", req.NodeID)
+				resp.ErrorMsg = fmt.Sprintf("No enrollment token found for node %s", req.NodeID)
 			} else if status == "active" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Bootstrap token for node %s is already activated", req.NodeID)
+				resp.ErrorMsg = fmt.Sprintf("Enrollment token for node %s is already activated", req.NodeID)
 			} else if status == "completed" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Bootstrap token for node %s has already been used", req.NodeID)
+				resp.ErrorMsg = fmt.Sprintf("Enrollment token for node %s has already been used", req.NodeID)
 			} else {
-				err := kdcDB.ActivateBootstrapToken(req.NodeID, expirationWindow)
+				err := kdcDB.ActivateEnrollmentToken(req.NodeID, expirationWindow)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				} else {
-					resp.Msg = fmt.Sprintf("Bootstrap token activated for node: %s", req.NodeID)
+					resp.Msg = fmt.Sprintf("Enrollment token activated for node: %s", req.NodeID)
 				}
 			}
 
 		case "list":
-			tokens, err := kdcDB.ListBootstrapTokens()
+			tokens, err := kdcDB.ListEnrollmentTokens()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Tokens = tokens
-				resp.Msg = fmt.Sprintf("Found %d bootstrap token(s)", len(tokens))
+				resp.Msg = fmt.Sprintf("Found %d enrollment token(s)", len(tokens))
 			}
 
 		case "status":
@@ -1443,7 +1451,7 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				return
 			}
 			
-			status, err := kdcDB.GetBootstrapTokenStatus(req.NodeID)
+			status, err := kdcDB.GetEnrollmentTokenStatus(req.NodeID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -1451,7 +1459,7 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				resp.Status = status
 				if status != "not_found" {
 					// Get token details
-					tokens, err := kdcDB.ListBootstrapTokens()
+					tokens, err := kdcDB.ListEnrollmentTokens()
 					if err == nil {
 						for _, t := range tokens {
 							if t.NodeID == req.NodeID {
@@ -1464,22 +1472,22 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			}
 
 		case "purge":
-			count, err := kdcDB.PurgeBootstrapTokens()
+			count, err := kdcDB.PurgeEnrollmentTokens()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Count = count
-				resp.Msg = fmt.Sprintf("Purged %d bootstrap token(s)", count)
+				resp.Msg = fmt.Sprintf("Purged %d enrollment token(s)", count)
 				
 				// Optionally delete blob files
 				if req.DeleteFiles && count > 0 {
-					tokens, _ := kdcDB.ListBootstrapTokens()
+					tokens, _ := kdcDB.ListEnrollmentTokens()
 					deletedFiles := 0
 					for _, token := range tokens {
-						status, _ := kdcDB.GetBootstrapTokenStatus(token.NodeID)
+						status, _ := kdcDB.GetEnrollmentTokenStatus(token.NodeID)
 						if status == "expired" || status == "completed" {
-							blobFile := fmt.Sprintf("%s.bootstrap", token.NodeID)
+							blobFile := fmt.Sprintf("%s.enroll", token.NodeID)
 							if err := os.Remove(blobFile); err == nil {
 								deletedFiles++
 							}
@@ -1497,12 +1505,12 @@ func APIKdcBootstrap(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				return
 			}
 			
-			err := kdcDB.MarkBootstrapTokenUsed(req.TokenValue)
+			err := kdcDB.MarkEnrollmentTokenUsed(req.TokenValue)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
-				resp.Msg = fmt.Sprintf("Bootstrap token marked as used")
+				resp.Msg = fmt.Sprintf("Enrollment token marked as used")
 			}
 
 		default:
@@ -1828,10 +1836,16 @@ func APIKdcOperations(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				break
 			}
 
+			// Extract forced crypto if specified
+			forcedCrypto := ""
+			if crypto, ok := req["crypto"].(string); ok && crypto != "" {
+				forcedCrypto = crypto
+			}
+			
 			// Create ping operations for each node
 			var distributionIDs []string
 			for _, nodeID := range nodeIDs {
-				distID, err := kdcDB.CreatePingOperation(nodeID, kdcConf)
+				distID, err := kdcDB.CreatePingOperation(nodeID, kdcConf, forcedCrypto)
 				if err != nil {
 					log.Printf("KDC API: Failed to create ping operation for node %s: %v", nodeID, err)
 					continue
@@ -3018,7 +3032,7 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 		router.Path("/api/v1/kdc/service-component").Headers("X-API-Key", apikey).HandlerFunc(APIKdcServiceComponent(kdcDB)).Methods("POST")
 		router.Path("/api/v1/kdc/node-component").Headers("X-API-Key", apikey).HandlerFunc(APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
 		if kdcConf != nil {
-			router.Path("/api/v1/kdc/bootstrap").Headers("X-API-Key", apikey).HandlerFunc(APIKdcBootstrap(kdcDB, kdcConf)).Methods("POST")
+			router.Path("/api/v1/kdc/enroll").Headers("X-API-Key", apikey).HandlerFunc(APIKdcEnrollment(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/service-transaction").Headers("X-API-Key", apikey).HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/config").Headers("X-API-Key", apikey).HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
 			router.Path("/api/v1/kdc/debug").Headers("X-API-Key", apikey).HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
@@ -3033,7 +3047,7 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 		router.Path("/api/v1/kdc/service-component").HandlerFunc(APIKdcServiceComponent(kdcDB)).Methods("POST")
 		router.Path("/api/v1/kdc/node-component").HandlerFunc(APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
 		if kdcConf != nil {
-			router.Path("/api/v1/kdc/bootstrap").HandlerFunc(APIKdcBootstrap(kdcDB, kdcConf)).Methods("POST")
+			router.Path("/api/v1/kdc/enroll").HandlerFunc(APIKdcEnrollment(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/service-transaction").HandlerFunc(APIKdcServiceTransaction(kdcDB, kdcConf)).Methods("POST")
 			router.Path("/api/v1/kdc/config").HandlerFunc(APIKdcConfig(kdcConf, conf)).Methods("POST")
 			router.Path("/api/v1/kdc/debug").HandlerFunc(APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
@@ -3050,6 +3064,6 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 		}
 	}
 	
-	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/bootstrap, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug, /api/v1/kdc/catalog, /api/v1/kdc/operations")
+	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/enroll, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug, /api/v1/kdc/catalog, /api/v1/kdc/operations")
 }
 

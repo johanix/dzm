@@ -240,7 +240,7 @@ func callEnrollAPI(command string, reqData map[string]interface{}) (map[string]i
 		if tdns.Globals.Debug {
 			fmt.Fprintf(os.Stderr, "Attempting enrollment API call: %s\n", command)
 		}
-		resp, err := sendKdcRequest(api, "/kdc/bootstrap", reqData)
+		resp, err := sendKdcRequest(api, "/kdc/enroll", reqData)
 		if err == nil {
 			if tdns.Globals.Debug {
 				fmt.Fprintf(os.Stderr, "Enrollment API call successful\n")
@@ -312,7 +312,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 		// If node doesn't exist (err != nil), that's fine - it's a new node
 		
 		// Check if token already exists
-		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		status, err := kdcDB.GetEnrollmentTokenStatus(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -325,7 +325,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 		}
 		
 		// Generate token
-		token, err := kdcDB.GenerateBootstrapToken(nodeID)
+		token, err := kdcDB.GenerateEnrollmentToken(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -343,7 +343,10 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			return result, nil
 		}
 		
-		blobContent, err := kdc.GenerateBootstrapBlobContent(nodeID, token, kdcConf)
+		// Get crypto backend from request (optional)
+		cryptoBackend, _ := reqData["crypto"].(string)
+		
+		blobContent, err := kdc.GenerateEnrollmentBlobContent(nodeID, token, kdcConf, cryptoBackend)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -373,7 +376,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 		}
 		
 		// Check token status
-		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		status, err := kdcDB.GetEnrollmentTokenStatus(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -395,7 +398,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			return result, nil
 		}
 		
-		err = kdcDB.ActivateBootstrapToken(nodeID, expirationWindow)
+		err = kdcDB.ActivateEnrollmentToken(nodeID, expirationWindow)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -405,14 +408,14 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 		result["msg"] = fmt.Sprintf("Enrollment token activated for node: %s", nodeID)
 		
 	case "list":
-		tokens, err := kdcDB.ListBootstrapTokens()
+		tokens, err := kdcDB.ListEnrollmentTokens()
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
 			return result, nil
 		}
 		result["tokens"] = tokens
-		result["msg"] = fmt.Sprintf("Found %d bootstrap token(s)", len(tokens))
+		result["msg"] = fmt.Sprintf("Found %d enrollment token(s)", len(tokens))
 		
 	case "status":
 		nodeID, _ := reqData["node_id"].(string)
@@ -422,7 +425,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			return result, nil
 		}
 		
-		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		status, err := kdcDB.GetEnrollmentTokenStatus(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -431,7 +434,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 		
 		result["status"] = status
 		if status != "not_found" {
-			tokens, err := kdcDB.ListBootstrapTokens()
+			tokens, err := kdcDB.ListEnrollmentTokens()
 			if err == nil {
 				for _, t := range tokens {
 					if t.NodeID == nodeID {
@@ -444,7 +447,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 		
 	case "purge":
 		deleteFiles, _ := reqData["delete_files"].(bool)
-		count, err := kdcDB.PurgeBootstrapTokens()
+		count, err := kdcDB.PurgeEnrollmentTokens()
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -452,13 +455,13 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 		}
 		
 		result["count"] = count
-		result["msg"] = fmt.Sprintf("Purged %d bootstrap token(s)", count)
+		result["msg"] = fmt.Sprintf("Purged %d enrollment token(s)", count)
 		
 		if deleteFiles && count > 0 {
-			tokens, _ := kdcDB.ListBootstrapTokens()
+			tokens, _ := kdcDB.ListEnrollmentTokens()
 			deletedFiles := 0
 			for _, token := range tokens {
-				status, _ := kdcDB.GetBootstrapTokenStatus(token.NodeID)
+				status, _ := kdcDB.GetEnrollmentTokenStatus(token.NodeID)
 				if status == "expired" || status == "completed" {
 					blobFile := fmt.Sprintf("%s.enroll", token.NodeID)
 					if err := os.Remove(blobFile); err == nil {

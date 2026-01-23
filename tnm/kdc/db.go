@@ -20,6 +20,8 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // MariaDB driver
 	tnm "github.com/johanix/tdns-nm/tnm"
+	"github.com/johanix/tdns/v2/crypto"
+	_ "github.com/johanix/tdns/v2/crypto/jose" // Auto-register JOSE backend
 	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
 )
@@ -147,6 +149,8 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			id VARCHAR(255) PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
 			long_term_pub_key BLOB NOT NULL,
+			long_term_jose_pub_key BLOB,
+			supported_crypto JSON,
 			notify_address VARCHAR(255),
 			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -311,22 +315,32 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
 	}
 
+	// Migrate: Add supported_crypto column to nodes table
+	if err := kdc.migrateAddSupportedCryptoToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate supported_crypto column: %v", err)
+	}
+
+	// Migrate: Add long_term_jose_pub_key column to nodes table
+	if err := kdc.migrateAddJosePubKeyToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate long_term_jose_pub_key column: %v", err)
+	}
+
 	// Migrate: Add operation and payload columns to distribution_records
 	if err := kdc.migrateAddOperationAndPayload(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate operation and payload columns: %v", err)
 	}
 
-	// Migrate: Create bootstrap_tokens table
+	// Migrate: Create bootstrap_tokens table (note: table name kept for backward compatibility)
 	// This is critical - if it fails, log as error and return error (don't just warn)
-	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
+	if err := kdc.MigrateEnrollmentTokensTable(); err != nil {
 		log.Printf("KDC: ERROR: Failed to migrate bootstrap_tokens table: %v", err)
 		// Don't return error here - allow daemon to start, but log the error clearly
 		// The table will be created on next startup attempt
 	}
 	
 	// Migrate: Remove FK constraint from bootstrap_tokens if it exists
-	// Bootstrap tokens are created BEFORE nodes exist, so FK constraint is wrong
-	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+	// Enrollment tokens are created BEFORE nodes exist, so FK constraint is wrong
+	if err := kdc.migrateRemoveEnrollmentTokensFK(); err != nil {
 		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
 	}
 	
@@ -407,6 +421,8 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
 			long_term_pub_key BLOB NOT NULL UNIQUE,
+			long_term_jose_pub_key BLOB,
+			supported_crypto TEXT,
 			notify_address TEXT,
 			registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -588,22 +604,32 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
 	}
 
+	// Migrate: Add supported_crypto column to nodes table
+	if err := kdc.migrateAddSupportedCryptoToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate supported_crypto column: %v", err)
+	}
+
+	// Migrate: Add long_term_jose_pub_key column to nodes table
+	if err := kdc.migrateAddJosePubKeyToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate long_term_jose_pub_key column: %v", err)
+	}
+
 	// Migrate: Add operation and payload columns to distribution_records
 	if err := kdc.migrateAddOperationAndPayload(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate operation and payload columns: %v", err)
 	}
 
-	// Migrate: Create bootstrap_tokens table
+	// Migrate: Create bootstrap_tokens table (note: table name kept for backward compatibility)
 	// This is critical - if it fails, log as error (don't just warn)
-	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
+	if err := kdc.MigrateEnrollmentTokensTable(); err != nil {
 		log.Printf("KDC: ERROR: Failed to migrate bootstrap_tokens table: %v", err)
 		// Don't return error here - allow daemon to start, but log the error clearly
 		// The table will be created on next startup attempt
 	}
 	
 	// Migrate: Remove FK constraint from bootstrap_tokens if it exists
-	// Bootstrap tokens are created BEFORE nodes exist, so FK constraint is wrong
-	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+	// Enrollment tokens are created BEFORE nodes exist, so FK constraint is wrong
+	if err := kdc.migrateRemoveEnrollmentTokensFK(); err != nil {
 		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
 	}
 	
@@ -1281,22 +1307,28 @@ func (kdc *KdcDB) DeleteZone(zoneName string) error {
 func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 	// Normalize to FQDN
 	nodeIDFQDN := dns.Fqdn(nodeID)
-	
+
 	var n Node
 	var notifyAddr sql.NullString
+	var supportedCryptoJSON sql.NullString
+	var josePubKey []byte
 	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+		"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 		nodeIDFQDN,
-	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Try without trailing dot (for legacy data)
 			if strings.HasSuffix(nodeIDFQDN, ".") {
 				nodeIDNoDot := strings.TrimSuffix(nodeIDFQDN, ".")
+				var josePubKey2 []byte
 				err2 := kdc.DB.QueryRow(
-					"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+					"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 					nodeIDNoDot,
-				).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+				).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey2, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+				if err2 == nil {
+					josePubKey = josePubKey2
+				}
 				if err2 != nil {
 					if err2 == sql.ErrNoRows {
 						return nil, fmt.Errorf("node not found: %s (tried both FQDN and non-FQDN formats)", nodeID)
@@ -1313,12 +1345,22 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 	if notifyAddr.Valid {
 		n.NotifyAddress = notifyAddr.String
 	}
+		if len(josePubKey) > 0 {
+			n.LongTermJosePubKey = josePubKey
+		}
+	// Deserialize supported_crypto JSON array
+	if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+		if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+			// Log error but don't fail - just leave it empty
+			log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+		}
+	}
 	return &n, nil
 }
 
 // GetAllNodes retrieves all nodes
 func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
-	rows, err := kdc.DB.Query("SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
+	rows, err := kdc.DB.Query("SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query nodes: %v", err)
 	}
@@ -1328,11 +1370,22 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 	for rows.Next() {
 		var n Node
 		var notifyAddr sql.NullString
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		var supportedCryptoJSON sql.NullString
+		var josePubKey []byte
+		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
 			n.NotifyAddress = notifyAddr.String
+		}
+		if len(josePubKey) > 0 {
+			n.LongTermJosePubKey = josePubKey
+		}
+		// Deserialize supported_crypto JSON array
+		if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+			if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+				log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+			}
 		}
 
 		// Get latest confirmation timestamp for this node
@@ -1351,7 +1404,7 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 // GetActiveNodes retrieves all active (online) nodes
 func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 	rows, err := kdc.DB.Query(
-		"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
+		"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query active nodes: %v", err)
@@ -1362,11 +1415,22 @@ func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 	for rows.Next() {
 		var n Node
 		var notifyAddr sql.NullString
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		var supportedCryptoJSON sql.NullString
+		var josePubKey []byte
+		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
 			n.NotifyAddress = notifyAddr.String
+		}
+		if len(josePubKey) > 0 {
+			n.LongTermJosePubKey = josePubKey
+		}
+		// Deserialize supported_crypto JSON array
+		if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+			if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+				log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+			}
 		}
 		nodes = append(nodes, &n)
 	}
@@ -1377,10 +1441,12 @@ func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 	var n Node
 	var notifyAddr sql.NullString
+	var supportedCryptoJSON sql.NullString
+	var josePubKey []byte
 	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_pub_key = ?",
+		"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_pub_key = ?",
 		pubKey,
-	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // No node found with this public key
@@ -1389,6 +1455,15 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 	}
 	if notifyAddr.Valid {
 		n.NotifyAddress = notifyAddr.String
+	}
+	if len(josePubKey) > 0 {
+		n.LongTermJosePubKey = josePubKey
+	}
+	// Deserialize supported_crypto JSON array
+	if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+		if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+			log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+		}
 	}
 	return &n, nil
 }
@@ -1404,9 +1479,18 @@ func (kdc *KdcDB) AddNode(node *Node) error {
 		return fmt.Errorf("a node with this public key already exists: %s (id: %s)", existingNode.Name, existingNode.ID)
 	}
 
+	// Serialize supported_crypto to JSON
+	var supportedCryptoJSON []byte
+	if len(node.SupportedCrypto) > 0 {
+		supportedCryptoJSON, err = json.Marshal(node.SupportedCrypto)
+		if err != nil {
+			return fmt.Errorf("failed to marshal supported_crypto: %v", err)
+		}
+	}
+
 	_, err = kdc.DB.Exec(
-		"INSERT INTO nodes (id, name, long_term_pub_key, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		node.ID, node.Name, node.LongTermPubKey, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
+		"INSERT INTO nodes (id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		node.ID, node.Name, node.LongTermPubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
 	)
 	if err != nil {
 		// Check for unique constraint violation (in case the constraint wasn't in the schema)
@@ -1420,9 +1504,19 @@ func (kdc *KdcDB) AddNode(node *Node) error {
 
 // UpdateNode updates an existing node
 func (kdc *KdcDB) UpdateNode(node *Node) error {
-	_, err := kdc.DB.Exec(
-		"UPDATE nodes SET name = ?, long_term_pub_key = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
-		node.Name, node.LongTermPubKey, node.NotifyAddress, node.State, node.Comment, node.ID,
+	// Serialize supported_crypto to JSON
+	var supportedCryptoJSON []byte
+	var err error
+	if len(node.SupportedCrypto) > 0 {
+		supportedCryptoJSON, err = json.Marshal(node.SupportedCrypto)
+		if err != nil {
+			return fmt.Errorf("failed to marshal supported_crypto: %v", err)
+		}
+	}
+
+	_, err = kdc.DB.Exec(
+		"UPDATE nodes SET name = ?, long_term_pub_key = ?, long_term_jose_pub_key = ?, supported_crypto = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
+		node.Name, node.LongTermPubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.NotifyAddress, node.State, node.Comment, node.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update node: %v", err)
@@ -2297,7 +2391,8 @@ func (kdc *KdcDB) CreateDistributionIDForKeys(zoneName string, keyIDs []string) 
 // CreatePingOperation creates a ping operation for a specific node
 // Returns the distribution ID
 // The ping operation is not encrypted - it includes a nonce in the payload metadata
-func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf) (string, error) {
+// forcedCrypto: if provided ("hpke" or "jose"), forces that backend (if node supports it)
+func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, forcedCrypto string) (string, error) {
 	if nodeID == "" {
 		return "", fmt.Errorf("nodeID is required")
 	}
@@ -2308,32 +2403,66 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf) (stri
 		return "", fmt.Errorf("failed to get distribution ID: %v", err)
 	}
 
-	// Get the node to access its long-term public key for HPKE encryption
+	// Get the node to access its long-term public key for encryption
 	node, err := kdc.GetNode(nodeID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	if len(node.LongTermPubKey) != 32 {
-		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-	}
 
+	// Select crypto backend
+	backendName := selectBackendForNode(node, forcedCrypto)
+	
 	// Generate random 32-byte nonce
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("failed to generate nonce: %v", err)
 	}
 
-	// Encrypt the nonce using HPKE with the node's public key
-	// This tests the full crypto pipeline
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, nonce)
-	if err != nil {
-		return "", fmt.Errorf("failed to encrypt nonce: %v", err)
+	// Encrypt the nonce using the selected backend
+	var ciphertext []byte
+	var ephemeralPub []byte
+	
+	if backendName == "hpke" {
+		// Use HPKE directly
+		if len(node.LongTermPubKey) != 32 {
+			return "", fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		}
+		ciphertext, ephemeralPub, err = hpke.Encrypt(node.LongTermPubKey, nil, nonce)
+		if err != nil {
+			return "", fmt.Errorf("failed to encrypt nonce with HPKE: %v", err)
+		}
+	} else if backendName == "jose" {
+		// Use JOSE via crypto abstraction layer
+		if len(node.LongTermJosePubKey) == 0 {
+			return "", fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE ping)", nodeID)
+		}
+		joseBackend, err2 := crypto.GetBackend("jose")
+		if err2 != nil {
+			return "", fmt.Errorf("failed to get JOSE backend: %v", err2)
+		}
+		// Parse JOSE public key
+		nodeJosePubKey, err2 := joseBackend.ParsePublicKey(node.LongTermJosePubKey)
+		if err2 != nil {
+			return "", fmt.Errorf("failed to parse node JOSE public key: %v", err2)
+		}
+		// Encrypt nonce using JOSE
+		ciphertext, err = joseBackend.Encrypt(nodeJosePubKey, nonce)
+		if err != nil {
+			return "", fmt.Errorf("failed to encrypt nonce with JOSE: %v", err)
+		}
+		// JOSE doesn't use ephemeral keys in the same way - set to empty
+		ephemeralPub = []byte{}
+		log.Printf("KDC: Encrypted ping nonce using JOSE backend for node %s", nodeID)
+	} else {
+		return "", fmt.Errorf("unsupported crypto backend: %s", backendName)
 	}
 
-	// Create payload with nonce (for validation on confirmation) and timestamp
+	// Create payload with nonce (for validation on confirmation), timestamp, and crypto backend
+	// Store the actual backend used (may differ from requested if fallback occurred)
 	payload := map[string]interface{}{
 		"nonce":     hex.EncodeToString(nonce),
 		"timestamp": time.Now().Format(time.RFC3339),
+		"crypto":    backendName, // Store the actual crypto backend used for manifest generation
 	}
 
 	// Calculate expires_at based on DistributionTTL if config is provided
@@ -4857,10 +4986,10 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *tnm.Kd
 	return nil
 }
 
-// GenerateBootstrapToken generates a new bootstrap token for a node
+// GenerateEnrollmentToken generates a new enrollment token for a node
 // nodeID: The node ID to generate the token for
-// Returns: BootstrapToken with generated token, error
-func (kdc *KdcDB) GenerateBootstrapToken(nodeID string) (*BootstrapToken, error) {
+// Returns: EnrollmentToken with generated token, error
+func (kdc *KdcDB) GenerateEnrollmentToken(nodeID string) (*EnrollmentToken, error) {
 	// Generate cryptographically random token (32 bytes = 256 bits)
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
@@ -4885,24 +5014,24 @@ func (kdc *KdcDB) GenerateBootstrapToken(nodeID string) (*BootstrapToken, error)
 
 	_, err := kdc.DB.Exec(query, tokenID, tokenValue, nodeID, time.Now(), false, false, "", "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to insert bootstrap token: %v", err)
+		return nil, fmt.Errorf("failed to insert enrollment token: %v", err)
 	}
 
 	// Retrieve the created token
-	token, err := kdc.getBootstrapTokenByValue(tokenValue)
+	token, err := kdc.getEnrollmentTokenByValue(tokenValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve created token: %v", err)
 	}
 
-	log.Printf("KDC: Generated bootstrap token for node %s (token_id: %s)", nodeID, tokenID)
+	log.Printf("KDC: Generated enrollment token for node %s (token_id: %s)", nodeID, tokenID)
 	return token, nil
 }
 
-// ActivateBootstrapToken activates a bootstrap token for a node
+// ActivateEnrollmentToken activates an enrollment token for a node
 // nodeID: The node ID
 // expirationWindow: How long until the token expires after activation
 // Returns: error
-func (kdc *KdcDB) ActivateBootstrapToken(nodeID string, expirationWindow time.Duration) error {
+func (kdc *KdcDB) ActivateEnrollmentToken(nodeID string, expirationWindow time.Duration) error {
 	// Find the token for this node
 	var query string
 	if kdc.DBType == "sqlite" {
@@ -4921,7 +5050,7 @@ func (kdc *KdcDB) ActivateBootstrapToken(nodeID string, expirationWindow time.Du
 		return fmt.Errorf("no inactive token found for node %s", nodeID)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to query bootstrap token: %v", err)
+		return fmt.Errorf("failed to query enrollment token: %v", err)
 	}
 
 	// Activate the token
@@ -4941,18 +5070,18 @@ func (kdc *KdcDB) ActivateBootstrapToken(nodeID string, expirationWindow time.Du
 
 	_, err = kdc.DB.Exec(updateQuery, now, expiresAt, tokenID)
 	if err != nil {
-		return fmt.Errorf("failed to activate bootstrap token: %v", err)
+		return fmt.Errorf("failed to activate enrollment token: %v", err)
 	}
 
-	log.Printf("KDC: Activated bootstrap token for node %s (expires at %s)", nodeID, expiresAt.Format(time.RFC3339))
+	log.Printf("KDC: Activated enrollment token for node %s (expires at %s)", nodeID, expiresAt.Format(time.RFC3339))
 	return nil
 }
 
-// ValidateBootstrapToken validates a bootstrap token
+// ValidateEnrollmentToken validates an enrollment token
 // tokenValue: The token value to validate
-// Returns: BootstrapToken if valid, error if invalid or not found
-func (kdc *KdcDB) ValidateBootstrapToken(tokenValue string) (*BootstrapToken, error) {
-	token, err := kdc.getBootstrapTokenByValue(tokenValue)
+// Returns: EnrollmentToken if valid, error if invalid or not found
+func (kdc *KdcDB) ValidateEnrollmentToken(tokenValue string) (*EnrollmentToken, error) {
+	token, err := kdc.getEnrollmentTokenByValue(tokenValue)
 	if err != nil {
 		return nil, fmt.Errorf("token not found: %v", err)
 	}
@@ -4975,10 +5104,10 @@ func (kdc *KdcDB) ValidateBootstrapToken(tokenValue string) (*BootstrapToken, er
 	return token, nil
 }
 
-// GetBootstrapTokenStatus returns the status of a bootstrap token for a node
+// GetEnrollmentTokenStatus returns the status of an enrollment token for a node
 // nodeID: The node ID
 // Returns: status string ("generated", "active", "expired", "completed", "not_found"), error
-func (kdc *KdcDB) GetBootstrapTokenStatus(nodeID string) (string, error) {
+func (kdc *KdcDB) GetEnrollmentTokenStatus(nodeID string) (string, error) {
 	var query string
 	if kdc.DBType == "sqlite" {
 		query = `SELECT activated, used, expires_at FROM bootstrap_tokens 
@@ -4997,7 +5126,7 @@ func (kdc *KdcDB) GetBootstrapTokenStatus(nodeID string) (string, error) {
 		return "not_found", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to query bootstrap token: %v", err)
+		return "", fmt.Errorf("failed to query enrollment token: %v", err)
 	}
 
 	// Calculate status
@@ -5016,39 +5145,39 @@ func (kdc *KdcDB) GetBootstrapTokenStatus(nodeID string) (string, error) {
 	return "active", nil
 }
 
-// ListBootstrapTokens returns all bootstrap tokens with their calculated status
-// Returns: slice of BootstrapToken with status, error
-func (kdc *KdcDB) ListBootstrapTokens() ([]*BootstrapToken, error) {
+// ListEnrollmentTokens returns all enrollment tokens with their calculated status
+// Returns: slice of EnrollmentToken with status, error
+func (kdc *KdcDB) ListEnrollmentTokens() ([]*EnrollmentToken, error) {
 	query := `SELECT token_id, token_value, node_id, created_at, activated_at, expires_at, 
 		activated, used, used_at, created_by, comment
 		FROM bootstrap_tokens ORDER BY created_at DESC`
 
 	rows, err := kdc.DB.Query(query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query bootstrap tokens: %v", err)
+		return nil, fmt.Errorf("failed to query enrollment tokens: %v", err)
 	}
 	defer rows.Close()
 
-	var tokens []*BootstrapToken
+	var tokens []*EnrollmentToken
 	for rows.Next() {
-		token, err := kdc.scanBootstrapToken(rows)
+		token, err := kdc.scanEnrollmentToken(rows)
 		if err != nil {
-			log.Printf("KDC: Warning: Failed to scan bootstrap token: %v", err)
+			log.Printf("KDC: Warning: Failed to scan enrollment token: %v", err)
 			continue
 		}
 		tokens = append(tokens, token)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating bootstrap tokens: %v", err)
+		return nil, fmt.Errorf("error iterating enrollment tokens: %v", err)
 	}
 
 	return tokens, nil
 }
 
-// PurgeBootstrapTokens deletes tokens with status "expired" or "completed"
+// PurgeEnrollmentTokens deletes tokens with status "expired" or "completed"
 // Returns: number of tokens purged, error
-func (kdc *KdcDB) PurgeBootstrapTokens() (int, error) {
+func (kdc *KdcDB) PurgeEnrollmentTokens() (int, error) {
 	var query string
 	if kdc.DBType == "sqlite" {
 		query = `DELETE FROM bootstrap_tokens 
@@ -5069,7 +5198,7 @@ func (kdc *KdcDB) PurgeBootstrapTokens() (int, error) {
 	}
 
 	if err != nil {
-		return 0, fmt.Errorf("failed to purge bootstrap tokens: %v", err)
+		return 0, fmt.Errorf("failed to purge enrollment tokens: %v", err)
 	}
 
 	count, err := result.RowsAffected()
@@ -5078,16 +5207,16 @@ func (kdc *KdcDB) PurgeBootstrapTokens() (int, error) {
 	}
 
 	if count > 0 {
-		log.Printf("KDC: Purged %d bootstrap token(s)", count)
+		log.Printf("KDC: Purged %d enrollment token(s)", count)
 	}
 
 	return int(count), nil
 }
 
-// MarkBootstrapTokenUsed marks a bootstrap token as used
+// MarkEnrollmentTokenUsed marks an enrollment token as used
 // tokenValue: The token value to mark as used
 // Returns: error
-func (kdc *KdcDB) MarkBootstrapTokenUsed(tokenValue string) error {
+func (kdc *KdcDB) MarkEnrollmentTokenUsed(tokenValue string) error {
 	var query string
 	if kdc.DBType == "sqlite" {
 		query = `UPDATE bootstrap_tokens 
@@ -5111,23 +5240,23 @@ func (kdc *KdcDB) MarkBootstrapTokenUsed(tokenValue string) error {
 		return fmt.Errorf("token not found: %s", tokenValue)
 	}
 
-	log.Printf("KDC: Marked bootstrap token as used (token_value: %s)", tokenValue)
+	log.Printf("KDC: Marked enrollment token as used (token_value: %s)", tokenValue)
 	return nil
 }
 
-// Helper function to get bootstrap token by value
-func (kdc *KdcDB) getBootstrapTokenByValue(tokenValue string) (*BootstrapToken, error) {
+// Helper function to get enrollment token by value
+func (kdc *KdcDB) getEnrollmentTokenByValue(tokenValue string) (*EnrollmentToken, error) {
 	query := `SELECT token_id, token_value, node_id, created_at, activated_at, expires_at, 
 		activated, used, used_at, created_by, comment
 		FROM bootstrap_tokens WHERE token_value = ?`
 
 	row := kdc.DB.QueryRow(query, tokenValue)
-	return kdc.scanBootstrapToken(row)
+	return kdc.scanEnrollmentToken(row)
 }
 
-// Helper function to scan bootstrap token from database row
-func (kdc *KdcDB) scanBootstrapToken(scanner interface{}) (*BootstrapToken, error) {
-	var token BootstrapToken
+// Helper function to scan enrollment token from database row
+func (kdc *KdcDB) scanEnrollmentToken(scanner interface{}) (*EnrollmentToken, error) {
+	var token EnrollmentToken
 	var activatedAt, expiresAt, usedAt sql.NullTime
 	var createdBy, comment sql.NullString
 

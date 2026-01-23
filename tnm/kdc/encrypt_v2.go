@@ -1,7 +1,9 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * HPKE encryption functions for key distribution
+ * HPKE encryption functions for key distribution (V2 - crypto abstraction)
+ * This is the v2 implementation using the crypto abstraction layer.
+ * The v1 implementation (encrypt.go) remains unchanged for backward compatibility.
  */
 
 package kdc
@@ -13,24 +15,33 @@ import (
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
+	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/hpke"
 )
 
-// EncryptKeyForNodeV1 encrypts a DNSSEC key's private key material for a specific node
-// using HPKE with the node's long-term public key (V1 implementation)
-// Returns: encrypted key data, ephemeral public key used, distribution ID, error
+// EncryptKeyForNodeV2 encrypts a DNSSEC key's private key material for a specific node
+// using the provided crypto backend (HPKE or JOSE).
+// This is the v2 implementation using crypto abstraction.
+// Returns: encrypted key data, ephemeral public key used (backend-specific), distribution ID, error
 // This function also stores the distribution record in the database
 // kdcConf is optional - if provided, expires_at will be set based on DistributionTTL
 // distributionID is optional - if provided, uses that ID; otherwise generates one for this key
-func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.KdcConf, distributionID ...string) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
+// backend specifies which crypto backend to use (hpke or jose)
+func (kdc *KdcDB) EncryptKeyForNodeV2(
+	key *DNSSECKey,
+	node *Node,
+	backend crypto.Backend,
+	kdcConf *tnm.KdcConf,
+	distributionID ...string,
+) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
 	if key == nil {
 		return nil, nil, "", fmt.Errorf("key is nil")
 	}
 	if node == nil {
 		return nil, nil, "", fmt.Errorf("node is nil")
 	}
-	if len(node.LongTermPubKey) != 32 {
-		return nil, nil, "", fmt.Errorf("node long-term public key must be 32 bytes (got %d)", len(node.LongTermPubKey))
+	if backend == nil {
+		return nil, nil, "", fmt.Errorf("backend is nil")
 	}
 
 	// Use provided distribution ID, or get/create one for this key
@@ -43,12 +54,31 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 		}
 	}
 
-	// Encrypt the private key using HPKE
-	// Note: HPKE Base mode generates its own ephemeral key internally
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, key.PrivateKey)
+	// Parse node's public key using the backend
+	nodePubKey, err := backend.ParsePublicKey(node.LongTermPubKey)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to encrypt key: %v", err)
+		return nil, nil, "", fmt.Errorf("failed to parse node public key with %s backend: %v", backend.Name(), err)
 	}
+
+	// Encrypt the private key using the backend
+	ciphertext, err := backend.Encrypt(nodePubKey, key.PrivateKey)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to encrypt key with %s backend: %v", backend.Name(), err)
+	}
+
+	// For ephemeral public key:
+	// - HPKE: Returns the encapsulated key (32 bytes for X25519)
+	// - JOSE: JWE includes ephemeral key in the header, so we return nil
+	// To maintain compatibility with existing code, extract ephemeral key from ciphertext for HPKE
+	var ephemeralPub []byte
+	if backend.Name() == "hpke" {
+		// For HPKE, the first 32 bytes of ciphertext is the encapsulated key (ephemeral public key)
+		if len(ciphertext) >= 32 {
+			ephemeralPub = make([]byte, 32)
+			copy(ephemeralPub, ciphertext[:32])
+		}
+	}
+	// For JOSE, ephemeralPub remains nil (ephemeral key is in JWE header)
 
 	// Generate a unique ID for this distribution record
 	distRecordID := make([]byte, 16)
@@ -91,4 +121,3 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 
 	return ciphertext, ephemeralPub, distID, nil
 }
-

@@ -92,21 +92,23 @@ const (
 
 // Node represents an edge server that receives ZSK keys
 type Node struct {
-	ID              string     `json:"id"`              // Unique identifier for the node
-	Name            string     `json:"name"`            // Human-readable name
-	LongTermPubKey  []byte     `json:"long_term_pub_key"` // HPKE long-term public key (32 bytes, X25519)
-	Sig0PubKey      string     `json:"sig0_pub_key,omitempty"` // SIG(0) public key (DNSKEY RR format string)
-	NotifyAddress   string     `json:"notify_address"`  // Address:port for sending NOTIFY messages (e.g., "192.0.2.1:53")
-	RegisteredAt    time.Time  `json:"registered_at"`
-	LastSeen        time.Time  `json:"last_seen"`
-	LastContact     *time.Time `json:"last_contact,omitempty"` // Most recent confirmation of successful operation
-	State           NodeState  `json:"state"`
-	Comment         string     `json:"comment"`         // Optional comment/description
-	Zones           []string   `json:"zones"`           // List of zone names this node serves (for future use)
+	ID                 string     `json:"id"`              // Unique identifier for the node
+	Name               string     `json:"name"`            // Human-readable name
+	LongTermPubKey     []byte     `json:"long_term_pub_key"` // HPKE long-term public key (32 bytes, X25519)
+	LongTermJosePubKey []byte     `json:"long_term_jose_pub_key,omitempty"` // JOSE long-term public key (JWK JSON bytes)
+	SupportedCrypto    []string   `json:"supported_crypto,omitempty"` // List of supported crypto backends (e.g., ["hpke", "jose"])
+	Sig0PubKey         string     `json:"sig0_pub_key,omitempty"` // SIG(0) public key (DNSKEY RR format string)
+	NotifyAddress      string     `json:"notify_address"`  // Address:port for sending NOTIFY messages (e.g., "192.0.2.1:53")
+	RegisteredAt       time.Time  `json:"registered_at"`
+	LastSeen           time.Time  `json:"last_seen"`
+	LastContact        *time.Time `json:"last_contact,omitempty"` // Most recent confirmation of successful operation
+	State              NodeState  `json:"state"`
+	Comment            string     `json:"comment"`         // Optional comment/description
+	Zones              []string   `json:"zones"`           // List of zone names this node serves (for future use)
 }
 
-// BootstrapToken represents a bootstrap token for node registration
-type BootstrapToken struct {
+// EnrollmentToken represents an enrollment token for node registration
+type EnrollmentToken struct {
 	TokenID     string     `json:"token_id"`     // Unique token identifier
 	TokenValue  string     `json:"token_value"`  // Token value (cryptographically random)
 	NodeID      string     `json:"node_id"`      // Assigned node ID

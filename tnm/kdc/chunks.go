@@ -43,9 +43,9 @@ var globalChunkCache = &chunkCache{
 	cache: make(map[string]*preparedChunks),
 }
 
-// prepareChunksForNode prepares chunks for a node's distribution event
+// prepareChunksForNodeV1 prepares chunks for a node's distribution event (V1 implementation using HPKE)
 // This is called on-demand when CHUNK is queried
-func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.KdcConf) (*preparedChunks, error) {
+func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tnm.KdcConf) (*preparedChunks, error) {
 	cacheKey := fmt.Sprintf("%s:%s", nodeID, distributionID)
 
 	// Check cache first

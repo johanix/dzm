@@ -14,8 +14,8 @@ import (
 	"github.com/johanix/tdns/v2/hpke"
 )
 
-// DecryptAndStoreKey decrypts encrypted key data and stores the key in the database
-func DecryptAndStoreKey(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []byte, longTermPrivKey []byte, distributionID, zoneID string) error {
+// DecryptAndStoreKeyV1 decrypts encrypted key data using HPKE and stores the key in the database (V1 implementation)
+func DecryptAndStoreKeyV1(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []byte, longTermPrivKey []byte, distributionID, zoneID string) error {
 	// Decrypt using HPKE
 	// The encryptedKey contains the encapsulated key + ciphertext
 	// We use the long-term private key to decrypt

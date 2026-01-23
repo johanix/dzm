@@ -85,6 +85,17 @@ kdc:
    # For testing with small chunk sizes, set this to a smaller value (e.g., 1000).
    chunk_max_size:   60000   # 60KB (default)
 
+   # KDC HPKE private key (X25519, 32 bytes)
+   # Required for enrollment and key distribution to HPKE-capable nodes
+   # Generate with: kdc-cli keys generate --hpke --hpke-outfile <path>
+   kdc_hpke_priv_key: /etc/tdns/kdc/kdc.hpke.privatekey
+
+   # KDC JOSE private key (P-256 ECDSA)
+   # Required for enrollment and key distribution to JOSE-capable nodes
+   # Generate with: kdc-cli keys generate --jose --jose-outfile <path>
+   # IMPORTANT: Both HPKE and JOSE keys must be present for enrollment packages to work!
+   kdc_jose_priv_key: /etc/tdns/kdc/kdc.jose.privatekey
+
 log:
    file:                /var/log/tdns/tdns-kdc.log
 

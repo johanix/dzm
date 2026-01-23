@@ -462,7 +462,7 @@ func (kdc *KdcDB) markOldCompletedDistributions() {
 // TEMPORARY: Remove this migration once all databases have been upgraded
 func (kdc *KdcDB) migrateAddSig0PubkeyToNodes() error {
 	var columnExists bool
-	
+
 	if kdc.DBType == "sqlite" {
 		// SQLite: Check if column exists using pragma
 		var count int
@@ -476,12 +476,12 @@ func (kdc *KdcDB) migrateAddSig0PubkeyToNodes() error {
 		).Scan(&count)
 		columnExists = (err == nil && count > 0)
 	}
-	
+
 	if columnExists {
 		// Column already exists, nothing to do
 		return nil
 	}
-	
+
 	// Column doesn't exist, add it
 	var alterStmt string
 	if kdc.DBType == "sqlite" {
@@ -489,11 +489,11 @@ func (kdc *KdcDB) migrateAddSig0PubkeyToNodes() error {
 	} else {
 		alterStmt = "ALTER TABLE nodes ADD COLUMN sig0_pubkey TEXT"
 	}
-	
+
 	_, err := kdc.DB.Exec(alterStmt)
 	if err != nil {
 		// Check if error is "duplicate column" (column already exists - race condition)
-		if strings.Contains(err.Error(), "duplicate column") || 
+		if strings.Contains(err.Error(), "duplicate column") ||
 		   strings.Contains(err.Error(), "already exists") ||
 		   strings.Contains(err.Error(), "Duplicate column name") {
 			return nil // Column already exists, that's fine
@@ -504,9 +504,104 @@ func (kdc *KdcDB) migrateAddSig0PubkeyToNodes() error {
 	return nil
 }
 
-// MigrateBootstrapTokensTable creates the bootstrap_tokens table if it doesn't exist
+// migrateAddSupportedCryptoToNodes adds the supported_crypto column to nodes table if it doesn't exist
 // TEMPORARY: Remove this migration once all databases have been upgraded
-func (kdc *KdcDB) MigrateBootstrapTokensTable() error {
+func (kdc *KdcDB) migrateAddSupportedCryptoToNodes() error {
+	var columnExists bool
+
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if column exists using pragma
+		var count int
+		err := kdc.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='supported_crypto'").Scan(&count)
+		columnExists = (err == nil && count > 0)
+	} else {
+		// MySQL/MariaDB: Check if column exists by querying information_schema
+		var count int
+		err := kdc.DB.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'nodes' AND COLUMN_NAME = 'supported_crypto'",
+		).Scan(&count)
+		columnExists = (err == nil && count > 0)
+	}
+
+	if columnExists {
+		// Column already exists, nothing to do
+		return nil
+	}
+
+	// Column doesn't exist, add it
+	var alterStmt string
+	if kdc.DBType == "sqlite" {
+		// SQLite uses TEXT for JSON data
+		alterStmt = "ALTER TABLE nodes ADD COLUMN supported_crypto TEXT"
+	} else {
+		// MySQL/MariaDB uses JSON type
+		alterStmt = "ALTER TABLE nodes ADD COLUMN supported_crypto JSON"
+	}
+
+	_, err := kdc.DB.Exec(alterStmt)
+	if err != nil {
+		// Check if error is "duplicate column" (column already exists - race condition)
+		if strings.Contains(err.Error(), "duplicate column") ||
+		   strings.Contains(err.Error(), "already exists") ||
+		   strings.Contains(err.Error(), "Duplicate column name") {
+			return nil // Column already exists, that's fine
+		}
+		return fmt.Errorf("failed to add supported_crypto column: %v", err)
+	}
+	log.Printf("KDC: Added supported_crypto column to nodes table")
+	return nil
+}
+
+// migrateAddJosePubKeyToNodes adds the long_term_jose_pub_key column to nodes table if it doesn't exist
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateAddJosePubKeyToNodes() error {
+	var columnExists bool
+
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if column exists using pragma
+		var count int
+		err := kdc.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='long_term_jose_pub_key'").Scan(&count)
+		columnExists = (err == nil && count > 0)
+	} else {
+		// MySQL/MariaDB: Check if column exists by querying information_schema
+		var count int
+		err := kdc.DB.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'nodes' AND COLUMN_NAME = 'long_term_jose_pub_key'",
+		).Scan(&count)
+		columnExists = (err == nil && count > 0)
+	}
+
+	if columnExists {
+		// Column already exists, nothing to do
+		return nil
+	}
+
+	// Column doesn't exist, add it
+	var alterStmt string
+	if kdc.DBType == "sqlite" {
+		alterStmt = "ALTER TABLE nodes ADD COLUMN long_term_jose_pub_key BLOB"
+	} else {
+		alterStmt = "ALTER TABLE nodes ADD COLUMN long_term_jose_pub_key BLOB"
+	}
+
+	_, err := kdc.DB.Exec(alterStmt)
+	if err != nil {
+		// Check if error is "duplicate column" (column already exists - race condition)
+		if strings.Contains(err.Error(), "duplicate column") ||
+		   strings.Contains(err.Error(), "already exists") ||
+		   strings.Contains(err.Error(), "Duplicate column name") {
+			return nil // Column already exists, that's fine
+		}
+		return fmt.Errorf("failed to add long_term_jose_pub_key column: %v", err)
+	}
+	log.Printf("KDC: Added long_term_jose_pub_key column to nodes table")
+	return nil
+}
+
+// MigrateEnrollmentTokensTable creates the bootstrap_tokens table if it doesn't exist
+// Note: Table name is kept as "bootstrap_tokens" for backward compatibility
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) MigrateEnrollmentTokensTable() error {
 	log.Printf("KDC: Checking if bootstrap_tokens table exists...")
 	var tableExists bool
 	
@@ -630,17 +725,18 @@ func (kdc *KdcDB) MigrateBootstrapTokensTable() error {
 		}
 	}
 	
-	// Migrate: Remove FK constraint if it exists (bootstrap tokens are created before nodes exist)
-	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+	// Migrate: Remove FK constraint if it exists (enrollment tokens are created before nodes exist)
+	if err := kdc.migrateRemoveEnrollmentTokensFK(); err != nil {
 		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
 	}
 	
 	return nil
 }
 
-// migrateRemoveBootstrapTokensFK removes the foreign key constraint from bootstrap_tokens table
-// This is needed because bootstrap tokens are created BEFORE nodes exist
-func (kdc *KdcDB) migrateRemoveBootstrapTokensFK() error {
+// migrateRemoveEnrollmentTokensFK removes the foreign key constraint from bootstrap_tokens table
+// Note: Table name is kept as "bootstrap_tokens" for backward compatibility
+// This is needed because enrollment tokens are created BEFORE nodes exist
+func (kdc *KdcDB) migrateRemoveEnrollmentTokensFK() error {
 	if kdc.DBType == "sqlite" {
 		// SQLite doesn't support dropping FK constraints directly
 		// Check if table exists and has FK constraint by checking schema

@@ -470,6 +470,15 @@ var kdcDistribMultiCmd = &cobra.Command{
 			"command": "distrib-multi",
 			"zones":   zones,
 		}
+		
+		// Add crypto flag if specified
+		cryptoBackend, _ := cmd.Flags().GetString("crypto")
+		if cryptoBackend != "" {
+			if cryptoBackend != "hpke" && cryptoBackend != "jose" {
+				log.Fatalf("Error: --crypto must be either 'hpke' or 'jose' (got: %s)", cryptoBackend)
+			}
+			req["crypto"] = cryptoBackend
+		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
 		if err != nil {
@@ -547,4 +556,6 @@ func init() {
 	kdcDistribCompletedCmd.MarkFlagRequired("distid")
 	
 	kdcDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
+	
+	kdcDistribMultiCmd.Flags().String("crypto", "", "Force crypto backend (hpke or jose). If not specified, uses any backend the node supports.")
 }
