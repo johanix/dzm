@@ -65,7 +65,11 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	if len(node.LongTermPubKey) != 32 {
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for HMAC", nodeID)
+	}
+	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
 		return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
 	}
 
@@ -261,6 +265,13 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		log.Printf("KDC: Prepared %s: %d operations (%d key ops) for %d zones, JSON size: %d bytes",
 			contentType, operationCount, keyCount, zoneCount, len(entriesJSON))
 
+		// Defensive check: refuse HPKE operations for JOSE-only nodes
+		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+			return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for encryption", nodeID)
+		}
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+			return nil, fmt.Errorf("node %s has invalid public key for encryption: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		}
 		// Encrypt the entire JSON payload using HPKE and encode for transport
 		base64Data, err = tnm.EncryptAndEncode(node.LongTermPubKey, entriesJSON)
 		if err != nil {
@@ -358,6 +369,13 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for HMAC", nodeID)
+	}
+	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+		return nil, fmt.Errorf("node %s has invalid public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	}
 	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
@@ -615,7 +633,11 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	if len(node.LongTermPubKey) != 32 {
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
+	}
+	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
 		return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
 	}
 
@@ -623,6 +645,13 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	// var err error
 
 	if contentType == "encrypted_text" {
+		// Defensive check: refuse HPKE operations for JOSE-only nodes
+		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+			return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for encryption", nodeID)
+		}
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+			return nil, fmt.Errorf("node %s has invalid public key for encryption: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		}
 		// Encrypt the text using HPKE and encode for transport
 		dataToChunk, err = tnm.EncryptAndEncode(node.LongTermPubKey, []byte(text))
 		if err != nil {
@@ -698,6 +727,13 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for HMAC", nodeID)
+	}
+	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+		return nil, fmt.Errorf("node %s has invalid public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	}
 	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}

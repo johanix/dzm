@@ -64,9 +64,20 @@ You can optionally specify key file paths directly:
 			pubKey, err := kdc.GetKdcHpkePubKey(hpkeFile)
 			if err == nil {
 				keyID := kdc.GenerateKeyID("hpke", pubKey)
-				fileInfo, _ := os.Stat(hpkeFile)
-				createdTime := fileInfo.ModTime().Format("2006-01-02 15:04:05")
-				absPath, _ := filepath.Abs(hpkeFile)
+				fileInfo, statErr := os.Stat(hpkeFile)
+				var createdTime, absPath string
+				if statErr != nil {
+					createdTime = "unknown"
+					absPath = fmt.Sprintf("%s (stat error: %v)", hpkeFile, statErr)
+				} else {
+					createdTime = fileInfo.ModTime().Format("2006-01-02 15:04:05")
+					absPathVal, absErr := filepath.Abs(hpkeFile)
+					if absErr != nil {
+						absPath = fmt.Sprintf("%s (abs error: %v)", hpkeFile, absErr)
+					} else {
+						absPath = absPathVal
+					}
+				}
 				rows = append(rows, fmt.Sprintf("%s | HPKE | 256b | %s | %s", keyID, createdTime, absPath))
 			} else {
 				rows = append(rows, fmt.Sprintf("(error) | HPKE | --- | --- | %s (error: %v)", hpkeFile, err))
@@ -80,9 +91,20 @@ You can optionally specify key file paths directly:
 			pubKey, err := kdc.GetKdcJosePubKey(joseFile)
 			if err == nil {
 				keyID := kdc.GenerateKeyID("jose", pubKey)
-				fileInfo, _ := os.Stat(joseFile)
-				createdTime := fileInfo.ModTime().Format("2006-01-02 15:04:05")
-				absPath, _ := filepath.Abs(joseFile)
+				fileInfo, statErr := os.Stat(joseFile)
+				var createdTime, absPath string
+				if statErr != nil {
+					createdTime = "unknown"
+					absPath = fmt.Sprintf("%s (stat error: %v)", joseFile, statErr)
+				} else {
+					createdTime = fileInfo.ModTime().Format("2006-01-02 15:04:05")
+					absPathVal, absErr := filepath.Abs(joseFile)
+					if absErr != nil {
+						absPath = fmt.Sprintf("%s (abs error: %v)", joseFile, absErr)
+					} else {
+						absPath = absPathVal
+					}
+				}
 				rows = append(rows, fmt.Sprintf("%s | JOSE | 256b | %s | %s", keyID, createdTime, absPath))
 			} else {
 				rows = append(rows, fmt.Sprintf("(error) | JOSE | --- | --- | %s (error: %v)", joseFile, err))
@@ -139,9 +161,6 @@ that were created with the old public keys, as they will no longer be decryptabl
 
 		// Generate HPKE key if requested
 		if genHpke {
-			if hpkeOutfile == "" {
-				log.Fatalf("Error: HPKE output file is required")
-			}
 			if _, err := os.Stat(hpkeOutfile); err == nil {
 				log.Fatalf("Error: HPKE key file already exists: %s\nUse a different path or remove the existing file first.", hpkeOutfile)
 			}
@@ -202,9 +221,6 @@ that were created with the old public keys, as they will no longer be decryptabl
 
 		// Generate JOSE key if requested
 		if genJose {
-			if joseOutfile == "" {
-				log.Fatalf("Error: JOSE output file is required")
-			}
 			if _, err := os.Stat(joseOutfile); err == nil {
 				log.Fatalf("Error: JOSE key file already exists: %s\nUse a different path or remove the existing file first.", joseOutfile)
 			}
@@ -286,25 +302,40 @@ that were created with the old public keys, as they will no longer be decryptabl
 
 		// Print next steps
 		fmt.Printf("Next steps:\n")
-		fmt.Printf("  1. Review the generated key files\n")
+		
+		// Build list of steps conditionally
+		steps := []string{}
+		
+		// Always include review step
+		steps = append(steps, "Review the generated key files")
+		
+		// Conditionally add HPKE config step
 		if genHpke {
 			absPath, _ := filepath.Abs(hpkeOutfile)
-			fmt.Printf("  2. Add to your KDC config: kdc_hpke_priv_key: %s\n", absPath)
+			steps = append(steps, fmt.Sprintf("Add to your KDC config: kdc_hpke_priv_key: %s", absPath))
 		}
+		
+		// Conditionally add JOSE config step
 		if genJose {
 			absPath, _ := filepath.Abs(joseOutfile)
-			if genHpke {
-				fmt.Printf("  3. Add to your KDC config: kdc_jose_priv_key: %s\n", absPath)
-				fmt.Printf("  4. Restart the KDC\n")
-				fmt.Printf("  5. Generate enrollment blobs (which will include both public keys)\n")
-			} else {
-				fmt.Printf("  3. Add to your KDC config: kdc_jose_priv_key: %s\n", absPath)
-				fmt.Printf("  4. Restart the KDC\n")
-				fmt.Printf("  5. Generate enrollment blobs (which will include both public keys)\n")
-			}
+			steps = append(steps, fmt.Sprintf("Add to your KDC config: kdc_jose_priv_key: %s", absPath))
+		}
+		
+		// Always include restart and enrollment blob steps
+		steps = append(steps, "Restart the KDC")
+		
+		// Determine enrollment blob message based on which keys were generated
+		if genHpke && genJose {
+			steps = append(steps, "Generate enrollment blobs (which will include both public keys)")
+		} else if genHpke {
+			steps = append(steps, "Generate enrollment blobs (which will include the HPKE public key)")
 		} else {
-			fmt.Printf("  3. Restart the KDC\n")
-			fmt.Printf("  4. Generate enrollment blobs (which will include both public keys)\n")
+			steps = append(steps, "Generate enrollment blobs (which will include the JOSE public key)")
+		}
+		
+		// Print steps with sequential numbering
+		for i, step := range steps {
+			fmt.Printf("  %d. %s\n", i+1, step)
 		}
 
 		fmt.Printf("\nBoth HPKE and JOSE keys are required for enrollment packages to work correctly.\n")

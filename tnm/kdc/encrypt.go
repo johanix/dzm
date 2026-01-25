@@ -29,7 +29,11 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 	if node == nil {
 		return nil, nil, "", fmt.Errorf("node is nil")
 	}
-	if len(node.LongTermPubKey) != 32 {
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", node.ID)
+	}
+	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
 		return nil, nil, "", fmt.Errorf("node long-term public key must be 32 bytes (got %d)", len(node.LongTermPubKey))
 	}
 

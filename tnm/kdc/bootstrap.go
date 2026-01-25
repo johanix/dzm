@@ -132,10 +132,11 @@ func GenerateEnrollmentBlob(nodeID string, token *EnrollmentToken, kdcConf *tnm.
 	}
 
 	// Write to file in output directory (with newline at end)
+	// Use 0600 permissions (owner read/write only) for security - enrollment blobs contain sensitive tokens
 	filename := filepath.Join(outDir, fmt.Sprintf("%s.enroll", nodeID))
 	blobContent := []byte(blobBase64)
 	blobContent = append(blobContent, '\n') // Add newline at end
-	if err := os.WriteFile(filename, blobContent, 0644); err != nil {
+	if err := os.WriteFile(filename, blobContent, 0600); err != nil {
 		return "", fmt.Errorf("failed to write enrollment blob file: %v", err)
 	}
 
@@ -265,18 +266,13 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		return w.WriteMsg(m)
 	}
 
-	// Get KDC keypairs early (needed for error responses and decryption)
-	// KDC must support both HPKE and JOSE, but we'll try to decrypt with the appropriate one
+	// Get KDC HPKE keypair early (needed for error responses and HPKE decryption)
 	kdcHpkeKeys, err := GetKdcHpkeKeypair(kdcConf.KdcHpkePrivKey)
 	if err != nil {
 		log.Printf("KDC: Failed to get KDC HPKE keypair: %v", err)
 		return returnError(dns.RcodeServerFailure, fmt.Sprintf("KDC internal error: failed to load HPKE keypair: %v", err), "", nil, nil)
 	}
-	kdcJoseKeys, err := GetKdcJoseKeypair(kdcConf.KdcJosePrivKey)
-	if err != nil {
-		log.Printf("KDC: Failed to get KDC JOSE keypair: %v", err)
-		return returnError(dns.RcodeServerFailure, fmt.Sprintf("KDC internal error: failed to load JOSE keypair: %v", err), "", nil, nil)
-	}
+	// JOSE keys will be loaded lazily only if HPKE decryption fails
 
 	// 1. Check if UPDATE section has exactly one CHUNK record
 	if len(r.Ns) != 1 {
@@ -336,8 +332,13 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		encryptionBackend = "hpke"
 		log.Printf("KDC: Successfully decrypted enrollment request using HPKE (decrypted length: %d)", len(decryptedData))
 	} else {
-		// HPKE decryption failed, try JOSE
+		// HPKE decryption failed, try JOSE - load JOSE keys lazily only when needed
 		log.Printf("KDC: HPKE decryption failed, trying JOSE: %v", err)
+		kdcJoseKeys, err2 := GetKdcJoseKeypair(kdcConf.KdcJosePrivKey)
+		if err2 != nil {
+			log.Printf("KDC: Failed to get KDC JOSE keypair: %v", err2)
+			return returnError(dns.RcodeFormatError, fmt.Sprintf("Failed to decrypt enrollment request (tried HPKE and JOSE): HPKE error: %v, JOSE keypair error: %v", err, err2), "", nil, kdcHpkeKeys)
+		}
 		joseBackend, err2 := crypto.GetBackend("jose")
 		if err2 != nil {
 			log.Printf("KDC: Failed to get JOSE backend: %v", err2)
@@ -440,17 +441,16 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	// 10. Store node with appropriate pubkey(s)
 	nodeID := token.NodeID
 	
-	// For database storage: if node only supports JOSE, we need to store something in LongTermPubKey
-	// Since the database requires NOT NULL, we'll use a placeholder (32 zero bytes) for JOSE-only nodes
-	// This is a workaround - ideally the schema would allow NULL or we'd have separate fields
+	// For JOSE-only nodes, set LongTermPubKey to nil (database allows NULL)
+	// The SupportedCrypto field indicates which crypto backends the node supports
 	var nodeLongTermPubKey []byte
 	if len(hpkePubKey) > 0 {
 		nodeLongTermPubKey = hpkePubKey
 	} else {
-		// JOSE-only node: store placeholder (32 zero bytes) in LongTermPubKey
+		// JOSE-only node: set to nil (database allows NULL)
 		// The SupportedCrypto field will indicate this is a JOSE-only node
-		nodeLongTermPubKey = make([]byte, 32) // 32 zero bytes as placeholder
-		log.Printf("KDC: Node only supports JOSE - using placeholder for LongTermPubKey field")
+		nodeLongTermPubKey = nil
+		log.Printf("KDC: Node only supports JOSE - setting LongTermPubKey to NULL")
 	}
 	
 	// Store JOSE public key if provided

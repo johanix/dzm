@@ -79,6 +79,22 @@ type KrsBootstrapConf struct {
 	SupportedCrypto []string            `yaml:"supported_crypto"` // List of supported crypto backends (e.g., ["hpke", "jose"])
 }
 
+// calculateUseCryptoV2 determines whether to enable crypto V2 based on supported backends
+// V2 is enabled if JOSE is present or if the config is not HPKE-only
+func calculateUseCryptoV2(supportedCrypto []string) bool {
+	// Check if JOSE is present
+	hasJose := false
+	for _, crypto := range supportedCrypto {
+		if crypto == "jose" {
+			hasJose = true
+			break
+		}
+	}
+	// Enable V2 if JOSE is present OR if not exactly HPKE-only
+	isHpkeOnly := len(supportedCrypto) == 1 && supportedCrypto[0] == "hpke"
+	return hasJose || !isHpkeOnly
+}
+
 // RunEnroll performs the complete enrollment process
 // blobFile: Path to enrollment blob file
 // configDir: Directory where config and keys will be written (default: /etc/tdns)
@@ -410,6 +426,9 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	nodeIDNoDot := strings.TrimSuffix(blob.NodeID, ".")
 	var hpkeKeyFileAbs string
 	var joseKeyFileAbs string
+	var sig0KeyFileAbs string
+	var certFileAbs string
+	var keyFileAbs string
 
 	// Write HPKE private key if we generated it
 	if hasHpkeKey {
@@ -434,8 +453,9 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 		log.Printf("KRS: Wrote HPKE private key to %s", hpkeKeyFile)
 
 		// Make HPKE key file path absolute
-		hpkeKeyFileAbs, err = filepath.Abs(hpkeKeyFile)
-		if err != nil {
+		if abs, absErr := filepath.Abs(hpkeKeyFile); absErr == nil {
+			hpkeKeyFileAbs = abs
+		} else {
 			hpkeKeyFileAbs = hpkeKeyFile // Fallback to relative if absolute fails
 		}
 	}
@@ -470,8 +490,9 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 		log.Printf("KRS: Wrote JOSE private key to %s", joseKeyFile)
 
 		// Make JOSE key file path absolute
-		joseKeyFileAbs, err = filepath.Abs(joseKeyFile)
-		if err != nil {
+		if abs, absErr := filepath.Abs(joseKeyFile); absErr == nil {
+			joseKeyFileAbs = abs
+		} else {
 			joseKeyFileAbs = joseKeyFile // Fallback to relative if absolute fails
 		}
 	}
@@ -495,8 +516,9 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 		log.Printf("KRS: Wrote KDC HPKE public key to %s", kdcHpkePubKeyFile)
 
 		// Make KDC HPKE public key file path absolute
-		kdcHpkePubKeyFileAbs, err = filepath.Abs(kdcHpkePubKeyFile)
-		if err != nil {
+		if abs, absErr := filepath.Abs(kdcHpkePubKeyFile); absErr == nil {
+			kdcHpkePubKeyFileAbs = abs
+		} else {
 			kdcHpkePubKeyFileAbs = kdcHpkePubKeyFile
 		}
 	}
@@ -530,8 +552,9 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 		log.Printf("KRS: Wrote KDC JOSE public key to %s", kdcJosePubKeyFile)
 
 		// Make KDC JOSE public key file path absolute
-		kdcJosePubKeyFileAbs, err = filepath.Abs(kdcJosePubKeyFile)
-		if err != nil {
+		if abs, absErr := filepath.Abs(kdcJosePubKeyFile); absErr == nil {
+			kdcJosePubKeyFileAbs = abs
+		} else {
 			kdcJosePubKeyFileAbs = kdcJosePubKeyFile
 		}
 	}
@@ -545,8 +568,9 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	log.Printf("KRS: Wrote SIG(0) private key to %s", sig0KeyFile)
 
 	// Make SIG(0) key file path absolute
-	sig0KeyFileAbs, err := filepath.Abs(sig0KeyFile)
-	if err != nil {
+	if abs, absErr := filepath.Abs(sig0KeyFile); absErr == nil {
+		sig0KeyFileAbs = abs
+	} else {
 		sig0KeyFileAbs = sig0KeyFile
 	}
 
@@ -559,12 +583,14 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	log.Printf("KRS: Generated API certificates: %s, %s", certFile, keyFile)
 
 	// Make cert and key file paths absolute
-	certFileAbs, err := filepath.Abs(certFile)
-	if err != nil {
+	if abs, absErr := filepath.Abs(certFile); absErr == nil {
+		certFileAbs = abs
+	} else {
 		certFileAbs = certFile
 	}
-	keyFileAbs, err := filepath.Abs(keyFile)
-	if err != nil {
+	if abs, absErr := filepath.Abs(keyFile); absErr == nil {
+		keyFileAbs = abs
+	} else {
 		keyFileAbs = keyFile
 	}
 
@@ -617,7 +643,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 				KdcJosePubKey:      kdcJosePubKeyFileAbs, // Only set if JOSE key present in blob
 			},
 			ControlZone:     blob.ControlZone,
-			UseCryptoV2:     len(supportedCrypto) > 1, // Only enable V2 if multiple backends
+			UseCryptoV2:     calculateUseCryptoV2(supportedCrypto),
 			SupportedCrypto: supportedCrypto,
 		},
 	}

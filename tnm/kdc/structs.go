@@ -189,7 +189,9 @@ type DistributionRecord struct {
 	KeyID            string             // DNSSEC key ID (NULL for non-key operations)
 	NodeID           string             // Target node ID (empty if to all nodes)
 	EncryptedKey     []byte             // HPKE-encrypted private key (NULL for unencrypted operations like delete_key)
-	EphemeralPubKey  []byte             // Ephemeral public key used for encryption (NULL for unencrypted operations)
+	EphemeralPubKey  []byte             // Ephemeral public key used for encryption (NULL for unencrypted operations).
+	                                   // For HPKE: 32-byte X25519 ephemeral public key (extracted from ciphertext).
+	                                   // For JOSE: Empty (ephemeral key is embedded in JWE header within ciphertext).
 	CreatedAt        time.Time
 	ExpiresAt        *time.Time         // Optional expiration of the distributed key
 	Status           hpke.DistributionStatus

@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -55,7 +56,24 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 	}
 
 	// Parse node's public key using the backend
-	nodePubKey, err := backend.ParsePublicKey(node.LongTermPubKey)
+	// Select the appropriate key based on backend type
+	var nodePubKeyData []byte
+	if backend.Name() == "jose" {
+		if len(node.LongTermJosePubKey) == 0 {
+			return nil, nil, "", fmt.Errorf("node %s does not have a JOSE public key stored (required for %s backend)", node.ID, backend.Name())
+		}
+		nodePubKeyData = node.LongTermJosePubKey
+	} else {
+		// Defensive check: refuse HPKE operations for JOSE-only nodes
+		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+			return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use %s", node.ID, backend.Name())
+		}
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) == 0 {
+			return nil, nil, "", fmt.Errorf("node %s does not have a public key stored (required for %s backend)", node.ID, backend.Name())
+		}
+		nodePubKeyData = node.LongTermPubKey
+	}
+	nodePubKey, err := backend.ParsePublicKey(nodePubKeyData)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to parse node public key with %s backend: %v", backend.Name(), err)
 	}
@@ -70,9 +88,13 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 	// - HPKE: Returns the encapsulated key (32 bytes for X25519)
 	// - JOSE: JWE includes ephemeral key in the header, so we return nil
 	// To maintain compatibility with existing code, extract ephemeral key from ciphertext for HPKE
+	// TODO: Consider adding GetEphemeralKey(ciphertext []byte) []byte method to crypto.Backend interface
+	// to properly abstract ephemeral key extraction and avoid embedding backend-specific knowledge
+	// (e.g., HPKE ciphertext format) in this generic V2 function.
 	var ephemeralPub []byte
 	if backend.Name() == "hpke" {
 		// For HPKE, the first 32 bytes of ciphertext is the encapsulated key (ephemeral public key)
+		// NOTE: This embeds HPKE-specific ciphertext format knowledge. If HPKE format changes, this will break.
 		if len(ciphertext) >= 32 {
 			ephemeralPub = make([]byte, 32)
 			copy(ephemeralPub, ciphertext[:32])
@@ -116,7 +138,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
 		// Log error but don't fail - the encryption succeeded
 		// TODO: Consider making this a hard error
-		fmt.Printf("Warning: Failed to store distribution record: %v\n", err)
+		log.Printf("KDC: Warning: Failed to store distribution record: %v", err)
 	}
 
 	return ciphertext, ephemeralPub, distID, nil

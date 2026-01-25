@@ -9,12 +9,14 @@
 package kdc
 
 import (
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 
+	"github.com/go-jose/go-jose/v4"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/crypto"
@@ -51,6 +53,16 @@ func selectBackendForNode(node *Node, forcedCrypto string) string {
 // using the crypto abstraction layer to support both HPKE and JOSE.
 // This is called on-demand when CHUNK is queried.
 // The crypto backend is selected based on the node's SupportedCrypto field.
+//
+// TODO: Consider refactoring this function (~365 lines) by extracting helper functions
+// for better readability and testability:
+//   - buildKeyOperationsPayload() - handles key_operations, mgmt_operations, mixed_operations
+//   - buildNodeOperationsPayload() - handles node_operations
+//   - determineContentType() - analyzes operations to determine content type
+//   - buildManifestMetadata() - creates manifest metadata with extra fields
+//   - splitIntoChunks() - handles CHUNK splitting logic
+// This would separate concerns: cache lookup, backend selection, content type determination,
+// payload construction, encryption, manifest creation, and CHUNK splitting.
 func (kdc *KdcDB) prepareChunksForNodeV2(
 	nodeID, distributionID string,
 	conf *tnm.KdcConf,
@@ -89,9 +101,9 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	var forcedCrypto string
 	for _, record := range records {
 		if record.Payload != nil {
-			if crypto, ok := record.Payload["crypto"].(string); ok && crypto != "" {
-				forcedCrypto = crypto
-				log.Printf("KDC: Found stored crypto backend %s in distribution record payload", crypto)
+			if cryptoBackend, ok := record.Payload["crypto"].(string); ok && cryptoBackend != "" {
+				forcedCrypto = cryptoBackend
+				log.Printf("KDC: Found stored crypto backend %s in distribution record payload", cryptoBackend)
 				break
 			}
 		}
@@ -110,7 +122,11 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	// For JOSE, we use LongTermJosePubKey; for HPKE, we use LongTermPubKey
 	var nodePubKey crypto.PublicKey
 	if backendName == "hpke" {
-		if len(node.LongTermPubKey) != 32 {
+		// Defensive check: refuse HPKE operations for JOSE-only nodes
+		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+			return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
+		}
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
 			return nil, fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
 		}
 		nodePubKey, err = backend.ParsePublicKey(node.LongTermPubKey)
@@ -392,10 +408,40 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Calculate HMAC using the recipient node's long-term public key
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
+	// Select the appropriate key based on the crypto backend used for encryption
+	var hmacKey []byte
+	if backendName == "hpke" {
+		// For HPKE, use the X25519 public key directly (32 bytes)
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+			return nil, fmt.Errorf("node %s has invalid HPKE public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		}
+		hmacKey = node.LongTermPubKey
+	} else if backendName == "jose" {
+		// For JOSE, extract the x-coordinate from the ECDSA P-256 public key (32 bytes)
+		if len(node.LongTermJosePubKey) == 0 {
+			return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for HMAC)", nodeID)
+		}
+		// Parse JWK to extract ECDSA public key
+		var jwk jose.JSONWebKey
+		if err := json.Unmarshal(node.LongTermJosePubKey, &jwk); err != nil {
+			return nil, fmt.Errorf("failed to parse node JOSE public key for HMAC: %v", err)
+		}
+		ecdsaKey, ok := jwk.Key.(*ecdsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("node %s JOSE public key is not an ECDSA key (required for HMAC)", nodeID)
+		}
+		// Extract x-coordinate (32 bytes for P-256)
+		xBytes := ecdsaKey.X.Bytes()
+		// Pad to 32 bytes if needed (ECDSA coordinates are variable length)
+		hmacKey = make([]byte, 32)
+		copy(hmacKey[32-len(xBytes):], xBytes)
+	} else {
+		return nil, fmt.Errorf("unsupported crypto backend for HMAC: %s", backendName)
+	}
+	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
+	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s %s public key (%d bytes)", nodeID, backendName, len(hmacKey))
 
 	// Create CHUNK records (manifest + data chunks)
 	allChunks := make([]*core.CHUNK, 0)

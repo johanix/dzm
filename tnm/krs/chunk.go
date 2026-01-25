@@ -216,7 +216,19 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 			contentType = c
 		}
 		// Extract crypto backend (optional, defaults to HPKE for backward compatibility)
+		allowedBackends := []string{"hpke", "jose"}
 		if crypto, ok := manifestData.Metadata["crypto"].(string); ok {
+			// Validate against allowed backends
+			validBackend := false
+			for _, allowed := range allowedBackends {
+				if crypto == allowed {
+					validBackend = true
+					break
+				}
+			}
+			if !validBackend {
+				return fmt.Errorf("invalid crypto backend '%s' in manifest metadata; expected one of: %v", crypto, allowedBackends)
+			}
 			cryptoBackend = crypto
 			log.Printf("KRS: Extracted crypto backend from metadata: %s", cryptoBackend)
 		} else {
@@ -471,6 +483,11 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, di
 		cryptoBackend = "hpke"
 	}
 	
+	// Fail fast if JOSE backend is requested but crypto V2 is disabled
+	if cryptoBackend == "jose" && !conf.ShouldUseCryptoV2() {
+		return fmt.Errorf("jose backend requires crypto V2; enable feature flag or choose a different backend")
+	}
+	
 	privateKey, err := loadPrivateKeyForBackend(conf, cryptoBackend)
 	if err != nil {
 		return fmt.Errorf("failed to load private key for %s backend: %v", cryptoBackend, err)
@@ -665,6 +682,11 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distrib
 	// Default to HPKE if crypto backend not specified (backward compatibility)
 	if cryptoBackend == "" {
 		cryptoBackend = "hpke"
+	}
+	
+	// Fail fast if JOSE backend is requested but crypto V2 is disabled
+	if cryptoBackend == "jose" && !conf.ShouldUseCryptoV2() {
+		return fmt.Errorf("jose backend requires crypto V2; enable feature flag or choose a different backend")
 	}
 	
 	privateKey, err := loadPrivateKeyForBackend(conf, cryptoBackend)

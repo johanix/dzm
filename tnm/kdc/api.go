@@ -1190,8 +1190,9 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "node.id is required")
 				return
 			}
-			if len(req.Node.LongTermPubKey) != 32 {
-				sendJSONError(w, http.StatusBadRequest, "node.long_term_pub_key must be 32 bytes (X25519)")
+			// Allow nil LongTermPubKey for JOSE-only nodes
+			if req.Node.LongTermPubKey != nil && len(req.Node.LongTermPubKey) != 32 {
+				sendJSONError(w, http.StatusBadRequest, "node.long_term_pub_key must be 32 bytes (X25519) or nil for JOSE-only nodes")
 				return
 			}
 			if req.Node.State == "" {
@@ -1366,30 +1367,41 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Enrollment token already exists for node %s (status: %s)", req.NodeID, status)
 			} else {
-				// Generate token
-				token, err := kdcDB.GenerateEnrollmentToken(req.NodeID)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = err.Error()
-				} else {
-					resp.Token = token
-					resp.Msg = fmt.Sprintf("Enrollment token generated for node: %s", req.NodeID)
-					
-					// Generate enrollment blob content (CLI will write the file)
-					// Get crypto backend from request (optional, defaults to both if empty)
-					cryptoBackend := ""
-					if req.Crypto != "" {
-						cryptoBackend = req.Crypto
+				// Validate crypto backend before generating token to avoid orphaned tokens
+				// Get crypto backend from request (optional, defaults to both if empty)
+				cryptoBackend := ""
+				if req.Crypto != "" {
+					cryptoBackend = req.Crypto
+					// Validate crypto backend if specified
+					if cryptoBackend != "hpke" && cryptoBackend != "jose" {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", cryptoBackend)
 					}
-					blobContent, err := GenerateEnrollmentBlobContent(req.NodeID, token, kdcConf, cryptoBackend)
+				}
+				
+				// Only proceed if validation passed
+				if !resp.Error {
+					// Generate token
+					token, err := kdcDB.GenerateEnrollmentToken(req.NodeID)
 					if err != nil {
-						// Set error in response - blob generation is required
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
-						// Token was already created, but blob generation failed
-						// This is a critical error since the blob is required for enrollment
 					} else {
-						resp.BlobContent = blobContent
+						// Generate enrollment blob content (CLI will write the file)
+						blobContent, err := GenerateEnrollmentBlobContent(req.NodeID, token, kdcConf, cryptoBackend)
+						if err != nil {
+							// Set error in response - blob generation is required
+							resp.Error = true
+							resp.ErrorMsg = err.Error()
+							// Token was already created, but blob generation failed
+							// This is a critical error since the blob is required for enrollment
+							// TODO: Consider adding token deletion/revocation to clean up orphaned tokens
+						} else {
+							// Only set Token and Msg after successful blob generation
+							resp.Token = token
+							resp.Msg = fmt.Sprintf("Enrollment token generated for node: %s", req.NodeID)
+							resp.BlobContent = blobContent
+						}
 					}
 				}
 			}

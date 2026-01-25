@@ -1124,6 +1124,48 @@ func (kdc *KdcDB) migrateMakeDistributionConfirmationsZoneKeyNullable() error {
 	return nil
 }
 
+// migrateMakeLongTermPubKeyNullable makes long_term_pub_key nullable in nodes table
+// This allows JOSE-only nodes to have NULL for LongTermPubKey
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if column is already nullable by checking the schema
+		var sql string
+		err := kdc.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes'").Scan(&sql)
+		if err == nil {
+			// Check if NOT NULL is in the schema
+			if !strings.Contains(sql, "long_term_pub_key BLOB NOT NULL") {
+				// Already nullable or doesn't have NOT NULL
+				return nil
+			}
+			// Column has NOT NULL, but SQLite doesn't support MODIFY COLUMN easily
+			// We'll log a warning - the CREATE TABLE IF NOT EXISTS will handle new databases
+			log.Printf("KDC: Warning: SQLite table has NOT NULL on long_term_pub_key. New databases will allow NULL.")
+			return nil
+		}
+	} else {
+		// MySQL/MariaDB: Check if column is already nullable
+		var isNullable string
+		err := kdc.DB.QueryRow(
+			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'nodes' AND COLUMN_NAME = 'long_term_pub_key'",
+		).Scan(&isNullable)
+		if err == nil && isNullable == "YES" {
+			// Already nullable, nothing to do
+			return nil
+		}
+		
+		// Modify column to allow NULL (UNIQUE constraint is preserved automatically)
+		alterStmt := "ALTER TABLE nodes MODIFY COLUMN long_term_pub_key BLOB NULL"
+		_, err = kdc.DB.Exec(alterStmt)
+		if err != nil {
+			return fmt.Errorf("failed to make long_term_pub_key nullable: %v", err)
+		}
+		log.Printf("KDC: Made long_term_pub_key nullable in nodes table")
+	}
+	
+	return nil
+}
+
 // migrateAddOperationAndPayload adds operation and payload columns to distribution_records
 // This enables operation-based distributions (ping, roll_key, delete_key, update_components)
 // TEMPORARY: Remove this migration once all databases have been upgraded

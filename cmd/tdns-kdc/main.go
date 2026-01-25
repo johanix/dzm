@@ -142,6 +142,11 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	pubKeyHex := fmt.Sprintf("%x", hpkeKeys.PublicKey)
 	log.Printf("KDC: Loaded HPKE keypair from %s (public key: %s...)", kdcConf.KdcHpkePrivKey, pubKeyHex[:16])
 
+	// Warn if JOSE key is missing when crypto-v2 is enabled
+	if kdcConf.ShouldUseCryptoV2() && kdcConf.KdcJosePrivKey == "" {
+		log.Printf("KDC: Warning: kdc_jose_priv_key not configured; JOSE enrollment/key distribution will fail")
+	}
+
 	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, &kdcConf)
 	if err != nil {
 		return fmt.Errorf("failed to initialize KDC database: %v", err)

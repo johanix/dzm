@@ -86,14 +86,14 @@ kdc:
    chunk_max_size:   60000   # 60KB (default)
 
    # KDC HPKE private key (X25519, 32 bytes)
-   # Required for enrollment and key distribution to HPKE-capable nodes
+   # Required for enrollment and key distribution. HPKE-only deployments are supported.
    # Generate with: kdc-cli keys generate --hpke --hpke-outfile <path>
    kdc_hpke_priv_key: /etc/tdns/kdc/kdc.hpke.privatekey
 
    # KDC JOSE private key (P-256 ECDSA)
-   # Required for enrollment and key distribution to JOSE-capable nodes
+   # Optional: Only required if you need JOSE-capable enrollments or clients.
+   # HPKE is required for core enrollment; JOSE is optional and only needed for JOSE-capable enrollments.
    # Generate with: kdc-cli keys generate --jose --jose-outfile <path>
-   # IMPORTANT: Both HPKE and JOSE keys must be present for enrollment packages to work!
    kdc_jose_priv_key: /etc/tdns/kdc/kdc.jose.privatekey
 
 log:

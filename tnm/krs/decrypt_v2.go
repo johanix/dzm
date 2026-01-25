@@ -19,10 +19,11 @@ import (
 // DecryptAndStoreKeyV2 decrypts encrypted key data using crypto abstraction layer
 // and stores the key in the database.
 // The backend parameter specifies which crypto backend to use (hpke or jose).
+// ephemeralPrivKey is currently unused but reserved for future use (e.g., for backends that require it).
 func DecryptAndStoreKeyV2(
 	krsDB *KrsDB,
 	encryptedKey []byte,
-	ephemeralPrivKey []byte,
+	_ephemeralPrivKey []byte, // Reserved for future use; currently unused
 	longTermPrivKey []byte,
 	backend crypto.Backend,
 	distributionID, zoneID string,

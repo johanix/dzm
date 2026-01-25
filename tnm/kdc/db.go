@@ -148,7 +148,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id VARCHAR(255) PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
-			long_term_pub_key BLOB NOT NULL,
+			long_term_pub_key BLOB,
 			long_term_jose_pub_key BLOB,
 			supported_crypto JSON,
 			notify_address VARCHAR(255),
@@ -420,7 +420,7 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			long_term_pub_key BLOB NOT NULL UNIQUE,
+			long_term_pub_key BLOB UNIQUE,
 			long_term_jose_pub_key BLOB,
 			supported_crypto TEXT,
 			notify_address TEXT,
@@ -1443,6 +1443,10 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 	var notifyAddr sql.NullString
 	var supportedCryptoJSON sql.NullString
 	var josePubKey []byte
+	// Only query by LongTermPubKey if it's not nil (JOSE-only nodes have NULL)
+	if pubKey == nil || len(pubKey) == 0 {
+		return nil, nil // Cannot query by nil/empty key
+	}
 	err := kdc.DB.QueryRow(
 		"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_pub_key = ?",
 		pubKey,
@@ -1470,17 +1474,20 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 
 // AddNode adds a new node
 func (kdc *KdcDB) AddNode(node *Node) error {
-	// Check if a node with this public key already exists
-	existingNode, err := kdc.GetNodeByPublicKey(node.LongTermPubKey)
-	if err != nil {
-		return fmt.Errorf("failed to check for existing node: %v", err)
-	}
-	if existingNode != nil {
-		return fmt.Errorf("a node with this public key already exists: %s (id: %s)", existingNode.Name, existingNode.ID)
+	// Check if a node with this public key already exists (only if HPKE key is present)
+	if node.LongTermPubKey != nil && len(node.LongTermPubKey) > 0 {
+		existingNode, err := kdc.GetNodeByPublicKey(node.LongTermPubKey)
+		if err != nil {
+			return fmt.Errorf("failed to check for existing node: %v", err)
+		}
+		if existingNode != nil {
+			return fmt.Errorf("a node with this public key already exists: %s (id: %s)", existingNode.Name, existingNode.ID)
+		}
 	}
 
 	// Serialize supported_crypto to JSON
 	var supportedCryptoJSON []byte
+	var err error
 	if len(node.SupportedCrypto) > 0 {
 		supportedCryptoJSON, err = json.Marshal(node.SupportedCrypto)
 		if err != nil {
@@ -2423,8 +2430,12 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, force
 	var ephemeralPub []byte
 	
 	if backendName == "hpke" {
+		// Defensive check: refuse HPKE operations for JOSE-only nodes
+		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+			return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
+		}
 		// Use HPKE directly
-		if len(node.LongTermPubKey) != 32 {
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
 			return "", fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
 		}
 		ciphertext, ephemeralPub, err = hpke.Encrypt(node.LongTermPubKey, nil, nonce)
@@ -2450,7 +2461,10 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, force
 		if err != nil {
 			return "", fmt.Errorf("failed to encrypt nonce with JOSE: %v", err)
 		}
-		// JOSE doesn't use ephemeral keys in the same way - set to empty
+		// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
+		// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
+		// so there's no separate ephemeralPubKey field needed. The recipient extracts it
+		// from the JWE header during decryption. Set to empty to indicate this difference.
 		ephemeralPub = []byte{}
 		log.Printf("KDC: Encrypted ping nonce using JOSE backend for node %s", nodeID)
 	} else {
@@ -2544,6 +2558,13 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 		return "", fmt.Errorf("failed to get node: %v", err)
 	}
 
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for key deletion", nodeID)
+	}
+	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+		return "", fmt.Errorf("node %s has invalid public key for encryption: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	}
 	// Encrypt the key ID using HPKE (so the node can verify it's deleting the right key)
 	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, []byte(keyID))
 	if err != nil {
@@ -3492,7 +3513,11 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
 	
-	if len(node.LongTermPubKey) != 32 {
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for component distribution", nodeID)
+	}
+	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
 		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
 	}
 	
