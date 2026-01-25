@@ -1158,6 +1158,7 @@ func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
 				long_term_pub_key BLOB UNIQUE,
 				long_term_jose_pub_key BLOB,
 				supported_crypto TEXT,
+				sig0_pubkey TEXT,
 				notify_address TEXT,
 				registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1173,7 +1174,7 @@ func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
 		_, err = tx.Exec(`
 			INSERT INTO nodes_new 
 			SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, 
-			       notify_address, registered_at, last_seen, state, comment
+			       sig0_pubkey, notify_address, registered_at, last_seen, state, comment
 			FROM nodes`)
 		if err != nil {
 			return fmt.Errorf("failed to copy data to new table: %v", err)

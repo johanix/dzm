@@ -1054,6 +1054,13 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			
 			log.Printf("KDC: Will distribute %d key(s) to %d unique node(s) using shared distribution ID %s", len(allKeys), len(allNodes), sharedDistributionID)
 			
+			// Validate crypto backend before any state changes
+			forcedCrypto := req.Crypto
+			if forcedCrypto != "" && forcedCrypto != "hpke" && forcedCrypto != "jose" {
+				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", forcedCrypto))
+				return
+			}
+			
 			// Second pass: encrypt all keys for all nodes using the shared distribution ID
 			totalEncryptedCount := 0
 			for _, zoneInfo := range zoneInfos {
@@ -1079,13 +1086,6 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				}
 				
 				// Encrypt keys for all nodes (each node gets all keys from all zones in this distribution)
-				// Use forced crypto if specified
-				forcedCrypto := req.Crypto
-				// Validate crypto backend at API boundary
-				if forcedCrypto != "" && forcedCrypto != "hpke" && forcedCrypto != "jose" {
-					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", forcedCrypto))
-					return
-				}
 				for _, node := range allNodes {
 					if zoneInfo.StandbyZSK != nil {
 						_, _, _, err := kdcDB.EncryptKeyForNodeWithCrypto(zoneInfo.StandbyZSK, node, kdcConf, forcedCrypto, sharedDistributionID)

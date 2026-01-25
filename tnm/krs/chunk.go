@@ -9,6 +9,7 @@ package krs
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -216,8 +217,19 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 			return fmt.Errorf("JOSE private key is not an ECDSA key (required for HMAC)")
 		}
 
+		// Validate curve is P-256 (required for 32-byte x-coordinate)
+		if ecdsaKey.Curve != elliptic.P256() {
+			return fmt.Errorf("JOSE private key uses unsupported curve: %s (expected P-256 for HMAC)", ecdsaKey.Curve.Params().Name)
+		}
+
 		// Extract x-coordinate from the ECDSA private key's public key (32 bytes for P-256)
 		xBytes := ecdsaKey.PublicKey.X.Bytes()
+		
+		// Validate x-coordinate length (defensive check - should be <= 32 for P-256)
+		if len(xBytes) > 32 {
+			return fmt.Errorf("JOSE private key x-coordinate length %d exceeds 32 bytes (curve: %s)", len(xBytes), ecdsaKey.Curve.Params().Name)
+		}
+
 		// Left-pad to 32 bytes if needed (ECDSA coordinates are variable length)
 		hmacKey = make([]byte, 32)
 		copy(hmacKey[32-len(xBytes):], xBytes)

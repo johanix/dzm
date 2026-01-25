@@ -2539,12 +2539,6 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 		return "", fmt.Errorf("failed to get distribution ID: %v", err)
 	}
 
-	// Create payload with reason and confirmation flag
-	payload := map[string]interface{}{
-		"reason":               reason,
-		"pending_confirmation": true,
-	}
-
 	// Generate a unique ID for this distribution record
 	distRecordID := make([]byte, 16)
 	if _, err := rand.Read(distRecordID); err != nil {
@@ -2558,17 +2552,61 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 		return "", fmt.Errorf("failed to get node: %v", err)
 	}
 
-	// Defensive check: refuse HPKE operations for JOSE-only nodes
-	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-		return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for key deletion", nodeID)
+	// Select crypto backend
+	backendName := selectBackendForNode(node, "")
+	
+	// Encrypt the key ID (so the node can verify it's deleting the right key)
+	var ciphertext []byte
+	var ephemeralPub []byte
+	
+	if backendName == "hpke" {
+		// Defensive check: refuse HPKE operations for JOSE-only nodes
+		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+			return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
+		}
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+			return "", fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		}
+		// Encrypt using HPKE
+		ciphertext, ephemeralPub, err = hpke.Encrypt(node.LongTermPubKey, nil, []byte(keyID))
+		if err != nil {
+			return "", fmt.Errorf("failed to encrypt key ID with HPKE: %v", err)
+		}
+		log.Printf("KDC: Encrypted delete key ID using HPKE backend for node %s", nodeID)
+	} else if backendName == "jose" {
+		// Use JOSE via crypto abstraction layer
+		if len(node.LongTermJosePubKey) == 0 {
+			return "", fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE key deletion)", nodeID)
+		}
+		joseBackend, err2 := crypto.GetBackend("jose")
+		if err2 != nil {
+			return "", fmt.Errorf("failed to get JOSE backend: %v", err2)
+		}
+		// Parse JOSE public key
+		nodeJosePubKey, err2 := joseBackend.ParsePublicKey(node.LongTermJosePubKey)
+		if err2 != nil {
+			return "", fmt.Errorf("failed to parse node JOSE public key: %v", err2)
+		}
+		// Encrypt key ID using JOSE
+		ciphertext, err = joseBackend.Encrypt(nodeJosePubKey, []byte(keyID))
+		if err != nil {
+			return "", fmt.Errorf("failed to encrypt key ID with JOSE: %v", err)
+		}
+		// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
+		// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
+		// so there's no separate ephemeralPubKey field needed. The recipient extracts it
+		// from the JWE header during decryption. Set to empty to indicate this difference.
+		ephemeralPub = []byte{}
+		log.Printf("KDC: Encrypted delete key ID using JOSE backend for node %s", nodeID)
+	} else {
+		return "", fmt.Errorf("unsupported crypto backend: %s", backendName)
 	}
-	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-		return "", fmt.Errorf("node %s has invalid public key for encryption: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
-	}
-	// Encrypt the key ID using HPKE (so the node can verify it's deleting the right key)
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, []byte(keyID))
-	if err != nil {
-		return "", fmt.Errorf("failed to encrypt key ID: %v", err)
+
+	// Create payload with reason, confirmation flag, and crypto backend
+	payload := map[string]interface{}{
+		"reason":               reason,
+		"pending_confirmation": true,
+		"crypto":               backendName, // Store the actual crypto backend used
 	}
 
 	// Check if key exists at KDC

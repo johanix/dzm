@@ -267,12 +267,21 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	}
 
 	// Get KDC HPKE keypair early (needed for error responses and HPKE decryption)
-	kdcHpkeKeys, err := GetKdcHpkeKeypair(kdcConf.KdcHpkePrivKey)
-	if err != nil {
-		log.Printf("KDC: Failed to get KDC HPKE keypair: %v", err)
-		return returnError(dns.RcodeServerFailure, fmt.Sprintf("KDC internal error: failed to load HPKE keypair: %v", err), "", nil, nil)
+	// HPKE keys are optional for JOSE-only KDCs
+	var kdcHpkeKeys *KdcHpkeKeys
+	if kdcConf.KdcHpkePrivKey != "" {
+		var err error
+		kdcHpkeKeys, err = GetKdcHpkeKeypair(kdcConf.KdcHpkePrivKey)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get KDC HPKE keypair: %v", err)
+			log.Printf("KDC: Continuing without HPKE keys (JOSE-only KDC mode)")
+			kdcHpkeKeys = nil
+		}
+	} else {
+		log.Printf("KDC: kdc_hpke_priv_key not configured, operating in JOSE-only mode")
+		kdcHpkeKeys = nil
 	}
-	// JOSE keys will be loaded lazily only if HPKE decryption fails
+	// JOSE keys will be loaded lazily only if HPKE decryption fails or HPKE is unavailable
 
 	// 1. Check if UPDATE section has exactly one CHUNK record
 	if len(r.Ns) != 1 {
@@ -320,34 +329,61 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		return returnError(dns.RcodeFormatError, "CHUNK data is empty", "", nil, kdcHpkeKeys)
 	}
 
-	// 4. Decrypt enrollment request - try HPKE first (for backward compatibility), then JOSE
+	// 4. Decrypt enrollment request - try HPKE first (if available), then JOSE
 	// NOTE: HPKE Base mode is used for enrollment (no sender auth required)
 	// JOSE encryption also doesn't require sender auth in this context
 	var decryptedData []byte
 	var encryptionBackend string
+	var hpkeDecryptErr error
 	
-	// Try HPKE first
-	decryptedData, err = hpke.Decrypt(kdcHpkeKeys.PrivateKey, nil, encryptedData)
-	if err == nil {
-		encryptionBackend = "hpke"
-		log.Printf("KDC: Successfully decrypted enrollment request using HPKE (decrypted length: %d)", len(decryptedData))
+	// Try HPKE first if available
+	if kdcHpkeKeys != nil {
+		decryptedData, hpkeDecryptErr = hpke.Decrypt(kdcHpkeKeys.PrivateKey, nil, encryptedData)
+		if hpkeDecryptErr == nil {
+			encryptionBackend = "hpke"
+			log.Printf("KDC: Successfully decrypted enrollment request using HPKE (decrypted length: %d)", len(decryptedData))
+		} else {
+			log.Printf("KDC: HPKE decryption failed, trying JOSE: %v", hpkeDecryptErr)
+		}
 	} else {
-		// HPKE decryption failed, try JOSE - load JOSE keys lazily only when needed
-		log.Printf("KDC: HPKE decryption failed, trying JOSE: %v", err)
+		log.Printf("KDC: HPKE keys not available, trying JOSE")
+		hpkeDecryptErr = fmt.Errorf("HPKE keys not configured")
+	}
+	
+	// If HPKE failed or unavailable, try JOSE
+	if encryptionBackend == "" {
 		kdcJoseKeys, err2 := GetKdcJoseKeypair(kdcConf.KdcJosePrivKey)
 		if err2 != nil {
 			log.Printf("KDC: Failed to get KDC JOSE keypair: %v", err2)
-			return returnError(dns.RcodeFormatError, fmt.Sprintf("Failed to decrypt enrollment request (tried HPKE and JOSE): HPKE error: %v, JOSE keypair error: %v", err, err2), "", nil, kdcHpkeKeys)
+			var hpkeErrMsg string
+			if hpkeDecryptErr != nil {
+				hpkeErrMsg = hpkeDecryptErr.Error()
+			} else {
+				hpkeErrMsg = "HPKE keys not configured"
+			}
+			return returnError(dns.RcodeFormatError, fmt.Sprintf("Failed to decrypt enrollment request (tried HPKE and JOSE): HPKE error: %s, JOSE keypair error: %v", hpkeErrMsg, err2), "", nil, kdcHpkeKeys)
 		}
 		joseBackend, err2 := crypto.GetBackend("jose")
 		if err2 != nil {
 			log.Printf("KDC: Failed to get JOSE backend: %v", err2)
-			return returnError(dns.RcodeFormatError, fmt.Sprintf("Failed to decrypt enrollment request (tried HPKE and JOSE): HPKE error: %v, JOSE backend error: %v", err, err2), "", nil, kdcHpkeKeys)
+			var hpkeErrMsg string
+			if hpkeDecryptErr != nil {
+				hpkeErrMsg = hpkeDecryptErr.Error()
+			} else {
+				hpkeErrMsg = "HPKE keys not configured"
+			}
+			return returnError(dns.RcodeFormatError, fmt.Sprintf("Failed to decrypt enrollment request (tried HPKE and JOSE): HPKE error: %s, JOSE backend error: %v", hpkeErrMsg, err2), "", nil, kdcHpkeKeys)
 		}
 		decryptedData, err2 = joseBackend.Decrypt(kdcJoseKeys.PrivateKey, encryptedData)
 		if err2 != nil {
 			log.Printf("KDC: Failed to decrypt enrollment request with JOSE: %v", err2)
-			return returnError(dns.RcodeFormatError, fmt.Sprintf("Failed to decrypt enrollment request (tried HPKE and JOSE): HPKE error: %v, JOSE error: %v", err, err2), "", nil, kdcHpkeKeys)
+			var hpkeErrMsg string
+			if hpkeDecryptErr != nil {
+				hpkeErrMsg = hpkeDecryptErr.Error()
+			} else {
+				hpkeErrMsg = "HPKE keys not configured"
+			}
+			return returnError(dns.RcodeFormatError, fmt.Sprintf("Failed to decrypt enrollment request (tried HPKE and JOSE): HPKE error: %s, JOSE error: %v", hpkeErrMsg, err2), "", nil, kdcHpkeKeys)
 		}
 		encryptionBackend = "jose"
 		log.Printf("KDC: Successfully decrypted enrollment request using JOSE (decrypted length: %d)", len(decryptedData))
@@ -490,10 +526,13 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	// 12. Generate enrollment confirmation
 	// Create confirmation JSON
 	confirmation := edns0.EnrollmentConfirmation{
-		NodeID:        nodeID,
-		Status:        "success",
-		KdcHpkePubKey: hex.EncodeToString(kdcHpkeKeys.PublicKey),
-		Timestamp:     time.Now().Format(time.RFC3339),
+		NodeID:    nodeID,
+		Status:    "success",
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	// Only include HPKE public key if available
+	if kdcHpkeKeys != nil {
+		confirmation.KdcHpkePubKey = hex.EncodeToString(kdcHpkeKeys.PublicKey)
 	}
 
 	confirmationJSON, err := json.Marshal(confirmation)
@@ -508,6 +547,11 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	if encryptionBackend == "hpke" {
 		// Encrypt using HPKE Auth mode
 		// KDC's private key (sender authentication), node's HPKE public key (recipient encryption)
+		if kdcHpkeKeys == nil {
+			log.Printf("KDC: Error: HPKE backend selected but kdcHpkeKeys is nil")
+			m.SetRcode(r, dns.RcodeServerFailure)
+			return w.WriteMsg(m)
+		}
 		encryptedConfirmation, err = hpke.EncryptAuth(kdcHpkeKeys.PrivateKey, hpkePubKey, confirmationJSON)
 		if err != nil {
 			log.Printf("KDC: Failed to encrypt enrollment confirmation with HPKE: %v", err)
