@@ -8,6 +8,7 @@
 package krs
 
 import (
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/crypto"
@@ -179,21 +181,53 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 	}
 
 	// Verify CHUNK manifest HMAC using this node's long-term public key
+	var hmacKey []byte
 	if conf.Node.LongTermHpkePrivKey != "" {
-		// Load node's private key
+		// Load node's HPKE private key
 		privateKey, err := loadPrivateKey(conf.Node.LongTermHpkePrivKey)
 		if err != nil {
-			return fmt.Errorf("failed to load node private key: %v", err)
+			return fmt.Errorf("failed to load node HPKE private key: %v", err)
 		}
 
 		// Derive public key from private key
 		publicKey, err := hpke.DerivePublicKey(privateKey)
 		if err != nil {
-			return fmt.Errorf("failed to derive public key from private key: %v", err)
+			return fmt.Errorf("failed to derive public key from HPKE private key: %v", err)
 		}
 
-		// Verify HMAC using the public key
-		valid, err := tnm.VerifyCHUNKHMAC(manifestChunk, publicKey)
+		// For HPKE, use the public key directly as HMAC key (32 bytes)
+		hmacKey = publicKey
+	} else if conf.Node.LongTermJosePrivKey != "" {
+		// Load JOSE private key using loadPrivateKeyForBackend
+		joseKeyJSON, err := loadPrivateKeyForBackend(conf, "jose")
+		if err != nil {
+			return fmt.Errorf("failed to load node JOSE private key: %v", err)
+		}
+
+		// Parse JWK to extract ECDSA private key
+		var jwk jose.JSONWebKey
+		if err := json.Unmarshal(joseKeyJSON, &jwk); err != nil {
+			return fmt.Errorf("failed to parse JOSE private key JSON: %v", err)
+		}
+
+		// Extract ECDSA private key
+		ecdsaKey, ok := jwk.Key.(*ecdsa.PrivateKey)
+		if !ok {
+			return fmt.Errorf("JOSE private key is not an ECDSA key (required for HMAC)")
+		}
+
+		// Extract x-coordinate from the ECDSA private key's public key (32 bytes for P-256)
+		xBytes := ecdsaKey.PublicKey.X.Bytes()
+		// Left-pad to 32 bytes if needed (ECDSA coordinates are variable length)
+		hmacKey = make([]byte, 32)
+		copy(hmacKey[32-len(xBytes):], xBytes)
+	} else {
+		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
+	}
+
+	// Verify HMAC if we have a key
+	if hmacKey != nil {
+		valid, err := tnm.VerifyCHUNKHMAC(manifestChunk, hmacKey)
 		if err != nil {
 			return fmt.Errorf("failed to verify CHUNK manifest HMAC: %v", err)
 		}
@@ -201,8 +235,6 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 			return fmt.Errorf("CHUNK manifest HMAC verification failed - possible tampering or key mismatch")
 		}
 		log.Printf("KRS: CHUNK manifest HMAC verified successfully using node's public key")
-	} else {
-		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
 	}
 
 	// Extract content type, retire_time, timestamp, distribution_ttl, and crypto from metadata
@@ -467,17 +499,10 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 	return nil
 }
 
-// ProcessEncryptedOperations processes operation-based distributions
-// Handles: key_operations, mgmt_operations, mixed_operations
-// Data is base64-encoded encrypted payload containing operation entries in JSON
-// The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
-// Operations can be: roll_key, delete_key (key operations), ping (management operations), or mixed
-// distributionID and retireTime are optional and can be passed from the manifest metadata
-func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distributionID string, retireTime string, cryptoBackend string) error {
-	distID := distributionID
-	// Step 1: Load node's private key for decryption (based on crypto backend)
-	log.Printf("KRS: Processing operation-based distribution (key_operations, mgmt_operations, or mixed) (%d bytes base64)", len(data))
-	
+// decryptPayload decrypts an encrypted payload using the appropriate crypto backend
+// Handles backend defaulting, validation, key loading, and V1/V2 path selection
+// Returns the decrypted plaintext or an error
+func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byte, error) {
 	// Default to HPKE if crypto backend not specified (backward compatibility)
 	if cryptoBackend == "" {
 		cryptoBackend = "hpke"
@@ -485,16 +510,16 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, di
 	
 	// Fail fast if JOSE backend is requested but crypto V2 is disabled
 	if cryptoBackend == "jose" && !conf.ShouldUseCryptoV2() {
-		return fmt.Errorf("jose backend requires crypto V2; enable feature flag or choose a different backend")
+		return nil, fmt.Errorf("jose backend requires crypto V2; enable feature flag or choose a different backend")
 	}
 	
 	privateKey, err := loadPrivateKeyForBackend(conf, cryptoBackend)
 	if err != nil {
-		return fmt.Errorf("failed to load private key for %s backend: %v", cryptoBackend, err)
+		return nil, fmt.Errorf("failed to load private key for %s backend: %v", cryptoBackend, err)
 	}
 	log.Printf("KRS: Loaded node private key for %s backend (%d bytes)", cryptoBackend, len(privateKey))
 
-	// Step 2: Decrypt the entire payload using V1 or V2 based on feature flag
+	// Decrypt the entire payload using V1 or V2 based on feature flag
 	var plaintextJSON []byte
 	if conf.ShouldUseCryptoV2() {
 		// V2: Use crypto abstraction layer
@@ -503,19 +528,19 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, di
 		// Get the crypto backend
 		backend, err := crypto.GetBackend(cryptoBackend)
 		if err != nil {
-			return fmt.Errorf("failed to get crypto backend %s: %v", cryptoBackend, err)
+			return nil, fmt.Errorf("failed to get crypto backend %s: %v", cryptoBackend, err)
 		}
 
 		// Parse the private key using the backend
 		privKey, err := backend.ParsePrivateKey(privateKey)
 		if err != nil {
-			return fmt.Errorf("failed to parse private key with %s backend: %v", backend.Name(), err)
+			return nil, fmt.Errorf("failed to parse private key with %s backend: %v", backend.Name(), err)
 		}
 
 		// Decrypt using V2
 		plaintextJSON, err = tnm.DecodeAndDecryptV2(privKey, data, backend)
 		if err != nil {
-			return fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
+			return nil, fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
 		}
 		log.Printf("KRS: Successfully decrypted distribution payload using %s backend: %d bytes", backend.Name(), len(plaintextJSON))
 	} else {
@@ -523,9 +548,28 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, di
 		log.Printf("KRS: Using crypto V1 (direct HPKE) for decryption")
 		plaintextJSON, err = tnm.DecodeAndDecrypt(privateKey, data)
 		if err != nil {
-			return fmt.Errorf("failed to decrypt distribution payload: %v", err)
+			return nil, fmt.Errorf("failed to decrypt distribution payload: %v", err)
 		}
 		log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
+	}
+	
+	return plaintextJSON, nil
+}
+
+// ProcessEncryptedOperations processes operation-based distributions
+// Handles: key_operations, mgmt_operations, mixed_operations
+// Data is base64-encoded encrypted payload containing operation entries in JSON
+// The payload format: <ephemeral_pub_key (32 bytes)><ciphertext>
+// Operations can be: roll_key, delete_key (key operations), ping (management operations), or mixed
+// distributionID and retireTime are optional and can be passed from the manifest metadata
+func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distributionID string, retireTime string, cryptoBackend string) error {
+	distID := distributionID
+	// Step 1: Load node's private key and decrypt payload
+	log.Printf("KRS: Processing operation-based distribution (key_operations, mgmt_operations, or mixed) (%d bytes base64)", len(data))
+	
+	plaintextJSON, err := decryptPayload(conf, data, cryptoBackend)
+	if err != nil {
+		return err
 	}
 
 	// Step 3: Parse JSON structure as operation-based distribution entries
@@ -676,57 +720,12 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, di
 // distributionID is optional and can be passed from the manifest metadata
 func ProcessNodeComponents(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distributionID string, cryptoBackend string) error {
 	distID := distributionID
-	// Step 1: Load node's private key for decryption (based on crypto backend)
+	// Step 1: Load node's private key and decrypt payload
 	log.Printf("KRS: Processing node_operations content (update_components) (%d bytes base64)", len(data))
 	
-	// Default to HPKE if crypto backend not specified (backward compatibility)
-	if cryptoBackend == "" {
-		cryptoBackend = "hpke"
-	}
-	
-	// Fail fast if JOSE backend is requested but crypto V2 is disabled
-	if cryptoBackend == "jose" && !conf.ShouldUseCryptoV2() {
-		return fmt.Errorf("jose backend requires crypto V2; enable feature flag or choose a different backend")
-	}
-	
-	privateKey, err := loadPrivateKeyForBackend(conf, cryptoBackend)
+	plaintextJSON, err := decryptPayload(conf, data, cryptoBackend)
 	if err != nil {
-		return fmt.Errorf("failed to load private key for %s backend: %v", cryptoBackend, err)
-	}
-	log.Printf("KRS: Loaded node private key for %s backend (%d bytes)", cryptoBackend, len(privateKey))
-
-	// Step 2: Decrypt the entire payload using V1 or V2 based on feature flag
-	var plaintextJSON []byte
-	if conf.ShouldUseCryptoV2() {
-		// V2: Use crypto abstraction layer
-		log.Printf("KRS: Using crypto V2 for decryption with backend: %s", cryptoBackend)
-
-		// Get the crypto backend
-		backend, err := crypto.GetBackend(cryptoBackend)
-		if err != nil {
-			return fmt.Errorf("failed to get crypto backend %s: %v", cryptoBackend, err)
-		}
-
-		// Parse the private key using the backend
-		privKey, err := backend.ParsePrivateKey(privateKey)
-		if err != nil {
-			return fmt.Errorf("failed to parse private key with %s backend: %v", backend.Name(), err)
-		}
-
-		// Decrypt using V2
-		plaintextJSON, err = tnm.DecodeAndDecryptV2(privKey, data, backend)
-		if err != nil {
-			return fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
-		}
-		log.Printf("KRS: Successfully decrypted distribution payload using %s backend: %d bytes", backend.Name(), len(plaintextJSON))
-	} else {
-		// V1: Use direct HPKE implementation
-		log.Printf("KRS: Using crypto V1 (direct HPKE) for decryption")
-		plaintextJSON, err = tnm.DecodeAndDecrypt(privateKey, data)
-		if err != nil {
-			return fmt.Errorf("failed to decrypt distribution payload: %v", err)
-		}
-		log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
+		return err
 	}
 
 	// Step 3: Parse JSON structure (cleartext)
@@ -831,18 +830,23 @@ func loadPrivateKeyForBackend(conf *tnm.KrsConf, cryptoBackend string) ([]byte, 
 		}
 		
 		// Parse key (skip comments, extract JSON)
+		// Preserve line breaks for multi-line pretty-printed JWK JSON
 		keyLines := strings.Split(string(keyData), "\n")
-		var jwkJSON string
+		var jsonLines []string
 		for _, line := range keyLines {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				jwkJSON += line
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine != "" && !strings.HasPrefix(trimmedLine, "#") {
+				// Preserve original line (with indentation) for pretty-printed JSON
+				jsonLines = append(jsonLines, line)
 			}
 		}
 		
-		if jwkJSON == "" {
+		if len(jsonLines) == 0 {
 			return nil, fmt.Errorf("could not find JOSE private key JSON in file %s", conf.Node.LongTermJosePrivKey)
 		}
+		
+		// Join lines with newlines to preserve formatting
+		jwkJSON := strings.Join(jsonLines, "\n")
 		
 		log.Printf("KRS: Loaded JOSE private key from %s (%d bytes JSON)", conf.Node.LongTermJosePrivKey, len(jwkJSON))
 		return []byte(jwkJSON), nil

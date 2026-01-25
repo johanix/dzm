@@ -1081,6 +1081,11 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				// Encrypt keys for all nodes (each node gets all keys from all zones in this distribution)
 				// Use forced crypto if specified
 				forcedCrypto := req.Crypto
+				// Validate crypto backend at API boundary
+				if forcedCrypto != "" && forcedCrypto != "hpke" && forcedCrypto != "jose" {
+					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", forcedCrypto))
+					return
+				}
 				for _, node := range allNodes {
 					if zoneInfo.StandbyZSK != nil {
 						_, _, _, err := kdcDB.EncryptKeyForNodeWithCrypto(zoneInfo.StandbyZSK, node, kdcConf, forcedCrypto, sharedDistributionID)
@@ -1193,6 +1198,11 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 			// Allow nil LongTermPubKey for JOSE-only nodes
 			if req.Node.LongTermPubKey != nil && len(req.Node.LongTermPubKey) != 32 {
 				sendJSONError(w, http.StatusBadRequest, "node.long_term_pub_key must be 32 bytes (X25519) or nil for JOSE-only nodes")
+				return
+			}
+			// Require at least one public key (HPKE or JOSE)
+			if (req.Node.LongTermPubKey == nil || len(req.Node.LongTermPubKey) == 0) && (req.Node.LongTermJosePubKey == nil || len(req.Node.LongTermJosePubKey) == 0) {
+				sendJSONError(w, http.StatusBadRequest, "node must include either a 32-byte long_term_pub_key or a JOSE public key")
 				return
 			}
 			if req.Node.State == "" {
@@ -1395,7 +1405,12 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 							resp.ErrorMsg = err.Error()
 							// Token was already created, but blob generation failed
 							// This is a critical error since the blob is required for enrollment
-							// TODO: Consider adding token deletion/revocation to clean up orphaned tokens
+							// Clean up the orphaned token by deleting it
+							if deleteErr := kdcDB.DeleteEnrollmentToken(token.TokenValue); deleteErr != nil {
+								log.Printf("KDC: Warning: Failed to delete orphaned enrollment token for node %s after blob generation failure: %v", req.NodeID, deleteErr)
+							} else {
+								log.Printf("KDC: Deleted orphaned enrollment token for node %s after blob generation failure", req.NodeID)
+							}
 						} else {
 							// Only set Token and Msg after successful blob generation
 							resp.Token = token
@@ -1851,6 +1866,11 @@ func APIKdcOperations(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			// Extract forced crypto if specified
 			forcedCrypto := ""
 			if crypto, ok := req["crypto"].(string); ok && crypto != "" {
+				// Validate crypto backend at API boundary
+				if crypto != "hpke" && crypto != "jose" {
+					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", crypto))
+					return
+				}
 				forcedCrypto = crypto
 			}
 			

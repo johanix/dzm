@@ -1134,15 +1134,91 @@ func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
 		err := kdc.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes'").Scan(&sql)
 		if err == nil {
 			// Check if NOT NULL is in the schema
-			if !strings.Contains(sql, "long_term_pub_key BLOB NOT NULL") {
+			if !strings.Contains(sql, "long_term_pub_key BLOB NOT NULL") && !strings.Contains(sql, "long_term_pub_key BLOB UNIQUE NOT NULL") {
 				// Already nullable or doesn't have NOT NULL
 				return nil
 			}
-			// Column has NOT NULL, but SQLite doesn't support MODIFY COLUMN easily
-			// We'll log a warning - the CREATE TABLE IF NOT EXISTS will handle new databases
-			log.Printf("KDC: Warning: SQLite table has NOT NULL on long_term_pub_key. New databases will allow NULL.")
-			return nil
 		}
+		
+		// Column has NOT NULL, need to rebuild table to make it nullable
+		log.Printf("KDC: Recreating nodes table to make long_term_pub_key nullable")
+		
+		// Start transaction
+		tx, err := kdc.DB.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %v", err)
+		}
+		defer tx.Rollback()
+		
+		// Create new table with nullable long_term_pub_key (keep UNIQUE constraint - SQLite allows multiple NULLs)
+		_, err = tx.Exec(`
+			CREATE TABLE nodes_new (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				long_term_pub_key BLOB UNIQUE,
+				long_term_jose_pub_key BLOB,
+				supported_crypto TEXT,
+				notify_address TEXT,
+				registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				state TEXT NOT NULL DEFAULT 'online',
+				comment TEXT,
+				CHECK (state IN ('online', 'offline', 'compromised', 'suspended'))
+			)`)
+		if err != nil {
+			return fmt.Errorf("failed to create new nodes table: %v", err)
+		}
+		
+		// Copy all data from old table to new table
+		_, err = tx.Exec(`
+			INSERT INTO nodes_new 
+			SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, 
+			       notify_address, registered_at, last_seen, state, comment
+			FROM nodes`)
+		if err != nil {
+			return fmt.Errorf("failed to copy data to new table: %v", err)
+		}
+		
+		// Drop old table
+		_, err = tx.Exec("DROP TABLE nodes")
+		if err != nil {
+			return fmt.Errorf("failed to drop old table: %v", err)
+		}
+		
+		// Rename new table
+		_, err = tx.Exec("ALTER TABLE nodes_new RENAME TO nodes")
+		if err != nil {
+			return fmt.Errorf("failed to rename new table: %v", err)
+		}
+		
+		// Recreate indexes
+		indexes := []string{
+			"CREATE INDEX IF NOT EXISTS idx_nodes_state ON nodes(state)",
+			"CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen)",
+		}
+		for _, idxStmt := range indexes {
+			if _, err := tx.Exec(idxStmt); err != nil {
+				log.Printf("KDC: Warning: Failed to recreate index: %v", err)
+			}
+		}
+		
+		// Recreate trigger
+		_, err = tx.Exec(`
+			CREATE TRIGGER IF NOT EXISTS nodes_last_seen 
+			AFTER UPDATE ON nodes
+			BEGIN
+				UPDATE nodes SET last_seen = CURRENT_TIMESTAMP WHERE id = NEW.id;
+			END`)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to recreate trigger: %v", err)
+		}
+		
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %v", err)
+		}
+		
+		log.Printf("KDC: Successfully made long_term_pub_key nullable in nodes table")
 	} else {
 		// MySQL/MariaDB: Check if column is already nullable
 		var isNullable string

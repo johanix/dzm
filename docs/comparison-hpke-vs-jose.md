@@ -42,7 +42,7 @@ This document describes in detail the differences in CHUNK payload content betwe
 
 ### Transport Format
 
-```
+```text
 base64(<ephemeral_pub_key (32 bytes)><encapsulated_key (32 bytes)><encrypted_data>)
 ```
 
@@ -53,7 +53,7 @@ base64(<ephemeral_pub_key (32 bytes)><encapsulated_key (32 bytes)><encrypted_dat
 
 ### Example Structure
 
-```
+```text
 Raw bytes: [32-byte ephemeral][32-byte encapsulated][variable encrypted data]
 Base64:    "Q0ZyaENxNGlaRGhrelJDNUpiaFZXY3A4bXhEUkRrM2FIdjc0YzNsTDZ5SkhqbFlsRUszaGZjdHlBUEVIb29yWUxaaXJ3YThrem9nRXBteFhsZ1BQRFc0Z0lvTFZFNW5vTkx4aTg1YjdISXp6c2QwVjFaNGpxZXlUV1UzWHhvVU94S211MFJpS2k0N3kwUUNSZVpId3E1Z0djOEsvS2NON1Z3KzlOTzdRSFJZOXJKK2h4SlBRMStBZWhHYng0Mkp2aWs2bU9ySFFhYXZFMWRHYm80V0pycGZGYjlvTjZBTVdOR25oRmQ2dmQ2ejVyUUx5MDlNMXArb3M4MFIyK3duMVRZL09ES01s"
 ```
@@ -82,7 +82,7 @@ Base64:    "Q0ZyaENxNGlaRGhrelJDNUpiaFZXY3A4bXhEUkRrM2FIdjc0YzNsTDZ5SkhqbFlsRUsz
 
 ### JWE Structure
 
-```
+```text
 header.encrypted_key.iv.ciphertext.tag
 ```
 
@@ -99,7 +99,7 @@ Where:
 
 ### Transport Format
 
-```
+```text
 base64(JWE_compact_serialization)
 ```
 

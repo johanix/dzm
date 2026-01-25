@@ -1345,9 +1345,9 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 	if notifyAddr.Valid {
 		n.NotifyAddress = notifyAddr.String
 	}
-		if len(josePubKey) > 0 {
-			n.LongTermJosePubKey = josePubKey
-		}
+	if len(josePubKey) > 0 {
+		n.LongTermJosePubKey = josePubKey
+	}
 	// Deserialize supported_crypto JSON array
 	if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
 		if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
@@ -3513,13 +3513,8 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
 	
-	// Defensive check: refuse HPKE operations for JOSE-only nodes
-	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-		return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for component distribution", nodeID)
-	}
-	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-	}
+	// Select crypto backend
+	backendName := selectBackendForNode(node, "")
 	
 	// Components list is now passed as parameter (may include pending changes)
 	
@@ -3546,10 +3541,50 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 	
 	log.Printf("KDC: CreateNodeComponentsDistribution: Creating distribution for node %s with %d components: %v", nodeID, len(components), components)
 	
-	// Encrypt the component list using HPKE
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
-	if err != nil {
-		return "", fmt.Errorf("failed to encrypt components: %v", err)
+	// Encrypt the component list using the selected backend
+	var ciphertext []byte
+	var ephemeralPub []byte
+	
+	if backendName == "hpke" {
+		// Defensive check: refuse HPKE operations for JOSE-only nodes
+		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+			return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
+		}
+		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
+			return "", fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		}
+		// Encrypt using HPKE
+		ciphertext, ephemeralPub, err = hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
+		if err != nil {
+			return "", fmt.Errorf("failed to encrypt components with HPKE: %v", err)
+		}
+	} else if backendName == "jose" {
+		// Use JOSE via crypto abstraction layer
+		if len(node.LongTermJosePubKey) == 0 {
+			return "", fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE component distribution)", nodeID)
+		}
+		joseBackend, err2 := crypto.GetBackend("jose")
+		if err2 != nil {
+			return "", fmt.Errorf("failed to get JOSE backend: %v", err2)
+		}
+		// Parse JOSE public key
+		nodeJosePubKey, err2 := joseBackend.ParsePublicKey(node.LongTermJosePubKey)
+		if err2 != nil {
+			return "", fmt.Errorf("failed to parse node JOSE public key: %v", err2)
+		}
+		// Encrypt components using JOSE
+		ciphertext, err = joseBackend.Encrypt(nodeJosePubKey, componentsJSON)
+		if err != nil {
+			return "", fmt.Errorf("failed to encrypt components with JOSE: %v", err)
+		}
+		// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
+		// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
+		// so there's no separate ephemeralPubKey field needed. The recipient extracts it
+		// from the JWE header during decryption. Set to empty to indicate this difference.
+		ephemeralPub = []byte{}
+		log.Printf("KDC: Encrypted component list using JOSE backend for node %s", nodeID)
+	} else {
+		return "", fmt.Errorf("unsupported crypto backend: %s", backendName)
 	}
 	
 	// Generate a UNIQUE distribution ID using monotonic counter
@@ -3616,6 +3651,10 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 	// Store the distribution record in the database
 	// For node_components distributions, zone_name and key_id are NULL (not about zones/keys)
 	// The actual node ID is stored in node_id field
+	// Store the crypto backend used in payload metadata
+	payload := map[string]interface{}{
+		"crypto": backendName, // Store the actual crypto backend used for manifest generation
+	}
 	distRecord := &DistributionRecord{
 		ID:             distRecordIDHex,
 		ZoneName:       "", // NULL for node_components distributions
@@ -3628,7 +3667,7 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 		Status:         hpke.DistributionStatusPending,
 		DistributionID: distributionID,
 		Operation:      "update_components",
-		Payload:        make(map[string]interface{}),
+		Payload:        payload,
 	}
 	
 	// Insert the new distribution record
@@ -5266,6 +5305,30 @@ func (kdc *KdcDB) MarkEnrollmentTokenUsed(tokenValue string) error {
 	}
 
 	log.Printf("KDC: Marked enrollment token as used (token_value: %s)", tokenValue)
+	return nil
+}
+
+// DeleteEnrollmentToken deletes an enrollment token by token value
+// tokenValue: The token value to delete
+// Returns: error
+func (kdc *KdcDB) DeleteEnrollmentToken(tokenValue string) error {
+	query := `DELETE FROM bootstrap_tokens WHERE token_value = ?`
+	
+	result, err := kdc.DB.Exec(query, tokenValue)
+	if err != nil {
+		return fmt.Errorf("failed to delete enrollment token: %v", err)
+	}
+	
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %v", err)
+	}
+	
+	if rowsAffected == 0 {
+		return fmt.Errorf("token not found: %s", tokenValue)
+	}
+	
+	log.Printf("KDC: Deleted enrollment token (token_value: %s)", tokenValue)
 	return nil
 }
 

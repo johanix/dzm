@@ -61,8 +61,8 @@ func GenerateEnrollmentBlobContent(nodeID string, token *EnrollmentToken, kdcCon
 	var kdcHpkePubKeyHex string
 	var kdcJosePubKeyB64 string
 
-	// Include HPKE key if cryptoBackend is empty (both) or "hpke"
-	if cryptoBackend == "" || cryptoBackend == "hpke" {
+	// Include HPKE key if cryptoBackend is "hpke" or if cryptoBackend is empty and HPKE is configured
+	if cryptoBackend == "hpke" || (cryptoBackend == "" && kdcConf.KdcHpkePrivKey != "") {
 		// Get KDC HPKE public key
 		kdcHpkePubKey, err := GetKdcHpkePubKey(kdcConf.KdcHpkePrivKey)
 		if err != nil {
@@ -71,8 +71,8 @@ func GenerateEnrollmentBlobContent(nodeID string, token *EnrollmentToken, kdcCon
 		kdcHpkePubKeyHex = hex.EncodeToString(kdcHpkePubKey)
 	}
 
-	// Include JOSE key if cryptoBackend is empty (both) or "jose"
-	if cryptoBackend == "" || cryptoBackend == "jose" {
+	// Include JOSE key if cryptoBackend is "jose" or if cryptoBackend is empty and JOSE is configured
+	if cryptoBackend == "jose" || (cryptoBackend == "" && kdcConf.KdcJosePrivKey != "") {
 		// Get KDC JOSE public key
 		kdcJosePubKeyBytes, err := GetKdcJosePubKey(kdcConf.KdcJosePrivKey)
 		if err != nil {
