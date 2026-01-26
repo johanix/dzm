@@ -332,7 +332,22 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	globalChunkCache.mu.RLock()
 	if cached, ok := globalChunkCache.cache[cacheKey]; ok {
 		globalChunkCache.mu.RUnlock()
-		log.Printf("KDC: Using cached chunks for node %s, distribution %s", nodeID, distributionID)
+		// Debug: Check manifest chunk Data field in cached chunks
+		if len(cached.chunks) > 0 && cached.chunks[0].Sequence == 0 {
+			manifestChunk := cached.chunks[0]
+			dataType := "unknown"
+			if len(manifestChunk.Data) > 0 {
+				if manifestChunk.Data[0] == '{' || manifestChunk.Data[0] == '[' {
+					dataType = "JSON"
+				} else {
+					dataType = "base64"
+				}
+			}
+			log.Printf("KDC: Using cached chunks for node %s, distribution %s (manifest data_type=%s, data_len=%d)",
+				nodeID, distributionID, dataType, len(manifestChunk.Data))
+		} else {
+			log.Printf("KDC: Using cached chunks for node %s, distribution %s", nodeID, distributionID)
+		}
 		return cached, nil
 	}
 	globalChunkCache.mu.RUnlock()
