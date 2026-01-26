@@ -90,11 +90,21 @@ func (kdc *KdcDB) buildNodeOperationsPayload(
 
 	// The distribution record contains encrypted component list
 	// For v2, this should already be encrypted with the correct backend
-	// Just base64 encode for transport
-	base64Data := []byte(base64.StdEncoding.EncodeToString(record.EncryptedKey))
+	// DecodeAndDecrypt expects format: <ephemeral_pub_key(32)>+ciphertext
+	// Combine ephemeral pub key (if present) with encrypted key before encoding
+	var encryptedData []byte
+	if record.EphemeralPubKey != nil && len(record.EphemeralPubKey) > 0 {
+		encryptedData = make([]byte, 0, len(record.EphemeralPubKey)+len(record.EncryptedKey))
+		encryptedData = append(encryptedData, record.EphemeralPubKey...)
+		encryptedData = append(encryptedData, record.EncryptedKey...)
+	} else {
+		// No ephemeral pub key (JOSE backend doesn't use it)
+		encryptedData = record.EncryptedKey
+	}
+	base64Data := []byte(base64.StdEncoding.EncodeToString(encryptedData))
 
-	log.Printf("KDC: Using encrypted component list from distribution record: %d bytes -> base64 %d bytes",
-		len(record.EncryptedKey), len(base64Data))
+	log.Printf("KDC: Using encrypted component list from distribution record: %d bytes (ephemeral: %d + ciphertext: %d) -> base64 %d bytes",
+		len(encryptedData), len(record.EphemeralPubKey), len(record.EncryptedKey), len(base64Data))
 
 	return base64Data, 0, 0, nil
 }
@@ -376,9 +386,13 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	for _, record := range records {
 		if record.Payload != nil {
 			if cryptoBackend, ok := record.Payload["crypto"].(string); ok && cryptoBackend != "" {
-				forcedCrypto = cryptoBackend
-				log.Printf("KDC: Found stored crypto backend %s in distribution record payload", cryptoBackend)
-				break
+				if forcedCrypto == "" {
+					forcedCrypto = cryptoBackend
+					log.Printf("KDC: Found stored crypto backend %s in distribution record payload", cryptoBackend)
+				} else if forcedCrypto != cryptoBackend {
+					log.Printf("KDC: Warning: Distribution %s has records with conflicting crypto backends (%s vs %s), using %s",
+						distributionID, forcedCrypto, cryptoBackend, forcedCrypto)
+				}
 			}
 		}
 	}
