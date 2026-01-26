@@ -593,12 +593,14 @@ func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 // GetNodeConfig retrieves the node configuration
 func (krs *KrsDB) GetNodeConfig() (*NodeConfig, error) {
 	var config NodeConfig
+	// Use nullable intermediates for BLOB columns that can be NULL
+	var hpkePubKey, hpkePrivKey sql.RawBytes
 
 	err := krs.DB.QueryRow(
 		`SELECT id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen
 			FROM node_config LIMIT 1`,
 	).Scan(
-		&config.ID, &config.LongTermHpkePubKey, &config.LongTermHpkePrivKey,
+		&config.ID, &hpkePubKey, &hpkePrivKey,
 		&config.KdcAddress, &config.ControlZone, &config.RegisteredAt, &config.LastSeen,
 	)
 	if err != nil {
@@ -606,6 +608,20 @@ func (krs *KrsDB) GetNodeConfig() (*NodeConfig, error) {
 			return nil, fmt.Errorf("node config not found")
 		}
 		return nil, fmt.Errorf("failed to get node config: %v", err)
+	}
+
+	// Convert nullable BLOB columns: nil when NULL, copy bytes when present
+	if hpkePubKey != nil {
+		config.LongTermHpkePubKey = make([]byte, len(hpkePubKey))
+		copy(config.LongTermHpkePubKey, hpkePubKey)
+	} else {
+		config.LongTermHpkePubKey = nil
+	}
+	if hpkePrivKey != nil {
+		config.LongTermHpkePrivKey = make([]byte, len(hpkePrivKey))
+		copy(config.LongTermHpkePrivKey, hpkePrivKey)
+	} else {
+		config.LongTermHpkePrivKey = nil
 	}
 
 	return &config, nil
