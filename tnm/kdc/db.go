@@ -20,6 +20,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // MariaDB driver
 	tnm "github.com/johanix/tdns-nm/tnm"
+	_ "github.com/johanix/tdns/v2/crypto/jose" // Auto-register JOSE backend
 	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
 )
@@ -68,7 +69,7 @@ func NewKdcDB(dbType, dsn string, kdcConf *tnm.KdcConf) (*KdcDB, error) {
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %v", err)
 	}
-	
+
 	// For SQLite, set additional pragmas after connection
 	if strings.ToLower(dbType) == "sqlite" || strings.ToLower(dbType) == "sqlite3" {
 		// Set busy timeout (in milliseconds) - wait up to 5 seconds for locks
@@ -146,7 +147,9 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id VARCHAR(255) PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
-			long_term_pub_key BLOB NOT NULL,
+			long_term_hpke_pub_key BLOB,
+			long_term_jose_pub_key BLOB,
+			supported_crypto JSON,
 			notify_address VARCHAR(255),
 			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -154,7 +157,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			comment TEXT,
 			INDEX idx_state (state),
 			INDEX idx_last_seen (last_seen),
-			INDEX idx_long_term_pub_key (long_term_pub_key(32))
+			INDEX idx_long_term_hpke_pub_key (long_term_hpke_pub_key(32))
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		// DNSSEC keys table
@@ -189,7 +192,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			key_id VARCHAR(255) NULL,
 			node_id VARCHAR(255),
 			encrypted_key BLOB NOT NULL,
-			ephemeral_pub_key BLOB NOT NULL,
+			ephemeral_pub_key BLOB NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at TIMESTAMP NULL,
 			status ENUM('pending', 'delivered', 'active', 'revoked', 'completed') NOT NULL DEFAULT 'pending',
@@ -280,7 +283,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 	}
 
 	log.Printf("KDC database schema initialized successfully (MySQL/MariaDB)")
-	
+
 	// Migrate: Add completed_at column if it doesn't exist
 	if err := kdc.migrateAddCompletedAtColumn(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate completed_at column: %v", err)
@@ -290,25 +293,35 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			log.Printf("KDC: Warning: Failed to create index on completed_at: %v", err)
 		}
 	}
-	
+
 	// Migrate: Update status ENUM to include 'completed'
 	if err := kdc.migrateAddCompletedStatus(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate status ENUM: %v", err)
 	}
-	
+
 	// Migrate: Update state ENUM to include 'active_dist'
 	if err := kdc.migrateAddActiveDistState(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate state ENUM: %v", err)
 	}
-	
+
 	// Migrate: Update state ENUM to include 'active_ce'
 	if err := kdc.migrateAddActiveCEState(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate state ENUM for active_ce: %v", err)
 	}
-	
+
 	// Migrate: Add sig0_pubkey column to nodes table
 	if err := kdc.migrateAddSig0PubkeyToNodes(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
+	}
+
+	// Migrate: Add supported_crypto column to nodes table
+	if err := kdc.migrateAddSupportedCryptoToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate supported_crypto column: %v", err)
+	}
+
+	// Migrate: Add long_term_jose_pub_key column to nodes table
+	if err := kdc.migrateAddJosePubKeyToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate long_term_jose_pub_key column: %v", err)
 	}
 
 	// Migrate: Add operation and payload columns to distribution_records
@@ -316,25 +329,25 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		log.Printf("KDC: Warning: Failed to migrate operation and payload columns: %v", err)
 	}
 
-	// Migrate: Create bootstrap_tokens table
+	// Migrate: Create bootstrap_tokens table (note: table name kept for backward compatibility)
 	// This is critical - if it fails, log as error and return error (don't just warn)
-	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
+	if err := kdc.MigrateEnrollmentTokensTable(); err != nil {
 		log.Printf("KDC: ERROR: Failed to migrate bootstrap_tokens table: %v", err)
 		// Don't return error here - allow daemon to start, but log the error clearly
 		// The table will be created on next startup attempt
 	}
-	
+
 	// Migrate: Remove FK constraint from bootstrap_tokens if it exists
-	// Bootstrap tokens are created BEFORE nodes exist, so FK constraint is wrong
-	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+	// Enrollment tokens are created BEFORE nodes exist, so FK constraint is wrong
+	if err := kdc.migrateRemoveEnrollmentTokensFK(); err != nil {
 		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
 	}
-	
+
 	// Ensure default service/component exist
 	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
 		return fmt.Errorf("failed to ensure default service/component: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -406,7 +419,9 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			long_term_pub_key BLOB NOT NULL UNIQUE,
+			long_term_hpke_pub_key BLOB UNIQUE,
+			long_term_jose_pub_key BLOB,
+			supported_crypto TEXT,
 			notify_address TEXT,
 			registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -452,7 +467,7 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			key_id TEXT NULL,
 			node_id TEXT,
 			encrypted_key BLOB NOT NULL,
-			ephemeral_pub_key BLOB NOT NULL,
+			ephemeral_pub_key BLOB NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at DATETIME,
 			status TEXT NOT NULL DEFAULT 'pending',
@@ -557,7 +572,7 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 	}
 
 	log.Printf("KDC database schema initialized successfully (SQLite)")
-	
+
 	// Migrate: Add completed_at column if it doesn't exist
 	if err := kdc.migrateAddCompletedAtColumn(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate completed_at column: %v", err)
@@ -567,25 +582,35 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			log.Printf("KDC: Warning: Failed to create index on completed_at: %v", err)
 		}
 	}
-	
+
 	// Migrate: Update status CHECK constraint to include 'completed'
 	if err := kdc.migrateAddCompletedStatus(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate status CHECK constraint: %v", err)
 	}
-	
+
 	// Migrate: Update state CHECK constraint to include 'active_dist'
 	if err := kdc.migrateAddActiveDistState(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate state CHECK constraint: %v", err)
 	}
-	
+
 	// Migrate: Update state CHECK constraint to include 'active_ce'
 	if err := kdc.migrateAddActiveCEState(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate state CHECK constraint for active_ce: %v", err)
 	}
-	
+
 	// Migrate: Add sig0_pubkey column to nodes table
 	if err := kdc.migrateAddSig0PubkeyToNodes(); err != nil {
 		log.Printf("KDC: Warning: Failed to migrate sig0_pubkey column: %v", err)
+	}
+
+	// Migrate: Add supported_crypto column to nodes table
+	if err := kdc.migrateAddSupportedCryptoToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate supported_crypto column: %v", err)
+	}
+
+	// Migrate: Add long_term_jose_pub_key column to nodes table
+	if err := kdc.migrateAddJosePubKeyToNodes(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate long_term_jose_pub_key column: %v", err)
 	}
 
 	// Migrate: Add operation and payload columns to distribution_records
@@ -593,42 +618,54 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		log.Printf("KDC: Warning: Failed to migrate operation and payload columns: %v", err)
 	}
 
-	// Migrate: Create bootstrap_tokens table
+	// Migrate: Create bootstrap_tokens table (note: table name kept for backward compatibility)
 	// This is critical - if it fails, log as error (don't just warn)
-	if err := kdc.MigrateBootstrapTokensTable(); err != nil {
+	if err := kdc.MigrateEnrollmentTokensTable(); err != nil {
 		log.Printf("KDC: ERROR: Failed to migrate bootstrap_tokens table: %v", err)
 		// Don't return error here - allow daemon to start, but log the error clearly
 		// The table will be created on next startup attempt
 	}
-	
+
 	// Migrate: Remove FK constraint from bootstrap_tokens if it exists
-	// Bootstrap tokens are created BEFORE nodes exist, so FK constraint is wrong
-	if err := kdc.migrateRemoveBootstrapTokensFK(); err != nil {
+	// Enrollment tokens are created BEFORE nodes exist, so FK constraint is wrong
+	if err := kdc.migrateRemoveEnrollmentTokensFK(); err != nil {
 		log.Printf("KDC: Warning: Failed to remove FK constraint from bootstrap_tokens: %v", err)
 	}
-	
+
 	// Migrate: Make zone_name and key_id nullable in distribution_records
 	// This allows node_components distributions to use NULL (they're not about zones/keys)
 	if err := kdc.migrateMakeDistributionZoneKeyNullable(); err != nil {
 		log.Printf("KDC: Warning: Failed to make zone_name/key_id nullable: %v", err)
 	}
-	
+
 	// Migrate: Make zone_name and key_id nullable in distribution_confirmations
 	// This allows node_components confirmations to use NULL (they're not about zones/keys)
 	if err := kdc.migrateMakeDistributionConfirmationsZoneKeyNullable(); err != nil {
 		log.Printf("KDC: Warning: Failed to make zone_name/key_id nullable in distribution_confirmations: %v", err)
 	}
-	
+
+	// Migrate: Make long_term_hpke_pub_key nullable in nodes table
+	// This allows JOSE-only nodes to have NULL for LongTermPubKey
+	if err := kdc.migrateMakeLongTermPubKeyNullable(); err != nil {
+		log.Printf("KDC: Warning: Failed to make long_term_hpke_pub_key nullable: %v", err)
+	}
+
+	// Migrate: Make ephemeral_pub_key nullable in distribution_records table
+	// This allows JOSE backend distributions to have NULL for ephemeral_pub_key (JWE embeds it in the header)
+	if err := kdc.migrateMakeEphemeralPubKeyNullable(); err != nil {
+		log.Printf("KDC: Warning: Failed to make ephemeral_pub_key nullable: %v", err)
+	}
+
 	// Ensure default service/component exist
 	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
 		return fmt.Errorf("failed to ensure default service/component: %v", err)
 	}
-	
+
 	// Ensure distribution_id_sequence table exists and is initialized
 	if err := kdc.ensureDistributionIDSequence(); err != nil {
 		return fmt.Errorf("failed to ensure distribution_id_sequence: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -659,7 +696,7 @@ func (kdc *KdcDB) ensureDistributionIDSequence() error {
 		}
 		log.Printf("KDC: Created distribution_id_sequence table")
 	}
-	
+
 	// Initialize with row if it doesn't exist
 	if kdc.DBType == "sqlite" {
 		_, err = kdc.DB.Exec("INSERT OR IGNORE INTO distribution_id_sequence (id, last_distribution_id) VALUES (1, 0)")
@@ -669,7 +706,7 @@ func (kdc *KdcDB) ensureDistributionIDSequence() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize distribution_id_sequence: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -707,12 +744,12 @@ func (kdc *KdcDB) GetZoneSigningMode(zoneName string) (ZoneSigningMode, error) {
 	if err != nil {
 		return ZoneSigningModeCentral, fmt.Errorf("failed to get zone: %v", err)
 	}
-	
+
 	if zone.ServiceID == "" {
 		// No service assignment, default to central
 		return ZoneSigningModeCentral, nil
 	}
-	
+
 	// Get components from the service
 	components, err := kdc.GetComponentsForService(zone.ServiceID)
 	if err != nil {
@@ -722,7 +759,7 @@ func (kdc *KdcDB) GetZoneSigningMode(zoneName string) (ZoneSigningMode, error) {
 		// No components in service, default to central
 		return ZoneSigningModeCentral, nil
 	}
-	
+
 	// Use the first signing component's signing mode
 	// Prefer sign_kdc if available, otherwise use first sign_* component
 	for _, compID := range components {
@@ -735,7 +772,7 @@ func (kdc *KdcDB) GetZoneSigningMode(zoneName string) (ZoneSigningMode, error) {
 			return DeriveSigningModeFromComponent(compID), nil
 		}
 	}
-	
+
 	// No signing component found, default to central
 	return ZoneSigningModeCentral, nil
 }
@@ -796,14 +833,14 @@ func (kdc *KdcDB) GetAllZones() ([]*Zone, error) {
 func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 	const defaultServiceID = "default_service"
 	const defaultComponentID = "default_comp"
-	
+
 	// Check if default service exists
 	var serviceExists bool
 	err := kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM services WHERE id = ?)", defaultServiceID).Scan(&serviceExists)
 	if err != nil {
 		return fmt.Errorf("failed to check default service: %v", err)
 	}
-	
+
 	if !serviceExists {
 		// Create default service
 		defaultService := &Service{
@@ -817,21 +854,21 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 		}
 		log.Printf("KDC: Created default service: %s", defaultServiceID)
 	}
-	
+
 	// Create components for each signing mode
 	signingModeComponents := map[string]string{
-		"upstream":   "Component for upstream-signed zones",
-		"kdc":        "Component for centrally-signed zones",
-		"unsigned":   "Component for unsigned zones",
-		"edge_dyn":   "Component for edgesigned zones (dynamic responses only)",
-		"edge_zsk":   "Component for edgesigned zones (all responses)",
-		"edge_full":  "Component for fully edgesigned zones (KSK+ZSK)",
+		"upstream":  "Component for upstream-signed zones",
+		"kdc":       "Component for centrally-signed zones",
+		"unsigned":  "Component for unsigned zones",
+		"edge_dyn":  "Component for edgesigned zones (dynamic responses only)",
+		"edge_zsk":  "Component for edgesigned zones (all responses)",
+		"edge_full": "Component for fully edgesigned zones (KSK+ZSK)",
 	}
-	
+
 	// Only assign sign_kdc to default_service (default signing mode)
 	// Other sign_* components are created but not assigned (users must create services for them)
 	defaultSigningComponentID := "sign_kdc"
-	
+
 	for mode, description := range signingModeComponents {
 		componentID := fmt.Sprintf("sign_%s", mode)
 		var componentExists bool
@@ -839,7 +876,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 		if err != nil {
 			return fmt.Errorf("failed to check component %s: %v", componentID, err)
 		}
-		
+
 		if !componentExists {
 			component := &Component{
 				ID:      componentID,
@@ -853,21 +890,21 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			log.Printf("KDC: Created component: %s", componentID)
 		}
 	}
-	
+
 	// Clean up any invalid sign_* component assignments on default_service
 	// This handles cases where the database has multiple sign_* components assigned (from old code or manual edits)
 	existingComponents, err := kdc.GetComponentsForService(defaultServiceID)
 	if err != nil {
 		return fmt.Errorf("failed to get existing components for default service: %v", err)
 	}
-	
+
 	var signingComponents []string
 	for _, compID := range existingComponents {
 		if strings.HasPrefix(compID, "sign_") {
 			signingComponents = append(signingComponents, compID)
 		}
 	}
-	
+
 	// Remove all sign_* components except sign_kdc (if it exists)
 	// If sign_kdc doesn't exist in the list, we'll add it below
 	hasSignKdc := false
@@ -883,7 +920,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			}
 		}
 	}
-	
+
 	// Ensure sign_kdc is assigned to default_service
 	if !hasSignKdc {
 		// Check if sign_kdc component exists (it should after the loop above)
@@ -895,12 +932,12 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 		if signKdcExists {
 			// Check if assignment already exists (even if inactive)
 			var assignmentExists bool
-			err = kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM service_component_assignments WHERE service_id = ? AND component_id = ?)", 
+			err = kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM service_component_assignments WHERE service_id = ? AND component_id = ?)",
 				defaultServiceID, defaultSigningComponentID).Scan(&assignmentExists)
 			if err != nil {
 				return fmt.Errorf("failed to check if assignment exists: %v", err)
 			}
-			
+
 			if assignmentExists {
 				// Reactivate existing assignment
 				_, err = kdc.DB.Exec(
@@ -920,18 +957,18 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			}
 		}
 	}
-	
+
 	// Clean up old comp_* system components (migrated to sign_* naming)
 	// Map old comp_* names to new sign_* names
 	oldToNewComponentMap := map[string]string{
-		"comp_central":        "sign_kdc",
-		"comp_upstream":       "sign_upstream",
-		"comp_unsigned":       "sign_unsigned",
-		"comp_edgesign_dyn":   "sign_edge_dyn",
-		"comp_edgesign_zsk":   "sign_edge_zsk",
-		"comp_edgesign_all":   "sign_edge_full",
+		"comp_central":      "sign_kdc",
+		"comp_upstream":     "sign_upstream",
+		"comp_unsigned":     "sign_unsigned",
+		"comp_edgesign_dyn": "sign_edge_dyn",
+		"comp_edgesign_zsk": "sign_edge_zsk",
+		"comp_edgesign_all": "sign_edge_full",
 	}
-	
+
 	// Find all old comp_* components
 	rows, err := kdc.DB.Query("SELECT id FROM components WHERE id LIKE 'comp_%'")
 	if err != nil {
@@ -947,15 +984,15 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			}
 			oldComponentIDs = append(oldComponentIDs, compID)
 		}
-		
+
 		// Process each old component
 		for _, oldCompID := range oldComponentIDs {
 			newCompID, isSystemComponent := oldToNewComponentMap[oldCompID]
-			
+
 			if isSystemComponent {
 				// This is a system component that should be migrated
 				log.Printf("KDC: Migrating old system component %s to %s", oldCompID, newCompID)
-				
+
 				// Check if zones are assigned to old component
 				zones, err := kdc.GetZonesForComponent(oldCompID)
 				// Note: Zones are now related to services, not directly to components
@@ -964,7 +1001,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 				if err == nil && len(zones) > 0 {
 					log.Printf("KDC: Component %s had %d zones assigned (via old component_zone_assignments table). Zones will now use component %s via their service assignments.", oldCompID, len(zones), newCompID)
 				}
-				
+
 				// Check if nodes are assigned to old component
 				nodes, err := kdc.GetNodesForComponent(oldCompID)
 				if err == nil && len(nodes) > 0 {
@@ -996,7 +1033,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 						}
 					}
 				}
-				
+
 				// Remove service-component assignments for old component
 				serviceRows, err := kdc.DB.Query(
 					"SELECT service_id FROM service_component_assignments WHERE component_id = ? AND active = 1",
@@ -1011,7 +1048,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 						}
 					}
 					serviceRows.Close()
-					
+
 					for _, serviceID := range serviceIDs {
 						// Remove old assignment
 						if err := kdc.RemoveServiceComponentAssignment(serviceID, oldCompID); err != nil {
@@ -1038,7 +1075,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 						}
 					}
 				}
-				
+
 				// Delete the old component
 				if err := kdc.DeleteComponent(oldCompID); err != nil {
 					log.Printf("KDC: Warning: Failed to delete old component %s: %v", oldCompID, err)
@@ -1051,7 +1088,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			}
 		}
 	}
-	
+
 	// Migrate sign_edge_all components to sign_edge_full (naming consistency fix)
 	rows, err = kdc.DB.Query("SELECT id FROM components WHERE id = 'sign_edge_all'")
 	if err != nil {
@@ -1061,7 +1098,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 		if rows.Next() {
 			// sign_edge_all component exists, migrate it
 			log.Printf("KDC: Migrating sign_edge_all component to sign_edge_full")
-			
+
 			// Get all services using sign_edge_all
 			serviceRows, err := kdc.DB.Query(
 				"SELECT service_id FROM service_component_assignments WHERE component_id = 'sign_edge_all' AND active = 1",
@@ -1075,7 +1112,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 					}
 				}
 				serviceRows.Close()
-				
+
 				// Migrate service-component assignments
 				for _, serviceID := range serviceIDs {
 					// Remove old assignment
@@ -1103,7 +1140,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 					}
 				}
 			}
-			
+
 			// Migrate node-component assignments
 			nodeRows, err := kdc.DB.Query(
 				"SELECT node_id FROM node_component_assignments WHERE component_id = 'sign_edge_all' AND active = 1",
@@ -1117,7 +1154,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 					}
 				}
 				nodeRows.Close()
-				
+
 				for _, nodeID := range nodeIDs {
 					// Remove from old component
 					_, err := kdc.DB.Exec(
@@ -1143,7 +1180,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 					}
 				}
 			}
-			
+
 			// Delete the old component
 			if err := kdc.DeleteComponent("sign_edge_all"); err != nil {
 				log.Printf("KDC: Warning: Failed to delete sign_edge_all component: %v", err)
@@ -1153,14 +1190,14 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 		}
 		rows.Close()
 	}
-	
+
 	// Check if default component exists (for backward compatibility)
 	var defaultComponentExists bool
 	err = kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM components WHERE id = ?)", defaultComponentID).Scan(&defaultComponentExists)
 	if err != nil {
 		return fmt.Errorf("failed to check default component: %v", err)
 	}
-	
+
 	if !defaultComponentExists {
 		// Create default component (maps to central mode)
 		defaultComponent := &Component{
@@ -1173,7 +1210,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			return fmt.Errorf("failed to create default component: %v", err)
 		}
 		log.Printf("KDC: Created default component: %s", defaultComponentID)
-		
+
 		// Only assign default_comp to default service if sign_kdc is not already assigned
 		// (to avoid conflicts - default_comp is deprecated)
 		existingComponents, err := kdc.GetComponentsForService(defaultServiceID)
@@ -1195,7 +1232,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1210,7 +1247,7 @@ func (kdc *KdcDB) AddZone(zone *Zone) error {
 		serviceID = "default_service"
 		log.Printf("KDC: Zone %s assigned to default_service (no service_id provided)", zone.Name)
 	}
-	
+
 	_, err := kdc.DB.Exec(
 		"INSERT INTO zones (name, service_id, active, comment) VALUES (?, ?, ?, ?)",
 		zone.Name, serviceID, zone.Active, zone.Comment,
@@ -1218,7 +1255,7 @@ func (kdc *KdcDB) AddZone(zone *Zone) error {
 	if err != nil {
 		return fmt.Errorf("failed to add zone: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -1253,17 +1290,17 @@ func (kdc *KdcDB) DeleteZone(zoneName string) error {
 	if err != nil {
 		return fmt.Errorf("zone not found: %s", zoneName)
 	}
-	
+
 	// Note: Zones are now related to services, not directly to components
 	// Foreign key constraints with ON DELETE CASCADE will automatically clean up
 	// related records in dnssec_keys, distribution_records, etc.
-	
+
 	// Now delete the zone itself
 	result, err := kdc.DB.Exec("DELETE FROM zones WHERE name = ?", zoneName)
 	if err != nil {
 		return fmt.Errorf("failed to delete zone: %v", err)
 	}
-	
+
 	// Verify that a row was actually deleted
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
@@ -1271,7 +1308,7 @@ func (kdc *KdcDB) DeleteZone(zoneName string) error {
 	} else if rowsAffected == 0 {
 		return fmt.Errorf("zone not found or could not be deleted: %s", zoneName)
 	}
-	
+
 	return nil
 }
 
@@ -1281,22 +1318,28 @@ func (kdc *KdcDB) DeleteZone(zoneName string) error {
 func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 	// Normalize to FQDN
 	nodeIDFQDN := dns.Fqdn(nodeID)
-	
+
 	var n Node
 	var notifyAddr sql.NullString
+	var supportedCryptoJSON sql.NullString
+	var josePubKey []byte
 	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 		nodeIDFQDN,
-	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+	).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Try without trailing dot (for legacy data)
 			if strings.HasSuffix(nodeIDFQDN, ".") {
 				nodeIDNoDot := strings.TrimSuffix(nodeIDFQDN, ".")
+				var josePubKey2 []byte
 				err2 := kdc.DB.QueryRow(
-					"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+					"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 					nodeIDNoDot,
-				).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+				).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey2, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+				if err2 == nil {
+					josePubKey = josePubKey2
+				}
 				if err2 != nil {
 					if err2 == sql.ErrNoRows {
 						return nil, fmt.Errorf("node not found: %s (tried both FQDN and non-FQDN formats)", nodeID)
@@ -1313,12 +1356,22 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 	if notifyAddr.Valid {
 		n.NotifyAddress = notifyAddr.String
 	}
+	if len(josePubKey) > 0 {
+		n.LongTermJosePubKey = josePubKey
+	}
+	// Deserialize supported_crypto JSON array
+	if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+		if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+			// Log error but don't fail - just leave it empty
+			log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+		}
+	}
 	return &n, nil
 }
 
 // GetAllNodes retrieves all nodes
 func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
-	rows, err := kdc.DB.Query("SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
+	rows, err := kdc.DB.Query("SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query nodes: %v", err)
 	}
@@ -1328,11 +1381,22 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 	for rows.Next() {
 		var n Node
 		var notifyAddr sql.NullString
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		var supportedCryptoJSON sql.NullString
+		var josePubKey []byte
+		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
 			n.NotifyAddress = notifyAddr.String
+		}
+		if len(josePubKey) > 0 {
+			n.LongTermJosePubKey = josePubKey
+		}
+		// Deserialize supported_crypto JSON array
+		if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+			if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+				log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+			}
 		}
 
 		// Get latest confirmation timestamp for this node
@@ -1351,7 +1415,7 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 // GetActiveNodes retrieves all active (online) nodes
 func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 	rows, err := kdc.DB.Query(
-		"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
+		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query active nodes: %v", err)
@@ -1362,11 +1426,22 @@ func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 	for rows.Next() {
 		var n Node
 		var notifyAddr sql.NullString
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		var supportedCryptoJSON sql.NullString
+		var josePubKey []byte
+		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
 			n.NotifyAddress = notifyAddr.String
+		}
+		if len(josePubKey) > 0 {
+			n.LongTermJosePubKey = josePubKey
+		}
+		// Deserialize supported_crypto JSON array
+		if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+			if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+				log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+			}
 		}
 		nodes = append(nodes, &n)
 	}
@@ -1377,10 +1452,16 @@ func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 	var n Node
 	var notifyAddr sql.NullString
+	var supportedCryptoJSON sql.NullString
+	var josePubKey []byte
+	// Only query by LongTermPubKey if it's not nil (JOSE-only nodes have NULL)
+	if len(pubKey) == 0 {
+		return nil, nil // Cannot query by nil/empty key
+	}
 	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_pub_key = ?",
+		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_hpke_pub_key = ?",
 		pubKey,
-	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+	).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // No node found with this public key
@@ -1390,23 +1471,44 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 	if notifyAddr.Valid {
 		n.NotifyAddress = notifyAddr.String
 	}
+	if len(josePubKey) > 0 {
+		n.LongTermJosePubKey = josePubKey
+	}
+	// Deserialize supported_crypto JSON array
+	if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
+		if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
+			log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
+		}
+	}
 	return &n, nil
 }
 
 // AddNode adds a new node
 func (kdc *KdcDB) AddNode(node *Node) error {
-	// Check if a node with this public key already exists
-	existingNode, err := kdc.GetNodeByPublicKey(node.LongTermPubKey)
-	if err != nil {
-		return fmt.Errorf("failed to check for existing node: %v", err)
+	// Check if a node with this public key already exists (only if HPKE key is present)
+	if len(node.LongTermHpkePubKey) > 0 {
+		existingNode, err := kdc.GetNodeByPublicKey(node.LongTermHpkePubKey)
+		if err != nil {
+			return fmt.Errorf("failed to check for existing node: %v", err)
+		}
+		if existingNode != nil {
+			return fmt.Errorf("a node with this public key already exists: %s (id: %s)", existingNode.Name, existingNode.ID)
+		}
 	}
-	if existingNode != nil {
-		return fmt.Errorf("a node with this public key already exists: %s (id: %s)", existingNode.Name, existingNode.ID)
+
+	// Serialize supported_crypto to JSON
+	var supportedCryptoJSON []byte
+	var err error
+	if len(node.SupportedCrypto) > 0 {
+		supportedCryptoJSON, err = json.Marshal(node.SupportedCrypto)
+		if err != nil {
+			return fmt.Errorf("failed to marshal supported_crypto: %v", err)
+		}
 	}
 
 	_, err = kdc.DB.Exec(
-		"INSERT INTO nodes (id, name, long_term_pub_key, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		node.ID, node.Name, node.LongTermPubKey, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
+		"INSERT INTO nodes (id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		node.ID, node.Name, node.LongTermHpkePubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
 	)
 	if err != nil {
 		// Check for unique constraint violation (in case the constraint wasn't in the schema)
@@ -1420,9 +1522,19 @@ func (kdc *KdcDB) AddNode(node *Node) error {
 
 // UpdateNode updates an existing node
 func (kdc *KdcDB) UpdateNode(node *Node) error {
-	_, err := kdc.DB.Exec(
-		"UPDATE nodes SET name = ?, long_term_pub_key = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
-		node.Name, node.LongTermPubKey, node.NotifyAddress, node.State, node.Comment, node.ID,
+	// Serialize supported_crypto to JSON
+	var supportedCryptoJSON []byte
+	var err error
+	if len(node.SupportedCrypto) > 0 {
+		supportedCryptoJSON, err = json.Marshal(node.SupportedCrypto)
+		if err != nil {
+			return fmt.Errorf("failed to marshal supported_crypto: %v", err)
+		}
+	}
+
+	_, err = kdc.DB.Exec(
+		"UPDATE nodes SET name = ?, long_term_hpke_pub_key = ?, long_term_jose_pub_key = ?, supported_crypto = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
+		node.Name, node.LongTermHpkePubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.NotifyAddress, node.State, node.Comment, node.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update node: %v", err)
@@ -1457,18 +1569,18 @@ func (kdc *KdcDB) DeleteNode(nodeID string) error {
 	if !strings.HasSuffix(nodeIDFQDN, ".") {
 		nodeIDFQDN = nodeIDFQDN + "."
 	}
-	
+
 	// Try deleting with FQDN first
 	result, err := kdc.DB.Exec("DELETE FROM nodes WHERE id = ?", nodeIDFQDN)
 	if err != nil {
 		return fmt.Errorf("failed to delete node: %v", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %v", err)
 	}
-	
+
 	// If no rows affected with FQDN, try without trailing dot (for legacy data)
 	if rowsAffected == 0 && strings.HasSuffix(nodeIDFQDN, ".") {
 		nodeIDNoDot := strings.TrimSuffix(nodeIDFQDN, ".")
@@ -1481,11 +1593,11 @@ func (kdc *KdcDB) DeleteNode(nodeID string) error {
 			return fmt.Errorf("failed to get rows affected: %v", err)
 		}
 	}
-	
+
 	if rowsAffected == 0 {
 		return fmt.Errorf("node not found: %s (tried both FQDN and non-FQDN formats)", nodeID)
 	}
-	
+
 	return nil
 }
 
@@ -1637,7 +1749,7 @@ func (kdc *KdcDB) DeleteDNSSECKey(zoneName, keyID string) error {
 func (kdc *KdcDB) DeleteKeysByState(state KeyState, zoneName string) (int64, error) {
 	var result sql.Result
 	var err error
-	
+
 	if zoneName != "" {
 		result, err = kdc.DB.Exec(
 			`DELETE FROM dnssec_keys WHERE state = ? AND zone_name = ?`,
@@ -1652,12 +1764,12 @@ func (kdc *KdcDB) DeleteKeysByState(state KeyState, zoneName string) (int64, err
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete keys by state: %v", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get rows affected: %v", err)
 	}
-	
+
 	return rowsAffected, nil
 }
 
@@ -1676,9 +1788,17 @@ func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 		keyID = record.KeyID
 	}
 
+	// Convert nil/empty ephemeral_pub_key to NULL (for JOSE backend)
+	var ephemeralPub interface{}
+	if len(record.EphemeralPubKey) == 0 {
+		ephemeralPub = nil
+	} else {
+		ephemeralPub = record.EphemeralPubKey
+	}
+
 	// Serialize payload to JSON if present
 	var payloadJSON interface{}
-	if record.Payload != nil && len(record.Payload) > 0 {
+	if len(record.Payload) > 0 {
 		payloadBytes, err := json.Marshal(record.Payload)
 		if err != nil {
 			return fmt.Errorf("failed to marshal payload: %v", err)
@@ -1699,7 +1819,7 @@ func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id, operation, payload)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
-		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
+		ephemeralPub, record.ExpiresAt, record.Status, record.DistributionID,
 		operation, payloadJSON,
 	)
 	if err != nil {
@@ -1723,9 +1843,17 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 		keyID = record.KeyID
 	}
 
+	// Convert nil/empty ephemeral_pub_key to NULL (for JOSE backend)
+	var ephemeralPub interface{}
+	if len(record.EphemeralPubKey) == 0 {
+		ephemeralPub = nil
+	} else {
+		ephemeralPub = record.EphemeralPubKey
+	}
+
 	// Serialize payload to JSON if present
 	var payloadJSON interface{}
-	if record.Payload != nil && len(record.Payload) > 0 {
+	if len(record.Payload) > 0 {
 		payloadBytes, err := json.Marshal(record.Payload)
 		if err != nil {
 			return fmt.Errorf("failed to marshal payload: %v", err)
@@ -1746,7 +1874,7 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id, operation, payload)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
-		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
+		ephemeralPub, record.ExpiresAt, record.Status, record.DistributionID,
 		operation, payloadJSON,
 	)
 	if err != nil {
@@ -1790,12 +1918,12 @@ func (kdc *KdcDB) PurgeCompletedDistributions() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete completed distributions: %v", err)
 	}
-	
+
 	deleted, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get rows affected: %v", err)
 	}
-	
+
 	// Also delete orphaned confirmations (confirmations without distribution records)
 	_, err = kdc.DB.Exec(
 		`DELETE FROM distribution_confirmations 
@@ -1804,7 +1932,7 @@ func (kdc *KdcDB) PurgeCompletedDistributions() (int, error) {
 	if err != nil {
 		log.Printf("KDC: Warning: Failed to clean up orphaned confirmations: %v", err)
 	}
-	
+
 	// Transition keys in "distributed" state to "removed" if they have no remaining distribution records
 	// This handles keys that were part of failed distributions that were purged
 	rows, err := kdc.DB.Query(
@@ -1834,7 +1962,7 @@ func (kdc *KdcDB) PurgeCompletedDistributions() (int, error) {
 			log.Printf("KDC: Transitioned %d key(s) from distributed to removed state", transitionedCount)
 		}
 	}
-	
+
 	return int(deleted), nil
 }
 
@@ -1848,12 +1976,12 @@ func (kdc *KdcDB) PurgeAllDistributions() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete all distributions: %v", err)
 	}
-	
+
 	deleted, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get rows affected: %v", err)
 	}
-	
+
 	// Also delete all confirmations
 	_, err = kdc.DB.Exec(
 		"DELETE FROM distribution_confirmations",
@@ -1861,14 +1989,14 @@ func (kdc *KdcDB) PurgeAllDistributions() (int, error) {
 	if err != nil {
 		log.Printf("KDC: Warning: Failed to clean up confirmations: %v", err)
 	}
-	
+
 	return int(deleted), nil
 }
 
 // GarbageCollectCompletedDistributions deletes completed distributions older than the specified duration
 func (kdc *KdcDB) GarbageCollectCompletedDistributions(olderThan time.Duration) error {
 	cutoffTime := time.Now().Add(-olderThan)
-	
+
 	// Delete distribution records
 	result, err := kdc.DB.Exec(
 		"DELETE FROM distribution_records WHERE status = 'completed' AND completed_at < ?",
@@ -1877,12 +2005,12 @@ func (kdc *KdcDB) GarbageCollectCompletedDistributions(olderThan time.Duration) 
 	if err != nil {
 		return fmt.Errorf("failed to delete old distribution records: %v", err)
 	}
-	
+
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected > 0 {
 		log.Printf("KDC: Garbage collected %d completed distribution record(s) older than %v", rowsAffected, olderThan)
 	}
-	
+
 	// Also delete related confirmations (they're no longer needed)
 	_, err = kdc.DB.Exec(
 		`DELETE FROM distribution_confirmations 
@@ -1891,7 +2019,7 @@ func (kdc *KdcDB) GarbageCollectCompletedDistributions(olderThan time.Duration) 
 	if err != nil {
 		log.Printf("KDC: Warning: Failed to clean up orphaned confirmations: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -1900,7 +2028,7 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	// First, mark old distributions as complete if they have all confirmations but weren't marked
 	// This handles distributions that were completed before we added the completion tracking
 	kdc.markOldCompletedDistributions()
-	
+
 	// Get all distribution records grouped by distribution_id
 	// Show:
 	// - All non-completed distributions (regardless of age - they're still pending)
@@ -1918,7 +2046,7 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 
 	// Group by distribution_id
 	distMap := make(map[string]*DistributionSummaryInfo)
-	zoneKeyMap := make(map[string]map[string]bool) // distID -> zone:key -> bool
+	zoneKeyMap := make(map[string]map[string]bool)   // distID -> zone:key -> bool
 	operationMap := make(map[string]map[string]bool) // distID -> operation -> bool
 
 	for rows.Next() {
@@ -2012,6 +2140,16 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	for distID, summary := range distMap {
 		ops := operationMap[distID]
 
+		// Store list of operations for display
+		summary.Operations = make([]string, 0, len(ops))
+		for op := range ops {
+			summary.Operations = append(summary.Operations, op)
+		}
+		// Sort operations for consistent output
+		if len(summary.Operations) > 0 {
+			sort.Strings(summary.Operations)
+		}
+
 		// Categorize operations
 		hasNodeOps := ops["update_components"]
 		hasKeyOps := ops["roll_key"] || ops["delete_key"]
@@ -2024,7 +2162,7 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 			summary.ContentType = "key_operations"
 		} else if !hasNodeOps && !hasKeyOps && hasMgmtOps {
 			summary.ContentType = "mgmt_operations"
-		} else if (hasNodeOps || hasKeyOps || hasMgmtOps) {
+		} else if hasNodeOps || hasKeyOps || hasMgmtOps {
 			summary.ContentType = "mixed_operations"
 		}
 		// If no operations were found, keep default (key_operations)
@@ -2223,16 +2361,16 @@ func (kdc *KdcDB) GetNextDistributionID() (string, error) {
 		return "", fmt.Errorf("failed to begin transaction: %v", err)
 	}
 	defer tx.Rollback()
-	
+
 	var lastID int64
-	
+
 	// Get current last ID with row lock (for MySQL) or just read (SQLite handles it)
 	if kdc.DBType == "sqlite" {
 		err = tx.QueryRow("SELECT last_distribution_id FROM distribution_id_sequence WHERE id = 1").Scan(&lastID)
 	} else {
 		err = tx.QueryRow("SELECT last_distribution_id FROM distribution_id_sequence WHERE id = 1 FOR UPDATE").Scan(&lastID)
 	}
-	
+
 	if err != nil {
 		// Table doesn't exist or no row - initialize with epoch
 		if kdc.DBType == "sqlite" {
@@ -2245,7 +2383,7 @@ func (kdc *KdcDB) GetNextDistributionID() (string, error) {
 		}
 		lastID = 0
 	}
-	
+
 	var nextID int64
 	if lastID == 0 {
 		// First distribution - use current epoch seconds
@@ -2254,7 +2392,7 @@ func (kdc *KdcDB) GetNextDistributionID() (string, error) {
 		// Increment by 1
 		nextID = lastID + 1
 	}
-	
+
 	// Update the sequence
 	if kdc.DBType == "sqlite" {
 		_, err = tx.Exec("UPDATE distribution_id_sequence SET last_distribution_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", nextID)
@@ -2264,12 +2402,12 @@ func (kdc *KdcDB) GetNextDistributionID() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to update distribution_id_sequence: %v", err)
 	}
-	
+
 	// Commit the transaction
 	if err = tx.Commit(); err != nil {
 		return "", fmt.Errorf("failed to commit transaction: %v", err)
 	}
-	
+
 	// Format as hex string (will be 4-16 hex characters for reasonable epoch values)
 	distributionID := fmt.Sprintf("%x", nextID)
 	return distributionID, nil
@@ -2297,7 +2435,8 @@ func (kdc *KdcDB) CreateDistributionIDForKeys(zoneName string, keyIDs []string) 
 // CreatePingOperation creates a ping operation for a specific node
 // Returns the distribution ID
 // The ping operation is not encrypted - it includes a nonce in the payload metadata
-func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf) (string, error) {
+// forcedCrypto: if provided ("hpke" or "jose"), forces that backend (if node supports it)
+func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, forcedCrypto string) (string, error) {
 	if nodeID == "" {
 		return "", fmt.Errorf("nodeID is required")
 	}
@@ -2308,32 +2447,31 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf) (stri
 		return "", fmt.Errorf("failed to get distribution ID: %v", err)
 	}
 
-	// Get the node to access its long-term public key for HPKE encryption
+	// Get the node to access its long-term public key for encryption
 	node, err := kdc.GetNode(nodeID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	if len(node.LongTermPubKey) != 32 {
-		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-	}
 
-	// Generate random 32-byte nonce
+	// Generate random 32-byte nonce (this is the plaintext payload for ping operation)
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("failed to generate nonce: %v", err)
 	}
 
-	// Encrypt the nonce using HPKE with the node's public key
-	// This tests the full crypto pipeline
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, nonce)
+	// Encrypt the nonce using the generic encryption helper
+	// This abstracts crypto backend selection and encryption from the operation logic
+	ciphertext, ephemeralPub, backendName, err := EncryptPayloadForNode(node, nonce, forcedCrypto)
 	if err != nil {
-		return "", fmt.Errorf("failed to encrypt nonce: %v", err)
+		return "", fmt.Errorf("failed to encrypt ping nonce: %v", err)
 	}
 
-	// Create payload with nonce (for validation on confirmation) and timestamp
+	// Create payload with nonce (for validation on confirmation), timestamp, and crypto backend
+	// Store the actual backend used (may differ from requested if fallback occurred)
 	payload := map[string]interface{}{
 		"nonce":     hex.EncodeToString(nonce),
 		"timestamp": time.Now().Format(time.RFC3339),
+		"crypto":    backendName, // Store the actual crypto backend used for manifest generation
 	}
 
 	// Calculate expires_at based on DistributionTTL if config is provided
@@ -2355,18 +2493,18 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf) (stri
 
 	// Create distribution record with encrypted nonce
 	distRecord := &DistributionRecord{
-		ID:             distRecordIDHex,
-		ZoneName:       "", // NULL for ping operation
-		KeyID:          "", // NULL for ping operation
-		NodeID:         nodeID,
-		EncryptedKey:   ciphertext, // Encrypted nonce
+		ID:              distRecordIDHex,
+		ZoneName:        "", // NULL for ping operation
+		KeyID:           "", // NULL for ping operation
+		NodeID:          nodeID,
+		EncryptedKey:    ciphertext,   // Encrypted nonce
 		EphemeralPubKey: ephemeralPub, // Ephemeral key for HPKE
-		CreatedAt:      time.Now(),
-		ExpiresAt:      expiresAt,
-		Status:         hpke.DistributionStatusPending,
-		DistributionID: distributionID,
-		Operation:      string(OperationPing),
-		Payload:        payload,
+		CreatedAt:       time.Now(),
+		ExpiresAt:       expiresAt,
+		Status:          hpke.DistributionStatusPending,
+		DistributionID:  distributionID,
+		Operation:       string(OperationPing),
+		Payload:         payload,
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
@@ -2396,12 +2534,6 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 		return "", fmt.Errorf("failed to get distribution ID: %v", err)
 	}
 
-	// Create payload with reason and confirmation flag
-	payload := map[string]interface{}{
-		"reason":               reason,
-		"pending_confirmation": true,
-	}
-
 	// Generate a unique ID for this distribution record
 	distRecordID := make([]byte, 16)
 	if _, err := rand.Read(distRecordID); err != nil {
@@ -2415,10 +2547,19 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 		return "", fmt.Errorf("failed to get node: %v", err)
 	}
 
-	// Encrypt the key ID using HPKE (so the node can verify it's deleting the right key)
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, []byte(keyID))
+	// Encrypt the key ID (plaintext payload for delete_key operation)
+	// This abstracts crypto backend selection and encryption from the operation logic
+	ciphertext, ephemeralPub, backendName, err := EncryptPayloadForNode(node, []byte(keyID), "")
 	if err != nil {
-		return "", fmt.Errorf("failed to encrypt key ID: %v", err)
+		return "", fmt.Errorf("failed to encrypt delete key ID: %v", err)
+	}
+	log.Printf("KDC: Encrypted delete key ID using %s backend for node %s", backendName, nodeID)
+
+	// Create payload with reason, confirmation flag, and crypto backend
+	payload := map[string]interface{}{
+		"reason":               reason,
+		"pending_confirmation": true,
+		"crypto":               backendName, // Store the actual crypto backend used
 	}
 
 	// Check if key exists at KDC
@@ -2441,10 +2582,10 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 	distRecord := &DistributionRecord{
 		ID:              distRecordIDHex,
 		ZoneName:        zoneName,
-		KeyID:           recordKeyID,         // May be empty/NULL if key doesn't exist at KDC
+		KeyID:           recordKeyID, // May be empty/NULL if key doesn't exist at KDC
 		NodeID:          nodeID,
-		EncryptedKey:    ciphertext,           // Encrypted key ID (always present)
-		EphemeralPubKey: ephemeralPub,         // Ephemeral public key for decryption
+		EncryptedKey:    ciphertext,   // Encrypted key ID (always present)
+		EphemeralPubKey: ephemeralPub, // Ephemeral public key for decryption
 		CreatedAt:       time.Now(),
 		ExpiresAt:       nil,
 		Status:          hpke.DistributionStatusPending,
@@ -2515,18 +2656,18 @@ func (kdc *KdcDB) CreateRollKeyOperation(newKey *DNSSECKey, oldKeyID string, nod
 
 	// Create distribution record
 	distRecord := &DistributionRecord{
-		ID:             distRecordIDHex,
-		ZoneName:       newKey.ZoneName,
-		KeyID:          newKey.ID,
-		NodeID:         node.ID,
-		EncryptedKey:   encryptedKey,
+		ID:              distRecordIDHex,
+		ZoneName:        newKey.ZoneName,
+		KeyID:           newKey.ID,
+		NodeID:          node.ID,
+		EncryptedKey:    encryptedKey,
 		EphemeralPubKey: ephemeralPubKey,
-		CreatedAt:      time.Now(),
-		ExpiresAt:      expiresAt,
-		Status:         hpke.DistributionStatusPending,
-		DistributionID: distributionID,
-		Operation:      string(OperationRollKey),
-		Payload:        payload,
+		CreatedAt:       time.Now(),
+		ExpiresAt:       expiresAt,
+		Status:          hpke.DistributionStatusPending,
+		DistributionID:  distributionID,
+		Operation:       string(OperationRollKey),
+		Payload:         payload,
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
@@ -2549,7 +2690,7 @@ func (kdc *KdcDB) CreateRollKeyOperation(newKey *DNSSECKey, oldKeyID string, nod
 func (kdc *KdcDB) AddDistributionConfirmation(distributionID, zoneName, keyID, nodeID string) error {
 	// Generate a unique ID for this confirmation
 	confirmationID := fmt.Sprintf("%s-%s-%d", distributionID, nodeID, time.Now().Unix())
-	
+
 	// Convert empty strings to NULL for zone_name and key_id
 	var zoneNameVal, keyIDVal interface{}
 	if zoneName == "" {
@@ -2562,7 +2703,7 @@ func (kdc *KdcDB) AddDistributionConfirmation(distributionID, zoneName, keyID, n
 	} else {
 		keyIDVal = keyID
 	}
-	
+
 	var err error
 	if kdc.DBType == "sqlite" {
 		// SQLite: Use INSERT OR REPLACE (works with UNIQUE constraint)
@@ -2689,7 +2830,7 @@ func (kdc *KdcDB) CheckAllNodesConfirmed(distributionID, zoneName string) (bool,
 func (kdc *KdcDB) updateKeyComment(zoneName, keyID, event string) error {
 	// Format timestamp
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	
+
 	// Build new comment (replace, don't append)
 	newComment := fmt.Sprintf("%s at %s", event, timestamp)
 
@@ -2709,7 +2850,7 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 	now := time.Now()
 	var err error
 	var commentEvent string
-	
+
 	switch newState {
 	case KeyStatePublished:
 		_, err = kdc.DB.Exec(
@@ -2775,7 +2916,7 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 				}
 			}
 		}
-		
+
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
 			newState, zoneName, keyID,
@@ -2805,11 +2946,11 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 			newState, zoneName, keyID,
 		)
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to update key state: %v", err)
 	}
-	
+
 	// Update comment if we have an event
 	if commentEvent != "" {
 		if err := kdc.updateKeyComment(zoneName, keyID, commentEvent); err != nil {
@@ -2817,7 +2958,7 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 			log.Printf("KDC: Warning: Failed to update comment for key %s: %v", keyID, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -2825,8 +2966,8 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 func (kdc *KdcDB) GetKeysByState(zoneName string, state KeyState) ([]*DNSSECKey, error) {
 	var rows *sql.Rows
 	var err error
-	
-		if zoneName == "" {
+
+	if zoneName == "" {
 		rows, err = kdc.DB.Query(
 			`SELECT id, zone_name, key_type, key_id, algorithm, flags, public_key, private_key,
 				state, created_at, published_at, activated_at, retired_at, comment
@@ -2879,25 +3020,25 @@ func (kdc *KdcDB) RetireOldKeysForZone(zoneName string, keyType KeyType, exclude
 	if state != KeyStateEdgeSigner && state != KeyStateActiveDist && state != KeyStateActiveCE {
 		return nil // Nothing to retire
 	}
-	
+
 	// Get all keys for the zone in the same state and key type
 	keys, err := kdc.GetDNSSECKeysForZone(zoneName)
 	if err != nil {
 		return fmt.Errorf("failed to get keys for zone: %v", err)
 	}
-	
+
 	retiredCount := 0
 	for _, key := range keys {
 		// Skip the newly activated key
 		if key.ID == excludeKeyID {
 			continue
 		}
-		
+
 		// Only retire keys of the same type
 		if key.KeyType != keyType {
 			continue
 		}
-		
+
 		// Retire keys in the same state
 		// For KSKs transitioning to active_ce: also retire keys in active_dist (intermediate state)
 		shouldRetire := false
@@ -2907,7 +3048,7 @@ func (kdc *KdcDB) RetireOldKeysForZone(zoneName string, keyType KeyType, exclude
 			// When transitioning to active_ce, also retire keys stuck in active_dist
 			shouldRetire = true
 		}
-		
+
 		if shouldRetire {
 			if err := kdc.UpdateKeyState(zoneName, key.ID, KeyStateRetired); err != nil {
 				log.Printf("KDC: Warning: Failed to retire old key %s: %v", key.ID, err)
@@ -2917,11 +3058,11 @@ func (kdc *KdcDB) RetireOldKeysForZone(zoneName string, keyType KeyType, exclude
 			}
 		}
 	}
-	
+
 	if retiredCount > 0 {
 		log.Printf("KDC: Retired %d old key(s) for zone %s (type: %s)", retiredCount, zoneName, keyType)
 	}
-	
+
 	return nil
 }
 
@@ -3141,7 +3282,7 @@ func (kdc *KdcDB) AddServiceComponentAssignment(serviceID, componentID string) e
 		if err != nil {
 			return fmt.Errorf("failed to get existing components: %v", err)
 		}
-		
+
 		// Check if there's already a sign_* component assigned
 		for _, existingCompID := range existingComponents {
 			if strings.HasPrefix(existingCompID, "sign_") {
@@ -3149,7 +3290,7 @@ func (kdc *KdcDB) AddServiceComponentAssignment(serviceID, componentID string) e
 			}
 		}
 	}
-	
+
 	_, err := kdc.DB.Exec(
 		"INSERT INTO service_component_assignments (service_id, component_id, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
 		serviceID, componentID,
@@ -3181,7 +3322,7 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 	if err != nil {
 		return fmt.Errorf("failed to get existing components: %v", err)
 	}
-	
+
 	oldComponentFound := false
 	for _, compID := range existingComponents {
 		if compID == oldComponentID {
@@ -3192,18 +3333,18 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 	if !oldComponentFound {
 		return fmt.Errorf("component %s is not assigned to service %s", oldComponentID, serviceID)
 	}
-	
+
 	// Validate that new component is not already assigned
 	for _, compID := range existingComponents {
 		if compID == newComponentID {
 			return fmt.Errorf("component %s is already assigned to service %s", newComponentID, serviceID)
 		}
 	}
-	
+
 	// If replacing sign_* components, ensure we're replacing one sign_* with another
 	oldIsSigning := strings.HasPrefix(oldComponentID, "sign_")
 	newIsSigning := strings.HasPrefix(newComponentID, "sign_")
-	
+
 	if oldIsSigning && !newIsSigning {
 		// Check if there are other sign_* components (shouldn't happen, but be safe)
 		for _, compID := range existingComponents {
@@ -3213,7 +3354,7 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 		}
 		// Allow removing sign_* and replacing with non-signing component
 	}
-	
+
 	if !oldIsSigning && newIsSigning {
 		// Check if there's already a sign_* component
 		for _, compID := range existingComponents {
@@ -3222,7 +3363,7 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 			}
 		}
 	}
-	
+
 	if oldIsSigning && newIsSigning {
 		// Replacing one sign_* with another - this is the main use case
 		// Ensure atomic operation: remove old and add new in a transaction
@@ -3231,7 +3372,7 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 			return fmt.Errorf("failed to begin transaction: %v", err)
 		}
 		defer tx.Rollback()
-		
+
 		// Remove old component
 		_, err = tx.Exec(
 			"UPDATE service_component_assignments SET active = 0 WHERE service_id = ? AND component_id = ?",
@@ -3240,7 +3381,7 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 		if err != nil {
 			return fmt.Errorf("failed to remove old component: %v", err)
 		}
-		
+
 		// Add new component
 		_, err = tx.Exec(
 			"INSERT INTO service_component_assignments (service_id, component_id, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
@@ -3249,28 +3390,28 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 		if err != nil {
 			return fmt.Errorf("failed to add new component: %v", err)
 		}
-		
+
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("failed to commit transaction: %v", err)
 		}
-		
+
 		return nil
 	}
-	
+
 	// Non-signing component replacement - can be done without transaction
 	// Remove old
 	if err := kdc.RemoveServiceComponentAssignment(serviceID, oldComponentID); err != nil {
 		return fmt.Errorf("failed to remove old component: %v", err)
 	}
-	
+
 	// Add new
 	if err := kdc.AddServiceComponentAssignment(serviceID, newComponentID); err != nil {
 		// Try to restore old component if adding new fails
 		kdc.AddServiceComponentAssignment(serviceID, oldComponentID)
 		return fmt.Errorf("failed to add new component: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -3308,20 +3449,20 @@ func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf
 	if err != nil {
 		return fmt.Errorf("failed to get current components for node %s: %v", nodeID, err)
 	}
-	
+
 	// Check if component is already in the list
 	for _, comp := range currentComponents {
 		if comp == componentID {
 			return fmt.Errorf("component %s is already assigned to node %s", componentID, nodeID)
 		}
 	}
-	
+
 	// Compute the new component list (current + new component)
 	newComponents := make([]string, 0, len(currentComponents)+1)
 	newComponents = append(newComponents, currentComponents...)
 	newComponents = append(newComponents, componentID)
 	sort.Strings(newComponents)
-	
+
 	log.Printf("KDC: Preparing to add component %s to node %s (will create distribution, DB update pending confirmation)", componentID, nodeID)
 
 	// Create node_components distribution with the NEW component list (before DB update)
@@ -3330,11 +3471,11 @@ func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf
 		if err != nil {
 			return fmt.Errorf("failed to create node_components distribution: %v", err)
 		}
-		
+
 		// Store the pending change: we need to apply componentID add when confirmation is received
 		// We'll store this in the distribution record metadata or handle it in confirmation handler
 		// For now, we'll handle it in the confirmation handler by reading the component list from the distribution
-		
+
 		// Send NOTIFY to the node
 		if kdcConf.ControlZone != "" {
 			if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
@@ -3362,56 +3503,54 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 	if err != nil {
 		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	
-	if len(node.LongTermPubKey) != 32 {
-		return "", fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-	}
-	
+
 	// Components list is now passed as parameter (may include pending changes)
-	
+
 	// Sort components for consistent output
 	sort.Strings(components)
-	
+
 	// Prepare JSON structure
 	type ComponentEntry struct {
 		ComponentID string `json:"component_id"`
 	}
-	
+
 	entries := make([]ComponentEntry, 0, len(components))
 	for _, componentID := range components {
 		entries = append(entries, ComponentEntry{
 			ComponentID: componentID,
 		})
 	}
-	
+
 	// Marshal to JSON
 	componentsJSON, err := json.Marshal(entries)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal components JSON: %v", err)
 	}
-	
+
 	log.Printf("KDC: CreateNodeComponentsDistribution: Creating distribution for node %s with %d components: %v", nodeID, len(components), components)
-	
-	// Encrypt the component list using HPKE
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
+
+	// Encrypt the component list (plaintext payload for update_components operation)
+	// This abstracts crypto backend selection and encryption from the operation logic
+	ciphertext, ephemeralPub, backendName, err := EncryptPayloadForNode(node, componentsJSON, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt components: %v", err)
 	}
-	
+	log.Printf("KDC: Encrypted component list using %s backend for node %s", backendName, nodeID)
+
 	// Generate a UNIQUE distribution ID using monotonic counter
 	// This ensures that purged distributions can never be reused
 	distributionID, err := kdc.GetNextDistributionID()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate distribution ID: %v", err)
 	}
-	
+
 	// Generate a unique ID for this distribution record
 	distRecordID := make([]byte, 16)
 	if _, err := rand.Read(distRecordID); err != nil {
 		return "", fmt.Errorf("failed to generate distribution record ID: %v", err)
 	}
 	distRecordIDHex := hex.EncodeToString(distRecordID)
-	
+
 	// Calculate expires_at based on DistributionTTL if config is provided
 	var expiresAt *time.Time
 	if kdcConf != nil {
@@ -3421,14 +3560,14 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 			expiresAt = &expires
 		}
 	}
-	
+
 	// Start a transaction to ensure atomic deletion and insertion
 	tx, err := kdc.DB.Begin()
 	if err != nil {
 		return "", fmt.Errorf("failed to begin transaction: %v", err)
 	}
 	defer tx.Rollback()
-	
+
 	// Delete ALL existing node_components distributions for this node
 	// This ensures purged distributions are never reused
 	// node_components distributions have NULL zone_name and key_id
@@ -3440,7 +3579,7 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 	if err != nil {
 		return "", fmt.Errorf("failed to delete existing node_components distributions for node %s: %v", nodeID, err)
 	}
-	
+
 	deleted, err := result.RowsAffected()
 	if err != nil {
 		return "", fmt.Errorf("failed to get rows affected: %v", err)
@@ -3448,7 +3587,7 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 	if deleted > 0 {
 		log.Printf("KDC: Deleted %d existing node_components distribution record(s) for node %s before creating new one", deleted, nodeID)
 	}
-	
+
 	// Also delete any orphaned confirmations for this node's node_components distributions
 	_, err = tx.Exec(
 		`DELETE FROM distribution_confirmations 
@@ -3458,45 +3597,49 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 	if err != nil {
 		log.Printf("KDC: Warning: Failed to clean up orphaned confirmations for node %s: %v", nodeID, err)
 	}
-	
+
 	// Store the distribution record in the database
 	// For node_components distributions, zone_name and key_id are NULL (not about zones/keys)
 	// The actual node ID is stored in node_id field
-	distRecord := &DistributionRecord{
-		ID:             distRecordIDHex,
-		ZoneName:       "", // NULL for node_components distributions
-		KeyID:          "", // NULL for node_components distributions
-		NodeID:         nodeID,
-		EncryptedKey:   ciphertext,
-		EphemeralPubKey: ephemeralPub,
-		CreatedAt:      time.Now(),
-		ExpiresAt:      expiresAt,
-		Status:         hpke.DistributionStatusPending,
-		DistributionID: distributionID,
-		Operation:      "update_components",
-		Payload:        make(map[string]interface{}),
+	// Store the crypto backend used in payload metadata
+	payload := map[string]interface{}{
+		"crypto": backendName, // Store the actual crypto backend used for manifest generation
 	}
-	
+	distRecord := &DistributionRecord{
+		ID:              distRecordIDHex,
+		ZoneName:        "", // NULL for node_components distributions
+		KeyID:           "", // NULL for node_components distributions
+		NodeID:          nodeID,
+		EncryptedKey:    ciphertext,
+		EphemeralPubKey: ephemeralPub,
+		CreatedAt:       time.Now(),
+		ExpiresAt:       expiresAt,
+		Status:          hpke.DistributionStatusPending,
+		DistributionID:  distributionID,
+		Operation:       "update_components",
+		Payload:         payload,
+	}
+
 	// Insert the new distribution record
 	if err := kdc.addDistributionRecordTx(tx, distRecord); err != nil {
 		return "", fmt.Errorf("failed to store node_components distribution record: %v", err)
 	}
-	
+
 	// Commit the transaction
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("failed to commit transaction: %v", err)
 	}
-	
-	log.Printf("KDC: Created node_components distribution for node %s (distribution ID: %s, %d components)", 
+
+	log.Printf("KDC: Created node_components distribution for node %s (distribution ID: %s, %d components)",
 		nodeID, distributionID, len(components))
-	
+
 	// Store the intended component list for this distribution so we can apply it when confirmation is received
 	// We'll store it in a simple table: distribution_component_lists
 	if err := kdc.StoreDistributionComponentList(distributionID, nodeID, components); err != nil {
 		log.Printf("KDC: Warning: Failed to store component list for distribution %s: %v", distributionID, err)
 		// Don't fail the distribution creation if storing the list fails
 	}
-	
+
 	return distributionID, nil
 }
 
@@ -3510,9 +3653,9 @@ func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcC
 	if err != nil {
 		return fmt.Errorf("failed to get current components for node %s: %v", nodeID, err)
 	}
-	
+
 	log.Printf("KDC: RemoveNodeComponentAssignment: Current components for node %s: %v", nodeID, currentComponents)
-	
+
 	// Check if component is in the list
 	found := false
 	for _, comp := range currentComponents {
@@ -3524,7 +3667,7 @@ func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcC
 	if !found {
 		return fmt.Errorf("component %s is not assigned to node %s", componentID, nodeID)
 	}
-	
+
 	// Compute the new component list (current - removed component)
 	newComponents := make([]string, 0, len(currentComponents)-1)
 	for _, comp := range currentComponents {
@@ -3533,9 +3676,9 @@ func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcC
 		}
 	}
 	sort.Strings(newComponents)
-	
+
 	log.Printf("KDC: RemoveNodeComponentAssignment: New component list for node %s (after removing %s): %v", nodeID, componentID, newComponents)
-	
+
 	// Compute which zones will no longer be served (for logging only, actual removal happens on confirmation)
 	noLongerServedZones, err := kdc.GetZonesNoLongerServedByNode(nodeID, componentID)
 	if err != nil {
@@ -3545,7 +3688,7 @@ func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcC
 		// TODO: Trigger key deletion/revocation for these zones
 		// For now, just log - key deletion can be implemented separately
 	}
-	
+
 	log.Printf("KDC: Preparing to remove component %s from node %s (will create distribution, DB update pending confirmation)", componentID, nodeID)
 
 	// Create node_components distribution with the NEW component list (before DB update)
@@ -3554,7 +3697,7 @@ func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcC
 		if err != nil {
 			return fmt.Errorf("failed to create node_components distribution: %v", err)
 		}
-		
+
 		// Send NOTIFY to the node
 		if kdcConf.ControlZone != "" {
 			if err := kdc.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
@@ -3734,34 +3877,34 @@ func (kdc *KdcDB) StartServiceTransaction(serviceID, createdBy, comment string) 
 	letter1 := 'a' + rune(randBytes[0]%26)
 	letter2 := 'a' + rune(randBytes[1]%26)
 	txID := fmt.Sprintf("tx-%c%c", letter1, letter2)
-	
+
 	// Get current service state snapshot for conflict detection
 	components, err := kdc.GetComponentsForService(serviceID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get service components: %v", err)
 	}
-	
+
 	service, err := kdc.GetService(serviceID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get service: %v", err)
 	}
-	
+
 	// Create snapshot
 	snapshot := map[string]interface{}{
-		"components": components,
-		"service_id": serviceID,
+		"components":   components,
+		"service_id":   serviceID,
 		"service_name": service.Name,
-		"timestamp": time.Now().Unix(),
+		"timestamp":    time.Now().Unix(),
 	}
-	
+
 	snapshotJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal snapshot: %v", err)
 	}
-	
+
 	// Default expiration: 24 hours
 	expiresAt := time.Now().Add(24 * time.Hour)
-	
+
 	// Initialize empty changes
 	changes := ServiceTransactionChanges{
 		AddComponents:    []string{},
@@ -3771,7 +3914,7 @@ func (kdc *KdcDB) StartServiceTransaction(serviceID, createdBy, comment string) 
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal changes: %v", err)
 	}
-	
+
 	// Insert transaction
 	var snapshotSQL interface{}
 	if kdc.DBType == "sqlite" {
@@ -3779,7 +3922,7 @@ func (kdc *KdcDB) StartServiceTransaction(serviceID, createdBy, comment string) 
 	} else {
 		snapshotSQL = snapshotJSON
 	}
-	
+
 	_, err = kdc.DB.Exec(
 		`INSERT INTO service_transactions (id, service_id, created_at, expires_at, state, changes, created_by, comment, service_snapshot)
 		 VALUES (?, ?, CURRENT_TIMESTAMP, ?, 'open', ?, ?, ?, ?)`,
@@ -3788,7 +3931,7 @@ func (kdc *KdcDB) StartServiceTransaction(serviceID, createdBy, comment string) 
 	if err != nil {
 		return "", fmt.Errorf("failed to create transaction: %v", err)
 	}
-	
+
 	return txID, nil
 }
 
@@ -3797,41 +3940,41 @@ func (kdc *KdcDB) GetServiceTransaction(txID string) (*ServiceTransaction, error
 	var tx ServiceTransaction
 	var changesJSON, snapshotJSON sql.NullString
 	var createdBy, comment sql.NullString
-	
+
 	err := kdc.DB.QueryRow(
 		`SELECT id, service_id, created_at, expires_at, state, changes, created_by, comment, service_snapshot
 		 FROM service_transactions WHERE id = ?`,
 		txID,
 	).Scan(&tx.ID, &tx.ServiceID, &tx.CreatedAt, &tx.ExpiresAt, &tx.State, &changesJSON, &createdBy, &comment, &snapshotJSON)
-	
+
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("transaction not found: %s", txID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction: %v", err)
 	}
-	
+
 	// Parse changes JSON
 	if changesJSON.Valid {
 		if err := json.Unmarshal([]byte(changesJSON.String), &tx.Changes); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal changes: %v", err)
 		}
 	}
-	
+
 	// Parse snapshot JSON
 	if snapshotJSON.Valid {
 		if err := json.Unmarshal([]byte(snapshotJSON.String), &tx.ServiceSnapshot); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal snapshot: %v", err)
 		}
 	}
-	
+
 	if createdBy.Valid {
 		tx.CreatedBy = createdBy.String
 	}
 	if comment.Valid {
 		tx.Comment = comment.String
 	}
-	
+
 	return &tx, nil
 }
 
@@ -3839,7 +3982,7 @@ func (kdc *KdcDB) GetServiceTransaction(txID string) (*ServiceTransaction, error
 func (kdc *KdcDB) ListServiceTransactions(stateFilter string) ([]*ServiceTransaction, error) {
 	var query string
 	var args []interface{}
-	
+
 	if stateFilter != "" {
 		query = `SELECT id, service_id, created_at, expires_at, state, changes, created_by, comment, service_snapshot
 		         FROM service_transactions WHERE state = ? ORDER BY created_at DESC`
@@ -3848,47 +3991,47 @@ func (kdc *KdcDB) ListServiceTransactions(stateFilter string) ([]*ServiceTransac
 		query = `SELECT id, service_id, created_at, expires_at, state, changes, created_by, comment, service_snapshot
 		         FROM service_transactions ORDER BY created_at DESC`
 	}
-	
+
 	rows, err := kdc.DB.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query transactions: %v", err)
 	}
 	defer rows.Close()
-	
+
 	var transactions []*ServiceTransaction
 	for rows.Next() {
 		var tx ServiceTransaction
 		var changesJSON, snapshotJSON sql.NullString
 		var createdBy, comment sql.NullString
-		
+
 		if err := rows.Scan(&tx.ID, &tx.ServiceID, &tx.CreatedAt, &tx.ExpiresAt, &tx.State, &changesJSON, &createdBy, &comment, &snapshotJSON); err != nil {
 			return nil, fmt.Errorf("failed to scan transaction: %v", err)
 		}
-		
+
 		// Parse changes JSON
 		if changesJSON.Valid {
 			if err := json.Unmarshal([]byte(changesJSON.String), &tx.Changes); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal changes: %v", err)
 			}
 		}
-		
+
 		// Parse snapshot JSON
 		if snapshotJSON.Valid {
 			if err := json.Unmarshal([]byte(snapshotJSON.String), &tx.ServiceSnapshot); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal snapshot: %v", err)
 			}
 		}
-		
+
 		if createdBy.Valid {
 			tx.CreatedBy = createdBy.String
 		}
 		if comment.Valid {
 			tx.Comment = comment.String
 		}
-		
+
 		transactions = append(transactions, &tx)
 	}
-	
+
 	return transactions, rows.Err()
 }
 
@@ -3898,11 +4041,11 @@ func (kdc *KdcDB) AddComponentToTransaction(txID, componentID string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	if tx.State != ServiceTransactionStateOpen {
 		return fmt.Errorf("transaction %s is not open (state: %s)", txID, tx.State)
 	}
-	
+
 	// Check if component is already in remove list (remove it from there)
 	for i, compID := range tx.Changes.RemoveComponents {
 		if compID == componentID {
@@ -3911,23 +4054,23 @@ func (kdc *KdcDB) AddComponentToTransaction(txID, componentID string) error {
 			break
 		}
 	}
-	
+
 	// Check if already in add list
 	for _, compID := range tx.Changes.AddComponents {
 		if compID == componentID {
 			return nil // Already in add list, no-op
 		}
 	}
-	
+
 	// Add to add list
 	tx.Changes.AddComponents = append(tx.Changes.AddComponents, componentID)
-	
+
 	// Update transaction
 	changesJSON, err := json.Marshal(tx.Changes)
 	if err != nil {
 		return fmt.Errorf("failed to marshal changes: %v", err)
 	}
-	
+
 	_, err = kdc.DB.Exec(
 		"UPDATE service_transactions SET changes = ? WHERE id = ?",
 		changesJSON, txID,
@@ -3935,7 +4078,7 @@ func (kdc *KdcDB) AddComponentToTransaction(txID, componentID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to update transaction: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -3945,11 +4088,11 @@ func (kdc *KdcDB) RemoveComponentFromTransaction(txID, componentID string) error
 	if err != nil {
 		return err
 	}
-	
+
 	if tx.State != ServiceTransactionStateOpen {
 		return fmt.Errorf("transaction %s is not open (state: %s)", txID, tx.State)
 	}
-	
+
 	// Check if component is already in add list (remove it from there)
 	for i, compID := range tx.Changes.AddComponents {
 		if compID == componentID {
@@ -3958,23 +4101,23 @@ func (kdc *KdcDB) RemoveComponentFromTransaction(txID, componentID string) error
 			break
 		}
 	}
-	
+
 	// Check if already in remove list
 	for _, compID := range tx.Changes.RemoveComponents {
 		if compID == componentID {
 			return nil // Already in remove list, no-op
 		}
 	}
-	
+
 	// Add to remove list
 	tx.Changes.RemoveComponents = append(tx.Changes.RemoveComponents, componentID)
-	
+
 	// Update transaction
 	changesJSON, err := json.Marshal(tx.Changes)
 	if err != nil {
 		return fmt.Errorf("failed to marshal changes: %v", err)
 	}
-	
+
 	_, err = kdc.DB.Exec(
 		"UPDATE service_transactions SET changes = ? WHERE id = ?",
 		changesJSON, txID,
@@ -3982,7 +4125,7 @@ func (kdc *KdcDB) RemoveComponentFromTransaction(txID, componentID string) error
 	if err != nil {
 		return fmt.Errorf("failed to update transaction: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -4018,15 +4161,15 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodes(serviceID, componentID string) (map
 		return nil, fmt.Errorf("failed to query zones: %v", err)
 	}
 	defer zones.Close()
-	
+
 	result := make(map[string][]string)
-	
+
 	for zones.Next() {
 		var zoneName string
 		if err := zones.Scan(&zoneName); err != nil {
 			return nil, fmt.Errorf("failed to scan zone name: %v", err)
 		}
-		
+
 		// Find nodes that serve this component and would newly serve this zone
 		// A node newly serves a zone if:
 		// - The node serves the component being added
@@ -4051,7 +4194,7 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodes(serviceID, componentID string) (map
 		if err != nil {
 			return nil, fmt.Errorf("failed to query nodes for zone %s: %v", zoneName, err)
 		}
-		
+
 		var nodeList []string
 		for nodes.Next() {
 			var nodeID string
@@ -4062,12 +4205,12 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodes(serviceID, componentID string) (map
 			nodeList = append(nodeList, nodeID)
 		}
 		nodes.Close()
-		
+
 		if len(nodeList) > 0 {
 			result[zoneName] = nodeList
 		}
 	}
-	
+
 	return result, zones.Err()
 }
 
@@ -4086,15 +4229,15 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodes(serviceID, componentID string) (
 		return nil, fmt.Errorf("failed to query zones: %v", err)
 	}
 	defer zones.Close()
-	
+
 	result := make(map[string][]string)
-	
+
 	for zones.Next() {
 		var zoneName string
 		if err := zones.Scan(&zoneName); err != nil {
 			return nil, fmt.Errorf("failed to scan zone name: %v", err)
 		}
-		
+
 		// Find nodes that served this component and will no longer serve this zone
 		// A node stops serving a zone if:
 		// - The node served the component being removed
@@ -4119,7 +4262,7 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodes(serviceID, componentID string) (
 		if err != nil {
 			return nil, fmt.Errorf("failed to query nodes for zone %s: %v", zoneName, err)
 		}
-		
+
 		var nodeList []string
 		for nodes.Next() {
 			var nodeID string
@@ -4130,12 +4273,12 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodes(serviceID, componentID string) (
 			nodeList = append(nodeList, nodeID)
 		}
 		nodes.Close()
-		
+
 		if len(nodeList) > 0 {
 			result[zoneName] = nodeList
 		}
 	}
-	
+
 	return result, zones.Err()
 }
 
@@ -4151,9 +4294,9 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodesWithExclusions(serviceID, componentI
 		return nil, fmt.Errorf("failed to query zones: %v", err)
 	}
 	defer zones.Close()
-	
+
 	result := make(map[string][]string)
-	
+
 	// Build exclusion list: components being removed + components that will be in future service (excluding the one being added)
 	excludeComponents := make(map[string]bool)
 	for _, compID := range componentsBeingRemoved {
@@ -4164,7 +4307,7 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodesWithExclusions(serviceID, componentI
 			excludeComponents[compID] = true
 		}
 	}
-	
+
 	// Build SQL exclusion clause
 	excludeList := make([]string, 0, len(excludeComponents))
 	for range excludeComponents {
@@ -4174,13 +4317,13 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodesWithExclusions(serviceID, componentI
 	if len(excludeList) > 0 {
 		excludeClause = " AND sc2.component_id NOT IN (" + strings.Join(excludeList, ", ") + ")"
 	}
-	
+
 	for zones.Next() {
 		var zoneName string
 		if err := zones.Scan(&zoneName); err != nil {
 			return nil, fmt.Errorf("failed to scan zone name: %v", err)
 		}
-		
+
 		// Find nodes that serve this component and would newly serve this zone
 		// A node newly serves a zone if:
 		// - The node serves the component being added
@@ -4198,17 +4341,17 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodesWithExclusions(serviceID, componentI
 			         AND sc2.active = 1
 			         AND nc2.active = 1` + excludeClause + `
 			   )`
-		
+
 		args := []interface{}{componentID, serviceID}
 		for compID := range excludeComponents {
 			args = append(args, compID)
 		}
-		
+
 		nodes, err := kdc.DB.Query(query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query nodes for zone %s: %v", zoneName, err)
 		}
-		
+
 		var nodeList []string
 		for nodes.Next() {
 			var nodeID string
@@ -4219,12 +4362,12 @@ func (kdc *KdcDB) GetZonesNewlyServedByNodesWithExclusions(serviceID, componentI
 			nodeList = append(nodeList, nodeID)
 		}
 		nodes.Close()
-		
+
 		if len(nodeList) > 0 {
 			result[zoneName] = nodeList
 		}
 	}
-	
+
 	return result, zones.Err()
 }
 
@@ -4240,9 +4383,9 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodesWithExclusions(serviceID, compone
 		return nil, fmt.Errorf("failed to query zones: %v", err)
 	}
 	defer zones.Close()
-	
+
 	result := make(map[string][]string)
-	
+
 	// Build exclusion list: components being added + components that will remain in future service
 	excludeComponents := make(map[string]bool)
 	for _, compID := range componentsBeingAdded {
@@ -4253,7 +4396,7 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodesWithExclusions(serviceID, compone
 			excludeComponents[compID] = true
 		}
 	}
-	
+
 	// Build SQL exclusion clause
 	excludeList := make([]string, 0, len(excludeComponents))
 	for range excludeComponents {
@@ -4263,13 +4406,13 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodesWithExclusions(serviceID, compone
 	if len(excludeList) > 0 {
 		excludeClause = " AND sc2.component_id NOT IN (" + strings.Join(excludeList, ", ") + ")"
 	}
-	
+
 	for zones.Next() {
 		var zoneName string
 		if err := zones.Scan(&zoneName); err != nil {
 			return nil, fmt.Errorf("failed to scan zone name: %v", err)
 		}
-		
+
 		// Find nodes that served this component and will no longer serve this zone
 		// A node stops serving a zone if:
 		// - The node served the component being removed
@@ -4287,17 +4430,17 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodesWithExclusions(serviceID, compone
 			         AND sc2.active = 1
 			         AND nc2.active = 1` + excludeClause + `
 			   )`
-		
+
 		args := []interface{}{componentID, serviceID}
 		for compID := range excludeComponents {
 			args = append(args, compID)
 		}
-		
+
 		nodes, err := kdc.DB.Query(query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query nodes for zone %s: %v", zoneName, err)
 		}
-		
+
 		var nodeList []string
 		for nodes.Next() {
 			var nodeID string
@@ -4308,12 +4451,12 @@ func (kdc *KdcDB) GetZonesNoLongerServedByNodesWithExclusions(serviceID, compone
 			nodeList = append(nodeList, nodeID)
 		}
 		nodes.Close()
-		
+
 		if len(nodeList) > 0 {
 			result[zoneName] = nodeList
 		}
 	}
-	
+
 	return result, zones.Err()
 }
 
@@ -4323,42 +4466,42 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if tx.State != ServiceTransactionStateOpen {
 		return nil, fmt.Errorf("transaction %s is not open (state: %s)", txID, tx.State)
 	}
-	
+
 	// Get original components (current state)
 	originalComponents, err := kdc.GetComponentsForService(tx.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get original components: %v", err)
 	}
-	
+
 	// Compute updated components (after applying transaction)
 	updatedComponents := make([]string, 0)
 	updatedMap := make(map[string]bool)
-	
+
 	// Start with original components
 	for _, compID := range originalComponents {
 		updatedMap[compID] = true
 	}
-	
+
 	// Remove components being removed
 	for _, compID := range tx.Changes.RemoveComponents {
 		delete(updatedMap, compID)
 	}
-	
+
 	// Add components being added
 	for _, compID := range tx.Changes.AddComponents {
 		updatedMap[compID] = true
 	}
-	
+
 	// Convert map to slice
 	for compID := range updatedMap {
 		updatedComponents = append(updatedComponents, compID)
 	}
 	sort.Strings(updatedComponents)
-	
+
 	// Validate service: must have exactly one signing component
 	validationErrors := []string{}
 	signingComponentCount := 0
@@ -4367,7 +4510,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			signingComponentCount++
 		}
 	}
-	
+
 	isValid := true
 	if signingComponentCount == 0 {
 		validationErrors = append(validationErrors, "Service must have exactly one signing component (found 0)")
@@ -4376,22 +4519,22 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 		validationErrors = append(validationErrors, fmt.Sprintf("Service must have exactly one signing component (found %d)", signingComponentCount))
 		isValid = false
 	}
-	
+
 	report := &DeltaReport{
-		ServiceID:            tx.ServiceID,
-		TransactionID:        txID,
-		OriginalComponents:   originalComponents,
-		UpdatedComponents:    updatedComponents,
-		AddedComponents:      tx.Changes.AddComponents,
-		RemovedComponents:    tx.Changes.RemoveComponents,
-		IsValid:              isValid,
-		ValidationErrors:     validationErrors,
-		ZonesNewlyServed:     make(map[string][]string),
-		ZonesNoLongerServed:  make(map[string][]string),
+		ServiceID:             tx.ServiceID,
+		TransactionID:         txID,
+		OriginalComponents:    originalComponents,
+		UpdatedComponents:     updatedComponents,
+		AddedComponents:       tx.Changes.AddComponents,
+		RemovedComponents:     tx.Changes.RemoveComponents,
+		IsValid:               isValid,
+		ValidationErrors:      validationErrors,
+		ZonesNewlyServed:      make(map[string][]string),
+		ZonesNoLongerServed:   make(map[string][]string),
 		DistributionsToCreate: []DistributionPlan{},
 		DistributionsToRevoke: []DistributionPlan{},
 	}
-	
+
 	// Compute deltas for each component change
 	// We need to account for BOTH additions and removals when computing deltas
 	// Build a set of components that will be in the service AFTER the transaction
@@ -4405,14 +4548,14 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 	for _, compID := range tx.Changes.AddComponents {
 		futureComponents[compID] = true
 	}
-	
+
 	// First, handle additions
 	for _, componentID := range tx.Changes.AddComponents {
 		newlyServed, err := kdc.GetZonesNewlyServedByNodesWithExclusions(tx.ServiceID, componentID, tx.Changes.RemoveComponents, futureComponents)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute newly served zones for component %s: %v", componentID, err)
 		}
-		
+
 		// Merge into report
 		for zoneName, nodes := range newlyServed {
 			if existing, exists := report.ZonesNewlyServed[zoneName]; exists {
@@ -4433,14 +4576,14 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			}
 		}
 	}
-	
+
 	// Then, handle removals
 	for _, componentID := range tx.Changes.RemoveComponents {
 		noLongerServed, err := kdc.GetZonesNoLongerServedByNodesWithExclusions(tx.ServiceID, componentID, tx.Changes.AddComponents, futureComponents)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute no-longer-served zones for component %s: %v", componentID, err)
 		}
-		
+
 		// Merge into report
 		for zoneName, nodes := range noLongerServed {
 			if existing, exists := report.ZonesNoLongerServed[zoneName]; exists {
@@ -4461,7 +4604,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			}
 		}
 	}
-	
+
 	// Get zone count for debugging
 	zoneCountRows, err := kdc.DB.Query(
 		`SELECT COUNT(*) FROM zones WHERE service_id = ? AND active = 1`,
@@ -4472,7 +4615,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 		zoneCountRows.Scan(&zoneCount)
 	}
 	zoneCountRows.Close()
-	
+
 	// Build distribution plans for newly served zones
 	for zoneName, nodes := range report.ZonesNewlyServed {
 		// Get keys that would be distributed
@@ -4481,18 +4624,18 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			log.Printf("KDC: Warning: Failed to get keys for zone %s: %v", zoneName, err)
 			continue
 		}
-		
+
 		// Check signing mode
 		signingMode, err := kdc.GetZoneSigningMode(zoneName)
 		if err != nil {
 			log.Printf("KDC: Warning: Failed to get signing mode for zone %s: %v", zoneName, err)
 			continue
 		}
-		
+
 		if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
 			continue // Skip zones that don't need key distribution
 		}
-		
+
 		var keyIDs []string
 		// Find standby ZSK keys
 		for _, key := range keys {
@@ -4500,7 +4643,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 				keyIDs = append(keyIDs, key.ID)
 			}
 		}
-		
+
 		// For edgesign_full zones, also include active KSK
 		if signingMode == ZoneSigningModeEdgesignFull {
 			for _, key := range keys {
@@ -4510,7 +4653,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 				}
 			}
 		}
-		
+
 		// Create distribution plan for each node
 		for _, nodeID := range nodes {
 			if len(keyIDs) > 0 {
@@ -4522,7 +4665,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			}
 		}
 	}
-	
+
 	// Build distribution plans for zones no longer served (for revocation tracking)
 	for zoneName, nodes := range report.ZonesNoLongerServed {
 		// Get currently distributed keys
@@ -4531,7 +4674,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			log.Printf("KDC: Warning: Failed to get keys for zone %s: %v", zoneName, err)
 			continue
 		}
-		
+
 		var keyIDs []string
 		// Find distributed ZSK keys
 		for _, key := range keys {
@@ -4539,7 +4682,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 				keyIDs = append(keyIDs, key.ID)
 			}
 		}
-		
+
 		// For edgesign_full zones, also include active_dist KSK
 		signingMode, err := kdc.GetZoneSigningMode(zoneName)
 		if err == nil && signingMode == ZoneSigningModeEdgesignFull {
@@ -4550,7 +4693,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 				}
 			}
 		}
-		
+
 		// Create distribution plan for each node (for revocation)
 		for _, nodeID := range nodes {
 			if len(keyIDs) > 0 {
@@ -4562,7 +4705,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			}
 		}
 	}
-	
+
 	// Compute summary
 	allZones := make(map[string]bool)
 	for zoneName := range report.ZonesNewlyServed {
@@ -4571,7 +4714,7 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 	for zoneName := range report.ZonesNoLongerServed {
 		allZones[zoneName] = true
 	}
-	
+
 	allNodes := make(map[string]bool)
 	for _, nodes := range report.ZonesNewlyServed {
 		for _, nodeID := range nodes {
@@ -4583,17 +4726,17 @@ func (kdc *KdcDB) ViewServiceTransaction(txID string) (*DeltaReport, error) {
 			allNodes[nodeID] = true
 		}
 	}
-	
+
 	report.Summary = DeltaSummary{
-		TotalZonesAffected:      len(allZones),
-		TotalDistributions:      len(report.DistributionsToCreate) + len(report.DistributionsToRevoke),
-		TotalNodesAffected:      len(allNodes),
-		ZonesNewlyServed:        len(report.ZonesNewlyServed),
-		ZonesNoLongerServed:     len(report.ZonesNoLongerServed),
-		DistributionsToCreate:   len(report.DistributionsToCreate),
-		DistributionsToRevoke:   len(report.DistributionsToRevoke),
+		TotalZonesAffected:    len(allZones),
+		TotalDistributions:    len(report.DistributionsToCreate) + len(report.DistributionsToRevoke),
+		TotalNodesAffected:    len(allNodes),
+		ZonesNewlyServed:      len(report.ZonesNewlyServed),
+		ZonesNoLongerServed:   len(report.ZonesNoLongerServed),
+		DistributionsToCreate: len(report.DistributionsToCreate),
+		DistributionsToRevoke: len(report.DistributionsToRevoke),
 	}
-	
+
 	return report, nil
 }
 
@@ -4603,18 +4746,18 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if tx.State != ServiceTransactionStateOpen {
 		return nil, fmt.Errorf("transaction %s is not open (state: %s)", txID, tx.State)
 	}
-	
+
 	// Check for conflicts (optimistic locking)
 	// Verify service hasn't changed since transaction started
 	currentComponents, err := kdc.GetComponentsForService(tx.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current service components: %v", err)
 	}
-	
+
 	snapshotComponents, ok := tx.ServiceSnapshot["components"].([]interface{})
 	if !ok {
 		// Try to parse from JSON if it's a string slice
@@ -4628,7 +4771,7 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 			log.Printf("KDC: Warning: Could not parse snapshot components, skipping conflict check")
 		}
 	}
-	
+
 	if snapshotComponents != nil {
 		snapshotMap := make(map[string]bool)
 		for _, comp := range snapshotComponents {
@@ -4636,12 +4779,12 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 				snapshotMap[compStr] = true
 			}
 		}
-		
+
 		currentMap := make(map[string]bool)
 		for _, comp := range currentComponents {
 			currentMap[comp] = true
 		}
-		
+
 		// Check if components changed (excluding our pending changes)
 		// This is a simplified check - in practice, we'd want to account for the pending changes
 		if len(snapshotMap) != len(currentMap) {
@@ -4649,25 +4792,25 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 			log.Printf("KDC: Warning: Service %s component count changed from %d to %d since transaction started", tx.ServiceID, len(snapshotMap), len(currentMap))
 		}
 	}
-	
+
 	// Get delta report
 	report, err := kdc.ViewServiceTransaction(txID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute delta: %v", err)
 	}
-	
+
 	if dryRun {
 		// Just return the report without applying changes
 		return report, nil
 	}
-	
+
 	// Start database transaction for atomicity
 	dbTx, err := kdc.DB.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin database transaction: %v", err)
 	}
 	defer dbTx.Rollback()
-	
+
 	// Apply component changes
 	for _, componentID := range tx.Changes.AddComponents {
 		_, err = dbTx.Exec(
@@ -4689,7 +4832,7 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 			}
 		}
 	}
-	
+
 	for _, componentID := range tx.Changes.RemoveComponents {
 		_, err = dbTx.Exec(
 			"UPDATE service_component_assignments SET active = 0 WHERE service_id = ? AND component_id = ?",
@@ -4699,7 +4842,7 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 			return nil, fmt.Errorf("failed to remove component %s: %v", componentID, err)
 		}
 	}
-	
+
 	// Mark transaction as committed
 	_, err = dbTx.Exec(
 		"UPDATE service_transactions SET state = 'committed' WHERE id = ?",
@@ -4708,12 +4851,12 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 	if err != nil {
 		return nil, fmt.Errorf("failed to mark transaction as committed: %v", err)
 	}
-	
+
 	// Commit database transaction
 	if err := dbTx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit database transaction: %v", err)
 	}
-	
+
 	// Create distributions (outside of DB transaction for better error handling)
 	if kdcConf != nil {
 		for _, plan := range report.DistributionsToCreate {
@@ -4722,7 +4865,7 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 				// Continue with other distributions
 			}
 		}
-		
+
 		// TODO: Implement key revocation for report.DistributionsToRevoke
 		// For now, just log
 		if len(report.DistributionsToRevoke) > 0 {
@@ -4731,7 +4874,7 @@ func (kdc *KdcDB) CommitServiceTransaction(txID string, kdcConf *tnm.KdcConf, dr
 	} else {
 		log.Printf("KDC: KdcConf not provided, skipping automatic key distribution")
 	}
-	
+
 	return report, nil
 }
 
@@ -4743,7 +4886,7 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *tnm.Kd
 	if err != nil {
 		return fmt.Errorf("failed to get signing mode: %v", err)
 	}
-	
+
 	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
 		log.Printf("KDC: Zone %s has signing_mode=%s, skipping key distribution (only edgesign_* modes support key distribution)", zoneName, signingMode)
 		return nil // Not an error, just skip
@@ -4754,12 +4897,12 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *tnm.Kd
 	if err != nil {
 		return fmt.Errorf("failed to get node: %v", err)
 	}
-	
+
 	if node.State != NodeStateOnline {
 		log.Printf("KDC: Node %s is not online (state: %s), skipping key distribution", nodeID, node.State)
 		return nil // Not an error, just skip
 	}
-	
+
 	if node.NotifyAddress == "" {
 		log.Printf("KDC: Node %s has no notify_address configured, skipping key distribution", nodeID)
 		return nil // Not an error, just skip
@@ -4801,7 +4944,7 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *tnm.Kd
 	// Collect all keys to distribute (ZSKs + optional KSK)
 	allKeys := make([]*DNSSECKey, 0, len(standbyZSKs)+1)
 	allKeyIDs := make([]string, 0, len(standbyZSKs)+1)
-	
+
 	for _, key := range standbyZSKs {
 		allKeys = append(allKeys, key)
 		allKeyIDs = append(allKeyIDs, key.ID)
@@ -4857,10 +5000,10 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *tnm.Kd
 	return nil
 }
 
-// GenerateBootstrapToken generates a new bootstrap token for a node
+// GenerateEnrollmentToken generates a new enrollment token for a node
 // nodeID: The node ID to generate the token for
-// Returns: BootstrapToken with generated token, error
-func (kdc *KdcDB) GenerateBootstrapToken(nodeID string) (*BootstrapToken, error) {
+// Returns: EnrollmentToken with generated token, error
+func (kdc *KdcDB) GenerateEnrollmentToken(nodeID string) (*EnrollmentToken, error) {
 	// Generate cryptographically random token (32 bytes = 256 bits)
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
@@ -4885,24 +5028,24 @@ func (kdc *KdcDB) GenerateBootstrapToken(nodeID string) (*BootstrapToken, error)
 
 	_, err := kdc.DB.Exec(query, tokenID, tokenValue, nodeID, time.Now(), false, false, "", "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to insert bootstrap token: %v", err)
+		return nil, fmt.Errorf("failed to insert enrollment token: %v", err)
 	}
 
 	// Retrieve the created token
-	token, err := kdc.getBootstrapTokenByValue(tokenValue)
+	token, err := kdc.getEnrollmentTokenByValue(tokenValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve created token: %v", err)
 	}
 
-	log.Printf("KDC: Generated bootstrap token for node %s (token_id: %s)", nodeID, tokenID)
+	log.Printf("KDC: Generated enrollment token for node %s (token_id: %s)", nodeID, tokenID)
 	return token, nil
 }
 
-// ActivateBootstrapToken activates a bootstrap token for a node
+// ActivateEnrollmentToken activates an enrollment token for a node
 // nodeID: The node ID
 // expirationWindow: How long until the token expires after activation
 // Returns: error
-func (kdc *KdcDB) ActivateBootstrapToken(nodeID string, expirationWindow time.Duration) error {
+func (kdc *KdcDB) ActivateEnrollmentToken(nodeID string, expirationWindow time.Duration) error {
 	// Find the token for this node
 	var query string
 	if kdc.DBType == "sqlite" {
@@ -4921,7 +5064,7 @@ func (kdc *KdcDB) ActivateBootstrapToken(nodeID string, expirationWindow time.Du
 		return fmt.Errorf("no inactive token found for node %s", nodeID)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to query bootstrap token: %v", err)
+		return fmt.Errorf("failed to query enrollment token: %v", err)
 	}
 
 	// Activate the token
@@ -4941,18 +5084,18 @@ func (kdc *KdcDB) ActivateBootstrapToken(nodeID string, expirationWindow time.Du
 
 	_, err = kdc.DB.Exec(updateQuery, now, expiresAt, tokenID)
 	if err != nil {
-		return fmt.Errorf("failed to activate bootstrap token: %v", err)
+		return fmt.Errorf("failed to activate enrollment token: %v", err)
 	}
 
-	log.Printf("KDC: Activated bootstrap token for node %s (expires at %s)", nodeID, expiresAt.Format(time.RFC3339))
+	log.Printf("KDC: Activated enrollment token for node %s (expires at %s)", nodeID, expiresAt.Format(time.RFC3339))
 	return nil
 }
 
-// ValidateBootstrapToken validates a bootstrap token
+// ValidateEnrollmentToken validates an enrollment token
 // tokenValue: The token value to validate
-// Returns: BootstrapToken if valid, error if invalid or not found
-func (kdc *KdcDB) ValidateBootstrapToken(tokenValue string) (*BootstrapToken, error) {
-	token, err := kdc.getBootstrapTokenByValue(tokenValue)
+// Returns: EnrollmentToken if valid, error if invalid or not found
+func (kdc *KdcDB) ValidateEnrollmentToken(tokenValue string) (*EnrollmentToken, error) {
+	token, err := kdc.getEnrollmentTokenByValue(tokenValue)
 	if err != nil {
 		return nil, fmt.Errorf("token not found: %v", err)
 	}
@@ -4975,10 +5118,10 @@ func (kdc *KdcDB) ValidateBootstrapToken(tokenValue string) (*BootstrapToken, er
 	return token, nil
 }
 
-// GetBootstrapTokenStatus returns the status of a bootstrap token for a node
+// GetEnrollmentTokenStatus returns the status of an enrollment token for a node
 // nodeID: The node ID
 // Returns: status string ("generated", "active", "expired", "completed", "not_found"), error
-func (kdc *KdcDB) GetBootstrapTokenStatus(nodeID string) (string, error) {
+func (kdc *KdcDB) GetEnrollmentTokenStatus(nodeID string) (string, error) {
 	var query string
 	if kdc.DBType == "sqlite" {
 		query = `SELECT activated, used, expires_at FROM bootstrap_tokens 
@@ -4997,7 +5140,7 @@ func (kdc *KdcDB) GetBootstrapTokenStatus(nodeID string) (string, error) {
 		return "not_found", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to query bootstrap token: %v", err)
+		return "", fmt.Errorf("failed to query enrollment token: %v", err)
 	}
 
 	// Calculate status
@@ -5016,39 +5159,39 @@ func (kdc *KdcDB) GetBootstrapTokenStatus(nodeID string) (string, error) {
 	return "active", nil
 }
 
-// ListBootstrapTokens returns all bootstrap tokens with their calculated status
-// Returns: slice of BootstrapToken with status, error
-func (kdc *KdcDB) ListBootstrapTokens() ([]*BootstrapToken, error) {
+// ListEnrollmentTokens returns all enrollment tokens with their calculated status
+// Returns: slice of EnrollmentToken with status, error
+func (kdc *KdcDB) ListEnrollmentTokens() ([]*EnrollmentToken, error) {
 	query := `SELECT token_id, token_value, node_id, created_at, activated_at, expires_at, 
 		activated, used, used_at, created_by, comment
 		FROM bootstrap_tokens ORDER BY created_at DESC`
 
 	rows, err := kdc.DB.Query(query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query bootstrap tokens: %v", err)
+		return nil, fmt.Errorf("failed to query enrollment tokens: %v", err)
 	}
 	defer rows.Close()
 
-	var tokens []*BootstrapToken
+	var tokens []*EnrollmentToken
 	for rows.Next() {
-		token, err := kdc.scanBootstrapToken(rows)
+		token, err := kdc.scanEnrollmentToken(rows)
 		if err != nil {
-			log.Printf("KDC: Warning: Failed to scan bootstrap token: %v", err)
+			log.Printf("KDC: Warning: Failed to scan enrollment token: %v", err)
 			continue
 		}
 		tokens = append(tokens, token)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating bootstrap tokens: %v", err)
+		return nil, fmt.Errorf("error iterating enrollment tokens: %v", err)
 	}
 
 	return tokens, nil
 }
 
-// PurgeBootstrapTokens deletes tokens with status "expired" or "completed"
+// PurgeEnrollmentTokens deletes tokens with status "expired" or "completed"
 // Returns: number of tokens purged, error
-func (kdc *KdcDB) PurgeBootstrapTokens() (int, error) {
+func (kdc *KdcDB) PurgeEnrollmentTokens() (int, error) {
 	var query string
 	if kdc.DBType == "sqlite" {
 		query = `DELETE FROM bootstrap_tokens 
@@ -5069,7 +5212,7 @@ func (kdc *KdcDB) PurgeBootstrapTokens() (int, error) {
 	}
 
 	if err != nil {
-		return 0, fmt.Errorf("failed to purge bootstrap tokens: %v", err)
+		return 0, fmt.Errorf("failed to purge enrollment tokens: %v", err)
 	}
 
 	count, err := result.RowsAffected()
@@ -5078,16 +5221,16 @@ func (kdc *KdcDB) PurgeBootstrapTokens() (int, error) {
 	}
 
 	if count > 0 {
-		log.Printf("KDC: Purged %d bootstrap token(s)", count)
+		log.Printf("KDC: Purged %d enrollment token(s)", count)
 	}
 
 	return int(count), nil
 }
 
-// MarkBootstrapTokenUsed marks a bootstrap token as used
+// MarkEnrollmentTokenUsed marks an enrollment token as used
 // tokenValue: The token value to mark as used
 // Returns: error
-func (kdc *KdcDB) MarkBootstrapTokenUsed(tokenValue string) error {
+func (kdc *KdcDB) MarkEnrollmentTokenUsed(tokenValue string) error {
 	var query string
 	if kdc.DBType == "sqlite" {
 		query = `UPDATE bootstrap_tokens 
@@ -5111,23 +5254,47 @@ func (kdc *KdcDB) MarkBootstrapTokenUsed(tokenValue string) error {
 		return fmt.Errorf("token not found: %s", tokenValue)
 	}
 
-	log.Printf("KDC: Marked bootstrap token as used (token_value: %s)", tokenValue)
+	log.Printf("KDC: Marked enrollment token as used (token_value: %s)", tokenValue)
 	return nil
 }
 
-// Helper function to get bootstrap token by value
-func (kdc *KdcDB) getBootstrapTokenByValue(tokenValue string) (*BootstrapToken, error) {
+// DeleteEnrollmentToken deletes an enrollment token by token value
+// tokenValue: The token value to delete
+// Returns: error
+func (kdc *KdcDB) DeleteEnrollmentToken(tokenValue string) error {
+	query := `DELETE FROM bootstrap_tokens WHERE token_value = ?`
+
+	result, err := kdc.DB.Exec(query, tokenValue)
+	if err != nil {
+		return fmt.Errorf("failed to delete enrollment token: %v", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %v", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("token not found: %s", tokenValue)
+	}
+
+	log.Printf("KDC: Deleted enrollment token (token_value: %s)", tokenValue)
+	return nil
+}
+
+// Helper function to get enrollment token by value
+func (kdc *KdcDB) getEnrollmentTokenByValue(tokenValue string) (*EnrollmentToken, error) {
 	query := `SELECT token_id, token_value, node_id, created_at, activated_at, expires_at, 
 		activated, used, used_at, created_by, comment
 		FROM bootstrap_tokens WHERE token_value = ?`
 
 	row := kdc.DB.QueryRow(query, tokenValue)
-	return kdc.scanBootstrapToken(row)
+	return kdc.scanEnrollmentToken(row)
 }
 
-// Helper function to scan bootstrap token from database row
-func (kdc *KdcDB) scanBootstrapToken(scanner interface{}) (*BootstrapToken, error) {
-	var token BootstrapToken
+// Helper function to scan enrollment token from database row
+func (kdc *KdcDB) scanEnrollmentToken(scanner interface{}) (*EnrollmentToken, error) {
+	var token EnrollmentToken
 	var activatedAt, expiresAt, usedAt sql.NullTime
 	var createdBy, comment sql.NullString
 
@@ -5179,14 +5346,14 @@ func (kdc *KdcDB) StoreDistributionComponentList(distributionID, nodeID string, 
 	// Store as JSON in a simple key-value table
 	// We'll use a simple approach: store in distribution_component_lists table
 	// If the table doesn't exist, we'll create it on first use (or add it to schema)
-	
+
 	// For now, let's use a simple in-memory map (will be lost on restart, but works for now)
 	// TODO: Create a proper table for this
 	componentsJSON, err := json.Marshal(components)
 	if err != nil {
 		return fmt.Errorf("failed to marshal component list: %v", err)
 	}
-	
+
 	// Store in a simple table (create if not exists)
 	// We'll add this to the schema later, for now create it on the fly
 	_, err = kdc.DB.Exec(`
@@ -5202,7 +5369,7 @@ func (kdc *KdcDB) StoreDistributionComponentList(distributionID, nodeID string, 
 		// Table might already exist or creation failed, try insert anyway
 		log.Printf("KDC: Warning: Failed to create distribution_component_lists table (may already exist): %v", err)
 	}
-	
+
 	// Insert or replace the component list
 	if kdc.DBType == "sqlite" {
 		_, err = kdc.DB.Exec(
@@ -5219,7 +5386,7 @@ func (kdc *KdcDB) StoreDistributionComponentList(distributionID, nodeID string, 
 	if err != nil {
 		return fmt.Errorf("failed to store component list: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -5227,7 +5394,7 @@ func (kdc *KdcDB) StoreDistributionComponentList(distributionID, nodeID string, 
 func (kdc *KdcDB) GetDistributionComponentList(distributionID string) (string, []string, error) {
 	var nodeID string
 	var componentListJSON string
-	
+
 	err := kdc.DB.QueryRow(
 		`SELECT node_id, component_list FROM distribution_component_lists WHERE distribution_id = ?`,
 		distributionID,
@@ -5235,12 +5402,12 @@ func (kdc *KdcDB) GetDistributionComponentList(distributionID string) (string, [
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to get component list for distribution %s: %v", distributionID, err)
 	}
-	
+
 	var components []string
 	if err := json.Unmarshal([]byte(componentListJSON), &components); err != nil {
 		return "", nil, fmt.Errorf("failed to unmarshal component list: %v", err)
 	}
-	
+
 	return nodeID, components, nil
 }
 
@@ -5252,18 +5419,18 @@ func (kdc *KdcDB) ApplyComponentListToNode(nodeID string, intendedComponents []s
 	if err != nil {
 		return fmt.Errorf("failed to get current components: %v", err)
 	}
-	
+
 	// Create maps for easier lookup
 	currentMap := make(map[string]bool)
 	for _, comp := range currentComponents {
 		currentMap[comp] = true
 	}
-	
+
 	intendedMap := make(map[string]bool)
 	for _, comp := range intendedComponents {
 		intendedMap[comp] = true
 	}
-	
+
 	// Add components that are in intended but not in current
 	for _, comp := range intendedComponents {
 		if !currentMap[comp] {
@@ -5293,7 +5460,7 @@ func (kdc *KdcDB) ApplyComponentListToNode(nodeID string, intendedComponents []s
 			}
 		}
 	}
-	
+
 	// Remove components that are in current but not in intended
 	for _, comp := range currentComponents {
 		if !intendedMap[comp] {
@@ -5309,6 +5476,6 @@ func (kdc *KdcDB) ApplyComponentListToNode(nodeID string, intendedComponents []s
 			}
 		}
 	}
-	
+
 	return nil
 }

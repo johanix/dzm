@@ -20,12 +20,12 @@ func CreateManifestMetadata(contentType, distributionID, nodeID string, extraFie
 		"node_id":         nodeID,
 		"timestamp":       time.Now().Unix(), // Unix timestamp for replay protection
 	}
-	
+
 	// Add any extra fields
 	for k, v := range extraFields {
 		metadata[k] = v
 	}
-	
+
 	return metadata
 }
 
@@ -34,7 +34,7 @@ func CreateManifestMetadata(contentType, distributionID, nodeID string, extraFie
 func ShouldIncludePayloadInline(payloadSize, estimatedTotalSize int) bool {
 	const inlinePayloadThreshold = 500
 	const maxTotalSize = 1200
-	
+
 	return payloadSize <= inlinePayloadThreshold && estimatedTotalSize < maxTotalSize
 }
 
@@ -48,14 +48,14 @@ func EstimateManifestSize(metadata map[string]interface{}, payload []byte) int {
 		Metadata:   metadata,
 		Payload:    payload,
 	}
-	
+
 	// Marshal to JSON to get size
 	manifestJSON, err := json.Marshal(testManifestData)
 	if err != nil {
 		// Fallback estimate if marshaling fails
 		return 500
 	}
-	
+
 	// CHUNK manifest size = Format (1) + HMACLen (2) + HMAC (32) + Sequence (2) + Total (2) + DataLength (2) + Data
 	// Format: 1 byte
 	// HMACLen: 2 bytes

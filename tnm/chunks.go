@@ -8,12 +8,14 @@ package tnm
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/johanix/tdns/v2/core"
 )
 
 // SplitIntoCHUNKs splits data into CHUNK records of specified size
 // Returns CHUNK records with 1-based sequence numbers (1, 2, 3, ..., total)
+// Returns nil if the data would result in more than math.MaxUint16 chunks or if any chunk would exceed math.MaxUint16 bytes
 func SplitIntoCHUNKs(data []byte, chunkSize int, format uint8) []*core.CHUNK {
 	if chunkSize <= 0 {
 		chunkSize = 60000 // Default
@@ -22,6 +24,12 @@ func SplitIntoCHUNKs(data []byte, chunkSize int, format uint8) []*core.CHUNK {
 	var chunks []*core.CHUNK
 	total := len(data)
 	numChunks := (total + chunkSize - 1) / chunkSize // Ceiling division
+
+	// Check for integer overflow before converting to uint16
+	if numChunks > math.MaxUint16 {
+		return nil // Return nil if overflow would occur
+	}
+	numChunksUint16 := uint16(numChunks)
 
 	for i := 0; i < numChunks; i++ {
 		start := i * chunkSize
@@ -33,12 +41,17 @@ func SplitIntoCHUNKs(data []byte, chunkSize int, format uint8) []*core.CHUNK {
 		chunkData := make([]byte, end-start)
 		copy(chunkData, data[start:end])
 
+		// Check for chunk data length overflow before converting to uint16
+		if len(chunkData) > math.MaxUint16 {
+			return nil // Return nil if overflow would occur
+		}
+
 		chunk := &core.CHUNK{
 			Format:     format,
 			HMACLen:    0, // No HMAC for data chunks
 			HMAC:       nil,
 			Sequence:   uint16(i + 1), // 1-based: 1, 2, 3, ..., N
-			Total:      uint16(numChunks),
+			Total:      numChunksUint16,
 			DataLength: uint16(len(chunkData)),
 			Data:       chunkData,
 		}
@@ -61,6 +74,12 @@ func ReassembleCHUNKChunks(chunks []*core.CHUNK) ([]byte, error) {
 		return nil, fmt.Errorf("invalid chunk total: 0 (expected > 0 for data chunks)")
 	}
 
+	// Check for integer overflow before converting to uint16
+	if total > math.MaxUint16 {
+		return nil, fmt.Errorf("chunk total too large: %d (max: %d)", total, math.MaxUint16)
+	}
+	totalUint16 := uint16(total)
+
 	if len(chunks) != total {
 		return nil, fmt.Errorf("chunk count mismatch: expected %d, got %d", total, len(chunks))
 	}
@@ -73,7 +92,7 @@ func ReassembleCHUNKChunks(chunks []*core.CHUNK) ([]byte, error) {
 		if chunk.Sequence < 1 || int(chunk.Sequence) > total {
 			return nil, fmt.Errorf("chunk sequence %d out of range (expected 1-%d)", chunk.Sequence, total)
 		}
-		if chunk.Total != uint16(total) {
+		if chunk.Total != totalUint16 {
 			return nil, fmt.Errorf("chunk total mismatch: expected %d, got %d", total, chunk.Total)
 		}
 		chunkMap[chunk.Sequence] = chunk
@@ -81,7 +100,7 @@ func ReassembleCHUNKChunks(chunks []*core.CHUNK) ([]byte, error) {
 
 	// Reassemble in order (1-based: 1, 2, 3, ..., total)
 	reassembled := make([]byte, 0)
-	for i := uint16(1); i <= uint16(total); i++ {
+	for i := uint16(1); i <= totalUint16; i++ {
 		chunk, ok := chunkMap[i]
 		if !ok {
 			return nil, fmt.Errorf("missing chunk with sequence %d", i)

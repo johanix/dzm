@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -34,7 +35,7 @@ type chunkCache struct {
 }
 
 type preparedChunks struct {
-	chunks []*core.CHUNK // CHUNK records (manifest + data chunks)
+	chunks    []*core.CHUNK // CHUNK records (manifest + data chunks)
 	checksum  string
 	timestamp int64
 }
@@ -43,9 +44,21 @@ var globalChunkCache = &chunkCache{
 	cache: make(map[string]*preparedChunks),
 }
 
-// prepareChunksForNode prepares chunks for a node's distribution event
+// validateHPKEForNode validates that a node can use HPKE operations
+// Checks that the node is not JOSE-only and has a valid HPKE public key
+func validateHPKEForNode(node *Node, nodeID, purpose string) error {
+	if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for %s", nodeID, purpose)
+	}
+	if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
+		return fmt.Errorf("node %s has invalid public key for %s: length %d (expected 32)", nodeID, purpose, len(node.LongTermHpkePubKey))
+	}
+	return nil
+}
+
+// prepareChunksForNodeV1 prepares chunks for a node's distribution event (V1 implementation using HPKE)
 // This is called on-demand when CHUNK is queried
-func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.KdcConf) (*preparedChunks, error) {
+func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tnm.KdcConf) (*preparedChunks, error) {
 	cacheKey := fmt.Sprintf("%s:%s", nodeID, distributionID)
 
 	// Check cache first
@@ -65,8 +78,9 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	if len(node.LongTermPubKey) != 32 {
-		return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	// Validate HPKE eligibility once at the start (covers HMAC and encryption operations)
+	if err := validateHPKEForNode(node, nodeID, "HPKE operations"); err != nil {
+		return nil, err
 	}
 
 	// Get all distribution records for this distributionID
@@ -94,9 +108,9 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 
 	// Determine content type by analyzing all operations in this distribution
 	// Categorize operations into domains and check for conflicts
-	hasNodeOps := false    // update_components
-	hasKeyOps := false     // roll_key, delete_key
-	hasMgmtOps := false    // ping
+	hasNodeOps := false // update_components
+	hasKeyOps := false  // roll_key, delete_key
+	hasMgmtOps := false // ping
 
 	for _, record := range nodeRecords {
 		switch record.Operation {
@@ -110,7 +124,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 	}
 
 	// Determine contentType based on operation mix
-	contentType := "key_operations"  // default
+	contentType := "key_operations" // default
 	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
 		contentType = "node_operations"
 	} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
@@ -214,7 +228,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 		}
 
 		operationCount = len(entries)
-		keyCount = 0  // For key_operations, count the actual key operations
+		keyCount = 0 // For key_operations, count the actual key operations
 		for _, entry := range entries {
 			if entry.Operation == "roll_key" || entry.Operation == "delete_key" {
 				keyCount++
@@ -262,7 +276,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 			contentType, operationCount, keyCount, zoneCount, len(entriesJSON))
 
 		// Encrypt the entire JSON payload using HPKE and encode for transport
-		base64Data, err = tnm.EncryptAndEncode(node.LongTermPubKey, entriesJSON)
+		base64Data, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, entriesJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
 		}
@@ -310,7 +324,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 	// Determine if payload should be included inline
 	payloadSize := len(base64Data)
 	testSize := tnm.EstimateManifestSize(metadata, base64Data)
-	
+
 	// Check if the manifest fits in DNS message (accounting for headers and QNAME)
 	// Estimate: DNS headers (~12) + QNAME (~100) + RR header (~10) + manifest data
 	const estimatedDNSOverhead = 150
@@ -325,15 +339,26 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest", 
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
 		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
+		if dataChunks == nil && len(base64Data) > 0 {
+			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(base64Data), chunkSizeInt)
+		}
+		// Check for integer overflow before converting to uint16
+		if len(dataChunks) > math.MaxUint16 {
+			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
+		}
+		if chunkSizeInt > math.MaxUint16 {
+			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		}
 		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
@@ -350,7 +375,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 		copy(manifestData.Payload, base64Data)
 	}
 
-	// Create manifest CHUNK (Total=0)
+	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
 	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
@@ -358,7 +383,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
+	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
 	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
@@ -379,15 +404,13 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *tnm.
 	globalChunkCache.cache[cacheKey] = prepared
 	globalChunkCache.mu.Unlock()
 
-	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s", 
+	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s",
 		len(allChunks), nodeID, distributionID)
 	return prepared, nil
 }
 
-
-
 // GetCHUNKForNode retrieves a CHUNK record for a node's distribution event
-// chunkID 0 returns the manifest CHUNK (Total=0), chunkID > 0 returns data CHUNK (Total>0)
+// chunkID 0 returns the manifest CHUNK (Sequence=0), chunkID > 0 returns data CHUNK (Sequence>0)
 func (kdc *KdcDB) GetCHUNKForNode(nodeID, distributionID string, chunkID uint16, conf *tnm.KdcConf) (*core.CHUNK, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
@@ -398,7 +421,29 @@ func (kdc *KdcDB) GetCHUNKForNode(nodeID, distributionID string, chunkID uint16,
 		return nil, fmt.Errorf("CHUNK ID %d out of range (max %d)", chunkID, len(prepared.chunks)-1)
 	}
 
-	return prepared.chunks[chunkID], nil
+	chunk := prepared.chunks[chunkID]
+	// Debug: Check if Data field is JSON or base64
+	dataPreview := ""
+	if len(chunk.Data) > 0 {
+		if chunk.Data[0] == '{' || chunk.Data[0] == '[' {
+			dataPreview = "JSON"
+			if len(chunk.Data) > 50 {
+				dataPreview += fmt.Sprintf(" (starts with: %q...)", string(chunk.Data[:50]))
+			} else {
+				dataPreview += fmt.Sprintf(" (content: %q)", string(chunk.Data))
+			}
+		} else {
+			dataPreview = "base64"
+			if len(chunk.Data) > 20 {
+				dataPreview += fmt.Sprintf(" (starts with: %q...)", string(chunk.Data[:20]))
+			} else {
+				dataPreview += fmt.Sprintf(" (content: %q)", string(chunk.Data))
+			}
+		}
+	}
+	log.Printf("KDC: GetCHUNKForNode: returning chunkID=%d (array index %d): sequence=%d, total=%d, data_len=%d, data_type=%s",
+		chunkID, chunkID, chunk.Sequence, chunk.Total, len(chunk.Data), dataPreview)
+	return chunk, nil
 }
 
 // GetDistributionRecordsForDistributionID gets all distribution records for a distribution ID
@@ -583,7 +628,7 @@ func (kdc *KdcDB) DeleteDistribution(distributionID string) error {
 func ClearDistributionCache(distributionID string) {
 	globalChunkCache.mu.Lock()
 	defer globalChunkCache.mu.Unlock()
-	
+
 	// Remove all cache entries matching this distribution ID
 	for key := range globalChunkCache.cache {
 		if strings.HasSuffix(key, ":"+distributionID) {
@@ -615,8 +660,9 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	if len(node.LongTermPubKey) != 32 {
-		return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+	// Validate HPKE eligibility once at the start (covers encryption and HMAC operations)
+	if err := validateHPKEForNode(node, nodeID, "HPKE operations"); err != nil {
+		return nil, err
 	}
 
 	var dataToChunk []byte
@@ -624,7 +670,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 
 	if contentType == "encrypted_text" {
 		// Encrypt the text using HPKE and encode for transport
-		dataToChunk, err = tnm.EncryptAndEncode(node.LongTermPubKey, []byte(text))
+		dataToChunk, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, []byte(text))
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt text: %v", err)
 		}
@@ -647,7 +693,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		"text_length":     len(text),
 	}
 	testSize := tnm.EstimateManifestSize(testMetadata, dataToChunk)
-	
+
 	// Check if the manifest fits in DNS message
 	const estimatedDNSOverhead = 150
 	estimatedTotalSize := estimatedDNSOverhead + testSize
@@ -661,15 +707,26 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest", 
+		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
 		dataChunks = tnm.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
+		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
+		if dataChunks == nil && len(dataToChunk) > 0 {
+			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(dataToChunk), chunkSizeInt)
+		}
+		// Check for integer overflow before converting to uint16
+		if len(dataChunks) > math.MaxUint16 {
+			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
+		}
+		if chunkSizeInt > math.MaxUint16 {
+			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		}
 		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
+		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
@@ -690,7 +747,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		copy(manifestData.Payload, dataToChunk)
 	}
 
-	// Create manifest CHUNK (Total=0)
+	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
 	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
@@ -698,7 +755,8 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
+	// (HPKE eligibility already validated at function start)
+	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
 	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
@@ -730,16 +788,16 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// We use "test" as zone_id and key_id, but these don't need to exist due to
 		// the way we query (we also check cache)
 		distRecord := &DistributionRecord{
-			ID:             distRecordIDHex,
-			ZoneName:       "test", // Placeholder zone for test distributions
-			KeyID:          "test", // Placeholder key for test distributions
-			NodeID:         nodeID,
-			EncryptedKey:   []byte("test"), // Dummy data
-			EphemeralPubKey: []byte("test"), // Dummy data
-			CreatedAt:      time.Now(),
-			ExpiresAt:      nil,
-			Status:         hpke.DistributionStatusPending,
-			DistributionID: distributionID,
+			ID:              distRecordIDHex,
+			ZoneName:        "_test_distribution_", // Placeholder zone for test distributions
+			KeyID:           "_test_key_",          // Placeholder key for test distributions
+			NodeID:          nodeID,
+			EncryptedKey:    []byte{},       // Empty for test distributions
+			EphemeralPubKey: []byte{},       // Empty for test distributions
+			CreatedAt:       time.Now(),
+			ExpiresAt:       nil,
+			Status:          hpke.DistributionStatusPending,
+			DistributionID:  distributionID,
 		}
 
 		// Try to insert, but don't fail if it doesn't work (e.g., foreign key constraints)
@@ -758,4 +816,3 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 func (kdc *KdcDB) PrepareTestTextChunks(nodeID, distributionID, testText string, conf *tnm.KdcConf) (*preparedChunks, error) {
 	return kdc.PrepareTextChunks(nodeID, distributionID, testText, "clear_text", conf)
 }
-

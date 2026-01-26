@@ -16,21 +16,25 @@ import (
 	"github.com/johanix/tdns/v2/hpke"
 )
 
-// EncryptKeyForNode encrypts a DNSSEC key's private key material for a specific node
-// using HPKE with the node's long-term public key
+// EncryptKeyForNodeV1 encrypts a DNSSEC key's private key material for a specific node
+// using HPKE with the node's long-term public key (V1 implementation)
 // Returns: encrypted key data, ephemeral public key used, distribution ID, error
 // This function also stores the distribution record in the database
 // kdcConf is optional - if provided, expires_at will be set based on DistributionTTL
 // distributionID is optional - if provided, uses that ID; otherwise generates one for this key
-func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *tnm.KdcConf, distributionID ...string) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
+func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.KdcConf, distributionID ...string) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
 	if key == nil {
 		return nil, nil, "", fmt.Errorf("key is nil")
 	}
 	if node == nil {
 		return nil, nil, "", fmt.Errorf("node is nil")
 	}
-	if len(node.LongTermPubKey) != 32 {
-		return nil, nil, "", fmt.Errorf("node long-term public key must be 32 bytes (got %d)", len(node.LongTermPubKey))
+	// Defensive check: refuse HPKE operations for JOSE-only nodes
+	if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", node.ID)
+	}
+	if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
+		return nil, nil, "", fmt.Errorf("node long-term public key must be 32 bytes (got %d)", len(node.LongTermHpkePubKey))
 	}
 
 	// Use provided distribution ID, or get/create one for this key
@@ -45,7 +49,7 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *tnm.Kdc
 
 	// Encrypt the private key using HPKE
 	// Note: HPKE Base mode generates its own ephemeral key internally
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, key.PrivateKey)
+	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermHpkePubKey, nil, key.PrivateKey)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to encrypt key: %v", err)
 	}
@@ -69,26 +73,23 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *tnm.Kdc
 
 	// Store the distribution record in the database
 	distRecord := &DistributionRecord{
-		ID:             distRecordIDHex,
-		ZoneName:       key.ZoneName,
-		KeyID:          key.ID,
-		NodeID:         node.ID,
-		EncryptedKey:   ciphertext,
+		ID:              distRecordIDHex,
+		ZoneName:        key.ZoneName,
+		KeyID:           key.ID,
+		NodeID:          node.ID,
+		EncryptedKey:    ciphertext,
 		EphemeralPubKey: ephemeralPub,
-		CreatedAt:      time.Now(),
-		ExpiresAt:      expiresAt,
-		Status:         hpke.DistributionStatusPending,
-		DistributionID: distID,
-		Operation:      "roll_key",
-		Payload:        make(map[string]interface{}),
+		CreatedAt:       time.Now(),
+		ExpiresAt:       expiresAt,
+		Status:          hpke.DistributionStatusPending,
+		DistributionID:  distID,
+		Operation:       "roll_key",
+		Payload:         make(map[string]interface{}),
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
-		// Log error but don't fail - the encryption succeeded
-		// TODO: Consider making this a hard error
-		fmt.Printf("Warning: Failed to store distribution record: %v\n", err)
+		return nil, nil, "", fmt.Errorf("failed to store distribution record: %v", err)
 	}
 
 	return ciphertext, ephemeralPub, distID, nil
 }
-

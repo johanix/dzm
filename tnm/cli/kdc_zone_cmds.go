@@ -154,7 +154,7 @@ var kdcZoneListCmd = &cobra.Command{
 		}
 
 		// Get zone enrichments from response
-		enrichmentsRaw, _ := resp["zone_enrichments"]
+		enrichmentsRaw := resp["zone_enrichments"]
 		enrichments := make(map[string]map[string]interface{})
 		if enrichmentsMap, ok := enrichmentsRaw.(map[string]interface{}); ok {
 			for k, v := range enrichmentsMap {
@@ -227,15 +227,15 @@ var kdcZoneListCmd = &cobra.Command{
 				activeStr = "no"
 			}
 
-			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", 
+			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s",
 				name, serviceID, componentsStr, signingModeStr, activeStr, comment))
-			
+
 			// Print nodes in verbose mode
 			if tdns.Globals.Verbose && len(nodeIDs) > 0 {
 				rows = append(rows, fmt.Sprintf("  Nodes: %s", strings.Join(nodeIDs, ", ")))
 			}
 		}
-		
+
 		if len(rows) > 1 {
 			fmt.Println(columnize.SimpleFormat(rows))
 		}
@@ -254,7 +254,7 @@ var kdcZoneGetCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command": "get",
+			"command":   "get",
 			"zone_name": tdns.Globals.Zonename,
 		}
 
@@ -282,14 +282,14 @@ var kdcZoneDeleteCmd = &cobra.Command{
 	Short: "Delete a zone from KDC",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename") // Normalize zone name to FQDN format
-		
+
 		api, err := getApiClient(true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		req := map[string]interface{}{
-			"command": "delete",
+			"command":   "delete",
 			"zone_name": tdns.Globals.Zonename,
 		}
 
@@ -468,9 +468,9 @@ var kdcZoneDnssecGenerateCmd = &cobra.Command{
 		// If algorithm is 0, API will use default (ED25519)
 
 		req := map[string]interface{}{
-			"command": "generate-key",
+			"command":   "generate-key",
 			"zone_name": tdns.Globals.Zonename,
-			"key_type": keyType,
+			"key_type":  keyType,
 		}
 		if algorithm != 0 {
 			req["algorithm"] = algorithm
@@ -584,8 +584,8 @@ var kdcZoneDnssecDeleteCmd = &cobra.Command{
 		} else {
 			// Key exists - check if it's in a dangerous state
 			safeStates := map[string]bool{
-				"removed":      true,
-				"distributed":  true,
+				"removed":     true,
+				"distributed": true,
 			}
 
 			dangerousStates := map[string]bool{
@@ -743,9 +743,9 @@ var kdcZoneDnssecHashCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command": "hash",
+			"command":   "hash",
 			"zone_name": tdns.Globals.Zonename,
-			"key_id":  keyid,
+			"key_id":    keyid,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -822,9 +822,9 @@ var kdcZoneTransitionCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command": "transition",
+			"command":   "transition",
 			"zone_name": tdns.Globals.Zonename,
-			"key_id":  keyid,
+			"key_id":    keyid,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -860,9 +860,9 @@ var kdcZoneSetStateCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":  "setstate",
-			"zone_id":  tdns.Globals.Zonename,
-			"key_id":   keyid,
+			"command":   "setstate",
+			"zone_id":   tdns.Globals.Zonename,
+			"key_id":    keyid,
 			"new_state": newState,
 		}
 
@@ -895,8 +895,8 @@ var kdcZoneServiceCmd = &cobra.Command{
 		serviceName := cmd.Flag("service").Value.String()
 
 		req := map[string]interface{}{
-			"command":     "set-service",
-			"zone_name":   zoneName,
+			"command":      "set-service",
+			"zone_name":    zoneName,
 			"service_name": serviceName,
 		}
 
@@ -916,7 +916,7 @@ var kdcZoneServiceCmd = &cobra.Command{
 var kdcZoneComponentCmd = &cobra.Command{
 	Use:   "component",
 	Short: "Change the component (and signing mode) for a zone",
-	Long:  `Change which component a zone is assigned to. This directly changes the zone's signing mode, as signing mode is derived from component assignment.
+	Long: `Change which component a zone is assigned to. This directly changes the zone's signing mode, as signing mode is derived from component assignment.
 
 Available components:
   - sign_upstream: Upstream signed zones (no key distribution)
@@ -1154,12 +1154,12 @@ func init() {
 	KdcZoneCatalogCmd.AddCommand(kdcZoneCatalogGenerateCmd)
 	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd,
 		kdcZoneTransitionCmd, kdcZoneSetStateCmd, kdcZoneServiceCmd, kdcZoneComponentCmd, kdcZoneDeleteKeyCmd, kdcZoneRollKeyCmd, KdcZoneCatalogCmd)
-	
+
 	kdcZoneDnssecPurgeCmd.Flags().Bool("force", false, "Also delete keys in 'distributed' state")
-	
+
 	kdcZoneTransitionCmd.Flags().StringP("keyid", "k", "", "Key ID (transition auto-detected: created->published or standby->active)")
 	kdcZoneTransitionCmd.MarkFlagRequired("keyid")
-	
+
 	kdcZoneDnssecDeleteCmd.Flags().StringP("keyid", "k", "", "Key ID to delete")
 	kdcZoneDnssecDeleteCmd.MarkFlagRequired("keyid")
 	kdcZoneDnssecDeleteCmd.Flags().Bool("kdc", false, "Delete only at KDC (default if no flag specified)")
@@ -1170,7 +1170,7 @@ func init() {
 
 	kdcZoneDnssecHashCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	kdcZoneDnssecHashCmd.MarkFlagRequired("keyid")
-	
+
 	kdcZoneSetStateCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	kdcZoneSetStateCmd.Flags().StringP("state", "s", "", "New state")
 	kdcZoneSetStateCmd.MarkFlagRequired("keyid")
@@ -1179,13 +1179,13 @@ func init() {
 	// Zone add command flags
 	kdcZoneAddCmd.Flags().String("sid", "", "Service ID this zone belongs to (optional)")
 	kdcZoneAddCmd.Flags().String("comment", "", "Comment for this zone")
-	
+
 	// Zone service command flags
 	kdcZoneServiceCmd.Flags().StringP("zone", "z", "", "Zone name")
 	kdcZoneServiceCmd.Flags().StringP("service", "s", "", "Service ID or name")
 	kdcZoneServiceCmd.MarkFlagRequired("zone")
 	kdcZoneServiceCmd.MarkFlagRequired("service")
-	
+
 	// Zone component command flags
 	kdcZoneComponentCmd.Flags().StringP("zone", "z", "", "Zone name")
 	kdcZoneComponentCmd.Flags().StringP("component", "c", "", "Component ID or name")

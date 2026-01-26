@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"time"
 
@@ -17,6 +18,19 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
+
+// safeChunkCount returns a bounded chunk count or an error if it exceeds uint16 max.
+// It subtracts 1 from the total chunks (to exclude the manifest) and validates the result.
+func safeChunkCount(chunks int) (uint16, error) {
+	count := chunks - 1 // -1 for manifest
+	if count < 0 {
+		count = 0
+	}
+	if count > math.MaxUint16 {
+		return 0, fmt.Errorf("too many chunks: %d (max: %d)", count, math.MaxUint16)
+	}
+	return uint16(count), nil
+}
 
 // KdcDebugPost represents a request to the KDC debug API
 type KdcDebugPost struct {
@@ -30,15 +44,15 @@ type KdcDebugPost struct {
 
 // KdcDebugResponse represents a response from the KDC debug API
 type KdcDebugResponse struct {
-	Time           time.Time         `json:"time"`
-	Error          bool              `json:"error,omitempty"`
-	ErrorMsg       string            `json:"error_msg,omitempty"`
-	Msg            string            `json:"msg,omitempty"`
-	DistributionID string            `json:"distribution_id,omitempty"`
-	ChunkCount     uint16            `json:"chunk_count,omitempty"`
-	Distributions  []string          `json:"distributions,omitempty"` // For list-distributions (deprecated, use DistributionInfos)
+	Time              time.Time          `json:"time"`
+	Error             bool               `json:"error,omitempty"`
+	ErrorMsg          string             `json:"error_msg,omitempty"`
+	Msg               string             `json:"msg,omitempty"`
+	DistributionID    string             `json:"distribution_id,omitempty"`
+	ChunkCount        uint16             `json:"chunk_count,omitempty"`
+	Distributions     []string           `json:"distributions,omitempty"`      // For list-distributions (deprecated, use DistributionInfos)
 	DistributionInfos []DistributionInfo `json:"distribution_infos,omitempty"` // For list-distributions (with node info)
-	ChunkSize      int               `json:"chunk_size,omitempty"`   // For get/set-chunk-size
+	ChunkSize         int                `json:"chunk_size,omitempty"`         // For get/set-chunk-size
 }
 
 // APIKdcDebug handles debug API requests
@@ -93,18 +107,35 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					} else {
 						resp.Msg = fmt.Sprintf("Test distribution %s created successfully for node %s", req.DistributionID, nodeIDFQDN)
 						resp.DistributionID = req.DistributionID
+						// Helper to safely get chunk count and handle errors
+						getChunkCount := func() (uint16, bool) {
+							count, err := safeChunkCount(len(prepared.chunks))
+							if err != nil {
+								sendJSONError(w, http.StatusInternalServerError, err.Error())
+								return 0, false
+							}
+							return count, true
+						}
 						// Get chunk count from first CHUNK (manifest)
-						if len(prepared.chunks) > 0 && prepared.chunks[0].Total == 0 {
+						if len(prepared.chunks) > 0 && prepared.chunks[0].Sequence == 0 {
 							manifestData, err := tnm.ExtractManifestData(prepared.chunks[0])
 							if err == nil {
 								resp.ChunkCount = manifestData.ChunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, manifestData.ChunkCount)
 							} else {
-								resp.ChunkCount = uint16(len(prepared.chunks) - 1) // -1 for manifest
+								chunkCount, ok := getChunkCount()
+								if !ok {
+									return
+								}
+								resp.ChunkCount = chunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
 							}
 						} else {
-							resp.ChunkCount = uint16(len(prepared.chunks) - 1) // -1 for manifest
+							chunkCount, ok := getChunkCount()
+							if !ok {
+								return
+							}
+							resp.ChunkCount = chunkCount
 							log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
 						}
 					}
@@ -180,4 +211,3 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 		}
 	}
 }
-

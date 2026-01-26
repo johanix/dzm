@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -17,6 +18,21 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 	"gopkg.in/yaml.v3"
 )
+
+// validateCryptoBackend validates that a crypto backend string is either empty, "hpke", or "jose"
+// Normalizes input to lowercase for better UX (e.g., "HPKE" -> "hpke")
+// Returns the normalized value and an error if the value is invalid, or nil error if valid
+func validateCryptoBackend(crypto string) (string, error) {
+	if crypto == "" {
+		return "", nil
+	}
+	// Normalize to lowercase for better UX
+	normalized := strings.ToLower(crypto)
+	if normalized != "hpke" && normalized != "jose" {
+		return "", fmt.Errorf("--crypto must be either 'hpke' or 'jose' (got: %s)", crypto)
+	}
+	return normalized, nil
+}
 
 // Shared variables for node commands
 var nodeid, nodename, pubkeyfile string
@@ -59,7 +75,7 @@ func sendKdcRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 			fmt.Fprintf(os.Stderr, "DEBUG: JSON decode error: %v\n", err)
 			fmt.Fprintf(os.Stderr, "DEBUG: Response body: %s\n", string(buf))
 		}
-		fmt.Printf("Request: URL: %s, Body: %s\n", endpoint, string(bytebuf.Bytes()))
+		fmt.Printf("Request: URL: %s, Body: %s\n", endpoint, bytebuf.String())
 		fmt.Printf("Response causing error: %s\n", string(buf))
 		return nil, fmt.Errorf("error unmarshaling response: %v", err)
 	}
@@ -127,16 +143,16 @@ func getKdcConfigPath() (string, error) {
 	if clientKey == "" {
 		return "", fmt.Errorf("no client key set")
 	}
-	
+
 	// Get API details for this client
 	apiDetails := getApiDetailsByClientKey(clientKey)
 	if apiDetails == nil {
 		return "", fmt.Errorf("API details not found for %s", clientKey)
 	}
-	
+
 	var configPath string
 	var source string
-	
+
 	// Check if config path is specified
 	if path, ok := apiDetails["config"].(string); ok && path != "" {
 		configPath = path
@@ -151,12 +167,12 @@ func getKdcConfigPath() (string, error) {
 			return "", fmt.Errorf("KDC config file not specified in CLI config and default path %s not found", defaultPath)
 		}
 	}
-	
+
 	// Log config file usage in debug mode
 	if tdns.Globals.Debug || tdns.Globals.Verbose {
 		fmt.Fprintf(os.Stderr, "Using KDC config file (%s): %s\n", source, configPath)
 	}
-	
+
 	return configPath, nil
 }
 
@@ -167,19 +183,19 @@ func loadKdcConfigFromFile(configPath string) (*tnm.KdcConf, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read KDC config file %s: %v", configPath, err)
 	}
-	
+
 	// The KDC config file has the kdc section nested, so we need to unmarshal into a wrapper
 	type KdcConfigWrapper struct {
 		Kdc tnm.KdcConf `yaml:"kdc"`
 	}
-	
+
 	var wrapper KdcConfigWrapper
 	if err := yaml.Unmarshal(configData, &wrapper); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal KDC config: %v", err)
 	}
-	
+
 	kdcConf := wrapper.Kdc
-	
+
 	// Validate that database config is present
 	if kdcConf.Database.Type == "" {
 		return nil, fmt.Errorf("database type not specified in KDC config file %s (expected under 'kdc.database.type')", configPath)
@@ -187,37 +203,13 @@ func loadKdcConfigFromFile(configPath string) (*tnm.KdcConf, error) {
 	if kdcConf.Database.DSN == "" {
 		return nil, fmt.Errorf("database DSN not specified in KDC config file %s (expected under 'kdc.database.dsn')", configPath)
 	}
-	
+
 	if tdns.Globals.Debug {
-		fmt.Fprintf(os.Stderr, "KDC config loaded: database type=%s, control_zone=%s\n", 
+		fmt.Fprintf(os.Stderr, "KDC config loaded: database type=%s, control_zone=%s\n",
 			kdcConf.Database.Type, kdcConf.ControlZone)
 	}
-	
-	return &kdcConf, nil
-}
 
-// Helper function to get KDC database connection from config (fallback only)
-// This is used when API is unavailable. Normal operations should use the API.
-func getKdcDB() (*kdc.KdcDB, error) {
-	// Get config file path
-	configPath, err := getKdcConfigPath()
-	if err != nil {
-		return nil, err
-	}
-	
-	// Load KDC config from file
-	kdcConf, err := loadKdcConfigFromFile(configPath)
-	if err != nil {
-		return nil, err
-	}
-	
-	// Create database connection
-	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to KDC database: %v", err)
-	}
-	
-	return kdcDB, nil
+	return &kdcConf, nil
 }
 
 // Helper function to get KDC config from file
@@ -227,7 +219,7 @@ func getKdcConfig() (*tnm.KdcConf, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Load KDC config from file
 	return loadKdcConfigFromFile(configPath)
 }
@@ -240,7 +232,7 @@ func callEnrollAPI(command string, reqData map[string]interface{}) (map[string]i
 		if tdns.Globals.Debug {
 			fmt.Fprintf(os.Stderr, "Attempting enrollment API call: %s\n", command)
 		}
-		resp, err := sendKdcRequest(api, "/kdc/bootstrap", reqData)
+		resp, err := sendKdcRequest(api, "/kdc/enroll", reqData)
 		if err == nil {
 			if tdns.Globals.Debug {
 				fmt.Fprintf(os.Stderr, "Enrollment API call successful\n")
@@ -256,7 +248,7 @@ func callEnrollAPI(command string, reqData map[string]interface{}) (map[string]i
 			fmt.Fprintf(os.Stderr, "Warning: API client unavailable (%v), using direct database access\n", err)
 		}
 	}
-	
+
 	// Fallback: direct database access
 	if tdns.Globals.Debug {
 		fmt.Fprintf(os.Stderr, "Using direct database access for enrollment operation: %s\n", command)
@@ -271,23 +263,23 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 	if err != nil {
 		return nil, fmt.Errorf("failed to get KDC config path: %v", err)
 	}
-	
+
 	// Load KDC config from file
 	kdcConf, err := loadKdcConfigFromFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load KDC config: %v", err)
 	}
-	
+
 	// Create database connection
 	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
 	defer kdcDB.DB.Close()
-	
+
 	result := make(map[string]interface{})
 	result["time"] = time.Now()
-	
+
 	switch command {
 	case "generate":
 		nodeID, _ := reqData["node_id"].(string)
@@ -296,7 +288,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			result["error_msg"] = "node_id is required"
 			return result, nil
 		}
-		
+
 		// Check if node already exists and is active
 		existingNode, err := kdcDB.GetNode(nodeID)
 		if err == nil {
@@ -310,9 +302,9 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			// This is intentional - nodes in these states may need to re-enroll
 		}
 		// If node doesn't exist (err != nil), that's fine - it's a new node
-		
+
 		// Check if token already exists
-		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		status, err := kdcDB.GetEnrollmentTokenStatus(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -323,18 +315,18 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			result["error_msg"] = fmt.Sprintf("Enrollment token already exists for node %s (status: %s)", nodeID, status)
 			return result, nil
 		}
-		
+
 		// Generate token
-		token, err := kdcDB.GenerateBootstrapToken(nodeID)
+		token, err := kdcDB.GenerateEnrollmentToken(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
 			return result, nil
 		}
-		
+
 		result["token"] = token
 		result["msg"] = fmt.Sprintf("Enrollment token generated for node: %s", nodeID)
-		
+
 		// Generate enrollment blob content (CLI will write the file)
 		kdcConf, err := getKdcConfig()
 		if err != nil {
@@ -342,16 +334,19 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			result["error_msg"] = fmt.Sprintf("Failed to load KDC config: %v", err)
 			return result, nil
 		}
-		
-		blobContent, err := kdc.GenerateBootstrapBlobContent(nodeID, token, kdcConf)
+
+		// Get crypto backend from request (optional)
+		cryptoBackend, _ := reqData["crypto"].(string)
+
+		blobContent, err := kdc.GenerateEnrollmentBlobContent(nodeID, token, kdcConf, cryptoBackend)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
 			return result, nil
 		}
-		
+
 		result["blob_content"] = blobContent
-		
+
 	case "activate":
 		nodeID, _ := reqData["node_id"].(string)
 		if nodeID == "" {
@@ -359,7 +354,7 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			result["error_msg"] = "node_id is required"
 			return result, nil
 		}
-		
+
 		expirationStr, _ := reqData["expiration_window"].(string)
 		expirationWindow := 5 * time.Minute
 		if expirationStr != "" {
@@ -371,9 +366,9 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 				return result, nil
 			}
 		}
-		
+
 		// Check token status
-		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+		status, err := kdcDB.GetEnrollmentTokenStatus(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
@@ -394,26 +389,26 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			result["error_msg"] = fmt.Sprintf("Enrollment token for node %s has already been used", nodeID)
 			return result, nil
 		}
-		
-		err = kdcDB.ActivateBootstrapToken(nodeID, expirationWindow)
+
+		err = kdcDB.ActivateEnrollmentToken(nodeID, expirationWindow)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
 			return result, nil
 		}
-		
+
 		result["msg"] = fmt.Sprintf("Enrollment token activated for node: %s", nodeID)
-		
+
 	case "list":
-		tokens, err := kdcDB.ListBootstrapTokens()
+		tokens, err := kdcDB.ListEnrollmentTokens()
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
 			return result, nil
 		}
 		result["tokens"] = tokens
-		result["msg"] = fmt.Sprintf("Found %d bootstrap token(s)", len(tokens))
-		
+		result["msg"] = fmt.Sprintf("Found %d enrollment token(s)", len(tokens))
+
 	case "status":
 		nodeID, _ := reqData["node_id"].(string)
 		if nodeID == "" {
@@ -421,17 +416,17 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 			result["error_msg"] = "node_id is required"
 			return result, nil
 		}
-		
-		status, err := kdcDB.GetBootstrapTokenStatus(nodeID)
+
+		status, err := kdcDB.GetEnrollmentTokenStatus(nodeID)
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
 			return result, nil
 		}
-		
+
 		result["status"] = status
 		if status != "not_found" {
-			tokens, err := kdcDB.ListBootstrapTokens()
+			tokens, err := kdcDB.ListEnrollmentTokens()
 			if err == nil {
 				for _, t := range tokens {
 					if t.NodeID == nodeID {
@@ -441,24 +436,24 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 				}
 			}
 		}
-		
+
 	case "purge":
 		deleteFiles, _ := reqData["delete_files"].(bool)
-		count, err := kdcDB.PurgeBootstrapTokens()
+		count, err := kdcDB.PurgeEnrollmentTokens()
 		if err != nil {
 			result["error"] = true
 			result["error_msg"] = err.Error()
 			return result, nil
 		}
-		
+
 		result["count"] = count
-		result["msg"] = fmt.Sprintf("Purged %d bootstrap token(s)", count)
-		
+		result["msg"] = fmt.Sprintf("Purged %d enrollment token(s)", count)
+
 		if deleteFiles && count > 0 {
-			tokens, _ := kdcDB.ListBootstrapTokens()
+			tokens, _ := kdcDB.ListEnrollmentTokens()
 			deletedFiles := 0
 			for _, token := range tokens {
-				status, _ := kdcDB.GetBootstrapTokenStatus(token.NodeID)
+				status, _ := kdcDB.GetEnrollmentTokenStatus(token.NodeID)
 				if status == "expired" || status == "completed" {
 					blobFile := fmt.Sprintf("%s.enroll", token.NodeID)
 					if err := os.Remove(blobFile); err == nil {
@@ -470,12 +465,12 @@ func callEnrollDB(command string, reqData map[string]interface{}) (map[string]in
 				result["msg"] = fmt.Sprintf("%s, deleted %d blob file(s)", result["msg"], deletedFiles)
 			}
 		}
-		
+
 	default:
 		result["error"] = true
 		result["error_msg"] = fmt.Sprintf("Unknown command: %s", command)
 		return result, nil
 	}
-	
+
 	return result, nil
 }

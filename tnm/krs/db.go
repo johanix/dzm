@@ -72,6 +72,13 @@ func NewKrsDB(dsn string) (*KrsDB, error) {
 		log.Printf("KRS: Warning: Failed to migrate retire_time column and removed state: %v", err)
 	}
 
+	// Migrate: Make long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config
+	// and rename long_term_pub_key -> long_term_hpke_pub_key, long_term_priv_key -> long_term_hpke_priv_key
+	// This allows JOSE-only nodes to have NULL for HPKE keys
+	if err := krs.migrateMakeNodeConfigKeysNullable(); err != nil {
+		log.Printf("KRS: Warning: Failed to make node_config keys nullable: %v", err)
+	}
+
 	return krs, nil
 }
 
@@ -100,10 +107,11 @@ func (krs *KrsDB) initSchema() error {
 		)`,
 
 		// Node config table (stores node identity)
+		// long_term_hpke_pub_key and long_term_hpke_priv_key are nullable to support JOSE-only nodes
 		`CREATE TABLE IF NOT EXISTS node_config (
 			id TEXT PRIMARY KEY,
-			long_term_pub_key BLOB NOT NULL,
-			long_term_priv_key BLOB NOT NULL,
+			long_term_hpke_pub_key BLOB,
+			long_term_hpke_priv_key BLOB,
 			kdc_address TEXT NOT NULL,
 			control_zone TEXT NOT NULL,
 			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -445,7 +453,7 @@ func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 	if err != nil {
 		return fmt.Errorf("failed to check for existing key: %v", err)
 	}
-	
+
 	if existingKey != nil {
 		// Key with same ID exists - compare them
 		if compareKeys(existingKey, key) {
@@ -454,7 +462,7 @@ func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 			return nil
 		} else {
 			// Keys are different - this is an error (key ID collision or compromise)
-			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise", 
+			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise",
 				key.KeyID, key.ZoneName, existingKey.Algorithm, key.Algorithm, existingKey.Flags, key.Flags)
 		}
 	}
@@ -515,7 +523,7 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 	if err != nil {
 		return fmt.Errorf("failed to check for existing key: %v", err)
 	}
-	
+
 	if existingKey != nil {
 		// Key with same ID exists - compare them
 		if compareKeys(existingKey, key) {
@@ -524,7 +532,7 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 			return nil
 		} else {
 			// Keys are different - this is an error (key ID collision or compromise)
-			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise", 
+			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise",
 				key.KeyID, key.ZoneName, existingKey.Algorithm, key.Algorithm, existingKey.Flags, key.Flags)
 		}
 	}
@@ -569,11 +577,11 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 // SetNodeConfig stores the node configuration
 func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 	query := `INSERT OR REPLACE INTO node_config 
-		(id, long_term_pub_key, long_term_priv_key, kdc_address, control_zone, registered_at, last_seen)
+		(id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := krs.DB.Exec(query,
-		config.ID, config.LongTermPubKey, config.LongTermPrivKey,
+		config.ID, config.LongTermHpkePubKey, config.LongTermHpkePrivKey,
 		config.KdcAddress, config.ControlZone, config.RegisteredAt, config.LastSeen,
 	)
 	if err != nil {
@@ -585,19 +593,43 @@ func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 // GetNodeConfig retrieves the node configuration
 func (krs *KrsDB) GetNodeConfig() (*NodeConfig, error) {
 	var config NodeConfig
+	// Use nullable intermediates for BLOB columns that can be NULL
+	// Note: sql.RawBytes can only be used with Query(), not QueryRow()
+	var hpkePubKey, hpkePrivKey sql.RawBytes
 
-	err := krs.DB.QueryRow(
-		`SELECT id, long_term_pub_key, long_term_priv_key, kdc_address, control_zone, registered_at, last_seen
+	rows, err := krs.DB.Query(
+		`SELECT id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen
 			FROM node_config LIMIT 1`,
-	).Scan(
-		&config.ID, &config.LongTermPubKey, &config.LongTermPrivKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node config: %v", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		return nil, fmt.Errorf("node config not found")
+	}
+
+	err = rows.Scan(
+		&config.ID, &hpkePubKey, &hpkePrivKey,
 		&config.KdcAddress, &config.ControlZone, &config.RegisteredAt, &config.LastSeen,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("node config not found")
-		}
-		return nil, fmt.Errorf("failed to get node config: %v", err)
+		return nil, fmt.Errorf("failed to scan node config: %v", err)
+	}
+
+	// Convert nullable BLOB columns: nil when NULL, copy bytes when present
+	if hpkePubKey != nil {
+		config.LongTermHpkePubKey = make([]byte, len(hpkePubKey))
+		copy(config.LongTermHpkePubKey, hpkePubKey)
+	} else {
+		config.LongTermHpkePubKey = nil
+	}
+	if hpkePrivKey != nil {
+		config.LongTermHpkePrivKey = make([]byte, len(hpkePrivKey))
+		copy(config.LongTermHpkePrivKey, hpkePrivKey)
+	} else {
+		config.LongTermHpkePrivKey = nil
 	}
 
 	return &config, nil
@@ -651,8 +683,8 @@ func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
 		if err != nil {
 			// Check if error is "duplicate column" (column already exists - race condition)
 			if !strings.Contains(err.Error(), "duplicate column") &&
-			   !strings.Contains(err.Error(), "already exists") &&
-			   !strings.Contains(err.Error(), "Duplicate column name") {
+				!strings.Contains(err.Error(), "already exists") &&
+				!strings.Contains(err.Error(), "Duplicate column name") {
 				return fmt.Errorf("failed to add retire_time column: %v", err)
 			}
 		} else {
@@ -742,3 +774,149 @@ func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
 	return nil
 }
 
+// migrateMakeNodeConfigKeysNullable makes long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config table
+// and renames long_term_pub_key -> long_term_hpke_pub_key, long_term_priv_key -> long_term_hpke_priv_key
+// This allows JOSE-only nodes to have NULL for HPKE keys and makes the column names clearer
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
+	// Check table schema using PRAGMA table_info (more robust than parsing SQL)
+	// Note: If table doesn't exist, PRAGMA returns an empty result set (no error),
+	// which will be handled by the subsequent logic checking for column existence
+	rows, err := krs.DB.Query("PRAGMA table_info(node_config)")
+	if err != nil {
+		return fmt.Errorf("failed to check node_config table schema: %v", err)
+	}
+	defer rows.Close()
+
+	// Scan table info to detect column names and nullability
+	var hasOldPubKey, hasOldPrivKey, hasNewPubKey, hasNewPrivKey bool
+	var oldPubKeyNullable, oldPrivKeyNullable, newPubKeyNullable, newPrivKeyNullable bool
+
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull int
+		var defaultValue, pk interface{}
+
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			log.Printf("KRS: Warning: Failed to scan PRAGMA table_info row: %v", err)
+			continue
+		}
+
+		// Check for old column names
+		if name == "long_term_pub_key" {
+			hasOldPubKey = true
+			oldPubKeyNullable = (notNull == 0)
+		}
+		if name == "long_term_priv_key" {
+			hasOldPrivKey = true
+			oldPrivKeyNullable = (notNull == 0)
+		}
+
+		// Check for new column names
+		if name == "long_term_hpke_pub_key" {
+			hasNewPubKey = true
+			newPubKeyNullable = (notNull == 0)
+		}
+		if name == "long_term_hpke_priv_key" {
+			hasNewPrivKey = true
+			newPrivKeyNullable = (notNull == 0)
+		}
+	}
+
+	// Determine if migration is needed
+	needsRename := hasOldPubKey || hasOldPrivKey
+	needsNullable := (hasNewPubKey && !newPubKeyNullable) || (hasNewPrivKey && !newPrivKeyNullable) ||
+		(hasOldPubKey && !oldPubKeyNullable) || (hasOldPrivKey && !oldPrivKeyNullable)
+
+	if !needsRename && !needsNullable {
+		// Already has correct column names and nullable, nothing to do
+		return nil
+	}
+
+	// Need to rebuild table to rename columns and/or make them nullable
+	log.Printf("KRS: Recreating node_config table to rename columns and make HPKE keys nullable")
+
+	// Start transaction
+	tx, err := krs.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	// Create new table with correct column names and nullable keys
+	_, err = tx.Exec(`
+		CREATE TABLE node_config_new (
+			id TEXT PRIMARY KEY,
+			long_term_hpke_pub_key BLOB,
+			long_term_hpke_priv_key BLOB,
+			kdc_address TEXT NOT NULL,
+			control_zone TEXT NOT NULL,
+			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`)
+	if err != nil {
+		return fmt.Errorf("failed to create new node_config table: %v", err)
+	}
+
+	// Copy all data from old table to new table (handle both old and new column names)
+	// Determine which columns exist in the old table
+	// Validate column names are safe (whitelist) before using in query
+	var oldPubKeyCol, oldPrivKeyCol string
+	if hasNewPubKey {
+		oldPubKeyCol = "long_term_hpke_pub_key"
+	} else if hasOldPubKey {
+		oldPubKeyCol = "long_term_pub_key"
+	} else {
+		oldPubKeyCol = "NULL"
+	}
+	if hasNewPrivKey {
+		oldPrivKeyCol = "long_term_hpke_priv_key"
+	} else if hasOldPrivKey {
+		oldPrivKeyCol = "long_term_priv_key"
+	} else {
+		oldPrivKeyCol = "NULL"
+	}
+
+	// Validate column names are in whitelist (safety check)
+	validColumns := map[string]bool{
+		"long_term_hpke_pub_key":  true,
+		"long_term_pub_key":       true,
+		"long_term_hpke_priv_key": true,
+		"long_term_priv_key":      true,
+		"NULL":                    true,
+	}
+	if !validColumns[oldPubKeyCol] || !validColumns[oldPrivKeyCol] {
+		return fmt.Errorf("invalid column name detected: pubKey=%s, privKey=%s", oldPubKeyCol, oldPrivKeyCol)
+	}
+
+	// Build query with validated column names
+	// Note: Column names cannot be parameterized in SQL, so we validate them above
+	_, err = tx.Exec(fmt.Sprintf(`
+		INSERT INTO node_config_new (id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen)
+		SELECT id, %s, %s, kdc_address, control_zone, registered_at, last_seen
+		FROM node_config`, oldPubKeyCol, oldPrivKeyCol))
+	if err != nil {
+		return fmt.Errorf("failed to copy data to new table: %v", err)
+	}
+
+	// Drop old table
+	_, err = tx.Exec("DROP TABLE node_config")
+	if err != nil {
+		return fmt.Errorf("failed to drop old table: %v", err)
+	}
+
+	// Rename new table
+	_, err = tx.Exec("ALTER TABLE node_config_new RENAME TO node_config")
+	if err != nil {
+		return fmt.Errorf("failed to rename new table: %v", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	log.Printf("KRS: Successfully renamed and made long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config table")
+	return nil
+}

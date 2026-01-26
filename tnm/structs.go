@@ -9,7 +9,7 @@ package tnm
 // DistributionEntry represents a single operation entry in a distribution
 // This is the JSON structure used for HPKE-encrypted payloads between KDC and KRS
 type DistributionEntry struct {
-	Operation  string                 `json:"operation"`  // "ping", "roll_key", "delete_key", "node_components"
+	Operation string `json:"operation"` // "ping", "roll_key", "delete_key", "node_components"
 
 	// Key-specific fields (for roll_key, delete_key)
 	ZoneName   string `json:"zone_name,omitempty"`
@@ -21,5 +21,5 @@ type DistributionEntry struct {
 	PrivateKey string `json:"private_key,omitempty"` // Base64-encoded private key (for roll_key only)
 
 	// Operation-specific metadata
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }

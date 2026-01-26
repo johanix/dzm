@@ -173,9 +173,7 @@ func (kdc *KdcDB) GenerateCatalogZone(catalogZoneName string, dnsEngineAddresses
 			// Create TXT record with all groups (component IDs) as strings
 			// Format: "group1" "group2" "group3" ... (all in single TXT RR)
 			txtStrings := make([]string, len(components))
-			for i, comp := range components {
-				txtStrings[i] = comp
-			}
+			copy(txtStrings, components)
 
 			// Create TXT RR with all group strings
 			txtRR := &dns.TXT{
@@ -218,7 +216,7 @@ func (kdc *KdcDB) GenerateCatalogZone(catalogZoneName string, dnsEngineAddresses
 	}
 
 	log.Printf("CATALOG: GenerateCatalogZone: Successfully generated catalog zone %s with %d member zones (serial: %d)",
-		catalogZoneName, len(activeZones), newSerial)
+		catalogZoneName, len(activeZones), newSerial.NewSerial)
 
 	return zd, nil
 }
@@ -258,7 +256,7 @@ func InitializeCatalogZone(
 	if err != nil {
 		// Set error state on catalog zone if it exists
 		if zd != nil {
-			zd.SetError(tdns.ConfigError, fmt.Sprintf("Failed to initialize catalog zone: %v", err))
+			zd.SetError(tdns.ConfigError, "Failed to initialize catalog zone: %v", err)
 		}
 		return fmt.Errorf("failed to initialize catalog zone %s: %v", catalogZoneName, err)
 	}

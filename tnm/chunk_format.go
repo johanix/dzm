@@ -24,20 +24,27 @@ type ManifestData struct {
 }
 
 // CreateCHUNKManifest creates a CHUNK manifest record from manifest data
+// Manifest chunks are identified by Sequence=0, Total contains the number of data chunks
+// The Data field stores raw JSON bytes (not base64-encoded)
 func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*core.CHUNK, error) {
 	manifestJSON, err := json.Marshal(manifestData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal manifest JSON: %v", err)
 	}
 
+	// Verify the JSON starts with '{' (should be a JSON object)
+	if len(manifestJSON) == 0 || manifestJSON[0] != '{' {
+		return nil, fmt.Errorf("manifest JSON must be a JSON object (starts with '{'), got: %q", string(manifestJSON[:min(50, len(manifestJSON))]))
+	}
+
 	chunk := &core.CHUNK{
 		Format:     format,
 		HMACLen:    0, // Will be set after HMAC calculation
 		HMAC:       nil,
-		Sequence:   0, // Unused for manifest
-		Total:      0, // 0 indicates manifest
+		Sequence:   0,                       // Sequence=0 indicates manifest chunk
+		Total:      manifestData.ChunkCount, // Total contains the number of data chunks
 		DataLength: uint16(len(manifestJSON)),
-		Data:       manifestJSON,
+		Data:       manifestJSON, // Store raw JSON bytes (not base64-encoded)
 	}
 
 	return chunk, nil
@@ -45,8 +52,8 @@ func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*core.CHUNK,
 
 // ExtractManifestData extracts ManifestData from a CHUNK manifest record
 func ExtractManifestData(chunk *core.CHUNK) (*ManifestData, error) {
-	if chunk.Total != 0 {
-		return nil, fmt.Errorf("ExtractManifestData can only be called for manifest chunks (Total=0), got Total=%d", chunk.Total)
+	if chunk.Sequence != 0 {
+		return nil, fmt.Errorf("ExtractManifestData can only be called for manifest chunks (Sequence=0), got Sequence=%d", chunk.Sequence)
 	}
 
 	if chunk.Format != core.FormatJSON {
@@ -63,8 +70,8 @@ func ExtractManifestData(chunk *core.CHUNK) (*ManifestData, error) {
 
 // CalculateCHUNKHMAC calculates HMAC-SHA256 for a CHUNK manifest record
 func CalculateCHUNKHMAC(chunk *core.CHUNK, hmacKey []byte) error {
-	if chunk.Total != 0 {
-		return fmt.Errorf("HMAC can only be calculated for manifest chunks (Total=0), got Total=%d", chunk.Total)
+	if chunk.Sequence != 0 {
+		return fmt.Errorf("HMAC can only be calculated for manifest chunks (Sequence=0), got Sequence=%d", chunk.Sequence)
 	}
 
 	if len(hmacKey) != 32 {
@@ -90,8 +97,8 @@ func CalculateCHUNKHMAC(chunk *core.CHUNK, hmacKey []byte) error {
 
 // VerifyCHUNKHMAC verifies the HMAC-SHA256 for a CHUNK manifest record
 func VerifyCHUNKHMAC(chunk *core.CHUNK, hmacKey []byte) (bool, error) {
-	if chunk.Total != 0 {
-		return false, fmt.Errorf("HMAC can only be verified for manifest chunks (Total=0), got Total=%d", chunk.Total)
+	if chunk.Sequence != 0 {
+		return false, fmt.Errorf("HMAC can only be verified for manifest chunks (Sequence=0), got Sequence=%d", chunk.Sequence)
 	}
 
 	if len(hmacKey) != 32 {

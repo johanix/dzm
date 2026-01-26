@@ -84,6 +84,27 @@ kdc:
    # Default: 60000 (60KB). Maximum practical size is ~64KB due to DNS message limits.
    # For testing with small chunk sizes, set this to a smaller value (e.g., 1000).
    chunk_max_size:   60000   # 60KB (default)
+   
+   # manifest_json_format: Controls whether CHUNK manifest chunks are displayed as JSON or base64
+   # When true (default): Manifest chunks are displayed as clear text JSON in DNS responses
+   # When false: Manifest chunks are displayed as base64-encoded strings
+   # Note: This affects the String() representation for display/debugging. The wire format
+   # (binary RDATA) is always the same. Both formats are valid and can be parsed by KRS.
+   # Default: true (JSON format for better readability)
+   # This is currently a code-level setting (core.ManifestJSONFormat) and not yet
+   # configurable via YAML. Set programmatically if needed.
+   # manifest_json_format: true   # JSON format (default)
+
+   # KDC HPKE private key (X25519, 32 bytes)
+   # Required for enrollment and key distribution. HPKE-only deployments are supported.
+   # Generate with: kdc-cli keys generate --hpke --hpke-outfile <path>
+   kdc_hpke_priv_key: /etc/tdns/kdc/kdc.hpke.privatekey
+
+   # KDC JOSE private key (P-256 ECDSA)
+   # Optional: Only required if you need JOSE-capable enrollments or clients.
+   # HPKE is required for core enrollment; JOSE is optional and only needed for JOSE-capable enrollments.
+   # Generate with: kdc-cli keys generate --jose --jose-outfile <path>
+   kdc_jose_priv_key: /etc/tdns/kdc/kdc.jose.privatekey
 
 log:
    file:                /var/log/tdns/tdns-kdc.log

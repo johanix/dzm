@@ -93,4 +93,3 @@ func (kdc *KdcDB) SendNotifyWithDistributionID(distributionID, controlZone strin
 	log.Printf("KDC: Successfully sent NOTIFY to %d/%d nodes", successCount, len(targets))
 	return nil
 }
-

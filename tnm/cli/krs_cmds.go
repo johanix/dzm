@@ -131,16 +131,26 @@ sending an enrollment UPDATE to the KDC, and creating the KRS configuration file
 
 This command:
 1. Parses the enrollment blob file
-2. Generates HPKE and SIG(0) keypairs
-3. Creates and sends an encrypted enrollment UPDATE to the KDC
-4. Processes the enrollment confirmation
-5. Writes configuration file and key files to the config directory
+2. Generates HPKE and/or JOSE keypairs (based on KDC capabilities and --crypto flag)
+3. Generates SIG(0) keypair
+4. Creates and sends an encrypted enrollment UPDATE to the KDC
+5. Processes the enrollment confirmation
+6. Writes configuration file and key files to the config directory
 
 The default config directory is /etc/tdns. Use --configdir to specify a different directory.
 
 The --notify-address flag is required and specifies the IP:port address where the KDC
 should send NOTIFY messages. This should match the address where the KRS DNS engine
 will listen (typically the same as the DNS engine address in the generated config).
+
+The --crypto flag is optional and can be used to restrict enrollment to a specific
+crypto backend ('hpke' or 'jose'). If not specified, both backends will be used if
+available in the enrollment blob.
+
+Optional flags:
+  --api-address: API server address (default: 127.0.0.1:8990)
+  --db-path: Database file path (default: /var/lib/tdns/krs.db)
+  --log-file: Log file path (default: /var/log/tdns/tdns-krs.log)
 
 This command does not require a config file and will skip config initialization.`,
 	// Override PersistentPreRun to skip config initialization
@@ -155,9 +165,6 @@ This command does not require a config file and will skip config initialization.
 		}
 
 		configDir, _ := cmd.Flags().GetString("configdir")
-		if configDir == "" {
-			configDir = "/etc/tdns"
-		}
 
 		notifyAddress, _ := cmd.Flags().GetString("notify-address")
 		if notifyAddress == "" {
@@ -167,6 +174,26 @@ This command does not require a config file and will skip config initialization.
 		// Validate notify address format (IP:port)
 		if _, _, err := net.SplitHostPort(notifyAddress); err != nil {
 			log.Fatalf("Error: invalid notify address format '%s': %v (expected format: IP:port or hostname:port)", notifyAddress, err)
+		}
+
+		// Get crypto backend flag (optional, normalized to lowercase)
+		cryptoBackend, _ := cmd.Flags().GetString("crypto")
+		var err error
+		cryptoBackend, err = validateCryptoBackend(cryptoBackend)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		// Get optional flags (now have defaults set in flag definitions)
+		apiAddress, _ := cmd.Flags().GetString("api-address")
+		dbPath, _ := cmd.Flags().GetString("db-path")
+		logFile, _ := cmd.Flags().GetString("log-file")
+
+		// Validate API address format
+		if apiAddress != "" {
+			if _, _, err := net.SplitHostPort(apiAddress); err != nil {
+				log.Fatalf("Error: invalid API address format '%s': %v (expected format: IP:port or hostname:port)", apiAddress, err)
+			}
 		}
 
 		// Verify config directory exists
@@ -180,7 +207,7 @@ This command does not require a config file and will skip config initialization.
 		}
 
 		// Call enrollment function from krs package
-		if err := krs.RunEnroll(packageFile, configDir, notifyAddress); err != nil {
+		if err := krs.RunEnroll(packageFile, configDir, notifyAddress, cryptoBackend, apiAddress, dbPath, logFile); err != nil {
 			log.Fatalf("Enrollment failed: %v", err)
 		}
 	},
@@ -233,15 +260,15 @@ var krsKeysListCmd = &cobra.Command{
 			if !okI || !okJ {
 				return false
 			}
-			
+
 			zoneI := getString(keyI, "zone_name", "ZoneName")
 			zoneJ := getString(keyJ, "zone_name", "ZoneName")
-			
+
 			// First sort by zone name
 			if zoneI != zoneJ {
 				return zoneI < zoneJ
 			}
-			
+
 			// If same zone, sort by key ID
 			keyIDI := getString(keyI, "key_id", "KeyID")
 			keyIDJ := getString(keyJ, "key_id", "KeyID")
@@ -298,7 +325,7 @@ var krsKeysHashCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		keyID := cmd.Flag("keyid").Value.String()
 		zoneID := cmd.Flag("zone").Value.String()
-		
+
 		if keyID == "" {
 			log.Fatalf("Error: --keyid is required")
 		}
@@ -614,9 +641,9 @@ var krsQueryKmreqCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":        "query-kmreq",
+			"command":         "query-kmreq",
 			"distribution_id": distributionID,
-			"zone_id":        tdns.Globals.Zonename,
+			"zone_id":         tdns.Globals.Zonename,
 		}
 
 		resp, err := sendKrsRequest(api, "/krs/query", req)
@@ -650,7 +677,7 @@ var krsDebugDistribFetchCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":        "fetch-distribution",
+			"command":         "fetch-distribution",
 			"distribution_id": distributionID,
 		}
 
@@ -664,7 +691,7 @@ var krsDebugDistribFetchCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s\n", getString(resp, "msg"))
-		
+
 		// If content is present (clear_text or encrypted_text), display it
 		if content := getString(resp, "content"); content != "" {
 			fmt.Printf("\n%s\n", content)
@@ -687,7 +714,7 @@ var krsDebugHpkeGenerateCmd = &cobra.Command{
 		prefix := args[0]
 		pubKeyFile := prefix + ".publickey"
 		privKeyFile := prefix + ".privatekey"
-		
+
 		// Generate HPKE keypair
 		pubKey, privKey, err := hpke.GenerateKeyPair()
 		if err != nil {
@@ -918,12 +945,16 @@ func init() {
 	krsDebugHpkeDecryptCmd.MarkFlagRequired("encrypted-file")
 	krsDebugHpkeDecryptCmd.MarkFlagRequired("private-key-file")
 
-	// Bootstrap command flags
+	// Enrollment command flags
 	KrsEnrollCmd.Flags().String("package", "", "Path to enrollment blob file (required)")
 	KrsEnrollCmd.MarkFlagRequired("package")
-	KrsEnrollCmd.Flags().String("configdir", "", "Config directory (default: /etc/tdns)")
+	KrsEnrollCmd.Flags().String("configdir", "/etc/tdns", "Config directory")
 	KrsEnrollCmd.Flags().String("notify-address", "", "Notify address (IP:port) where KDC should send NOTIFY messages (required)")
 	KrsEnrollCmd.MarkFlagRequired("notify-address")
+	KrsEnrollCmd.Flags().String("crypto", "", "Crypto backend to use: 'hpke' or 'jose' (optional, defaults to both if available)")
+	KrsEnrollCmd.Flags().String("api-address", "127.0.0.1:8990", "API server address (IP:port)")
+	KrsEnrollCmd.Flags().String("db-path", "/var/lib/tdns/krs.db", "Database file path")
+	KrsEnrollCmd.Flags().String("log-file", "/var/log/tdns/tdns-krs.log", "Log file path")
 }
 
 // formatDateTime formats an ISO 8601 datetime string to "year-mo-dy hr:min:sec"
@@ -933,7 +964,7 @@ func formatDateTime(isoStr string) string {
 	if isoStr == "" {
 		return ""
 	}
-	
+
 	// Try parsing as RFC3339 (ISO 8601)
 	t, err := time.Parse(time.RFC3339, isoStr)
 	if err != nil {
@@ -948,8 +979,7 @@ func formatDateTime(isoStr string) string {
 			}
 		}
 	}
-	
+
 	// Format as "year-mo-dy hr:min:sec"
 	return t.Format("2006-01-02 15:04:05")
 }
-

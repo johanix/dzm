@@ -30,4 +30,3 @@ var (
 	CombinerCmd = &cobra.Command{Use: "combiner", Hidden: true}
 	AgentCmd    = &cobra.Command{Use: "agent", Hidden: true}
 )
-

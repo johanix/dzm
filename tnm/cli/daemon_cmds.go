@@ -203,4 +203,3 @@ func init() {
 	DaemonRestartCmd.Flags().BoolVarP(&updateBinary, "update", "", false,
 		"Update the server binary from /tmp/{binary} to /usr/local/libexec/ before starting")
 }
-

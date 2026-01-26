@@ -150,4 +150,3 @@ func (krs *KrsDB) DeleteKeysByState(state string, zoneName string) (int64, error
 
 	return rowsAffected, nil
 }
-

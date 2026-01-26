@@ -158,7 +158,7 @@ var kdcComponentDeleteCmd = &cobra.Command{
 
 func init() {
 	KdcComponentCmd.AddCommand(kdcComponentAddCmd, kdcComponentListCmd, kdcComponentDeleteCmd)
-	
+
 	// Component command flags
 	kdcComponentAddCmd.Flags().String("cid", "", "Component ID")
 	kdcComponentAddCmd.Flags().StringP("name", "n", "", "Component name")

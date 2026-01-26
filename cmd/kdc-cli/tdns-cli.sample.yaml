@@ -19,7 +19,7 @@ apiservers:
      command:           /usr/local/libexec/tdns-kdc
      config:            /etc/tdns/tdns-kdc.yaml
      # config:          Optional: path to tdns-kdc config file
-     #                  Required for bootstrap commands that need direct database access
+     #                  Required for enrollment commands that need direct database access
      #                  If not specified, defaults to standard KDC config file location
 
    # Configuration for tdns-krs (Key Receiving Service)

@@ -36,7 +36,7 @@ var kdcDebugDistribGenerateCmd = &cobra.Command{
 	Long:  `Creates a persistent test distribution that can be queried by KRS. The distribution will contain text read from a file (or default lorem ipsum if no file specified) that will be chunked and distributed. Use --content-type to choose 'clear_text' (default) or 'encrypted_text' (HPKE encrypted).`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs(cmd, "nodeid", "distid")
-		
+
 		api, err := getApiClient(true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -65,10 +65,10 @@ var kdcDebugDistribGenerateCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":        "test-distribution",
+			"command":         "test-distribution",
 			"distribution_id": distributionID,
-			"node_id":        nodeIDFQDN,
-			"content_type":   contentType,
+			"node_id":         nodeIDFQDN,
+			"content_type":    contentType,
 		}
 		if testText != "" {
 			req["test_text"] = testText
@@ -117,7 +117,7 @@ var kdcDebugDistribListCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s\n", resp["msg"])
-		
+
 		// Try to get distribution_infos first (new format with node info)
 		if distInfosRaw, ok := resp["distribution_infos"].([]interface{}); ok {
 			if len(distInfosRaw) > 0 {
@@ -160,7 +160,7 @@ var kdcDebugDistribDeleteCmd = &cobra.Command{
 	Long:  `Deletes a distribution (both from database and cache) by its distribution ID.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs(cmd, "distid")
-		
+
 		api, err := getApiClient(true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -169,7 +169,7 @@ var kdcDebugDistribDeleteCmd = &cobra.Command{
 		distributionID := cmd.Flag("distid").Value.String()
 
 		req := map[string]interface{}{
-			"command":        "delete-distribution",
+			"command":         "delete-distribution",
 			"distribution_id": distributionID,
 		}
 
@@ -211,7 +211,7 @@ var kdcDebugSetChunkSizeCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":   "set-chunk-size",
+			"command":    "set-chunk-size",
 			"chunk_size": chunkSize,
 		}
 
@@ -286,10 +286,10 @@ var kdcDebugHpkeEncryptCmd = &cobra.Command{
 
 		// Request encryption via API
 		req := map[string]interface{}{
-			"command": "encrypt-key",
+			"command":   "encrypt-key",
 			"zone_name": tdns.Globals.Zonename,
-			"key_id":  keyID,
-			"node_id": nodeID,
+			"key_id":    keyID,
+			"node_id":   nodeID,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -347,14 +347,14 @@ var kdcDebugHpkeEncryptCmd = &cobra.Command{
 
 		if outputFile != "" {
 			// Write encrypted key to file
-			output := fmt.Sprintf("# HPKE-encrypted DNSSEC key\n")
+			output := "# HPKE-encrypted DNSSEC key\n"
 			output += fmt.Sprintf("# Distribution ID: %s\n", distributionID)
 			output += fmt.Sprintf("# Zone: %s\n", tdns.Globals.Zonename)
 			output += fmt.Sprintf("# Key ID: %s\n", keyID)
 			output += fmt.Sprintf("# Node ID: %s\n", nodeID)
 			output += fmt.Sprintf("# Encrypted at: %s\n", time.Now().Format(time.RFC3339))
 			output += fmt.Sprintf("# Ephemeral public key (hex): %x\n", ephemeralPubKey)
-			output += fmt.Sprintf("# Encrypted key (base64):\n")
+			output += "# Encrypted key (base64):\n"
 			output += base64.StdEncoding.EncodeToString(encryptedKey) + "\n"
 
 			if err := os.WriteFile(outputFile, []byte(output), 0600); err != nil {
@@ -374,7 +374,7 @@ var kdcDebugHpkeGenerateCmd = &cobra.Command{
 		prefix := args[0]
 		pubKeyFile := prefix + ".publickey"
 		privKeyFile := prefix + ".privatekey"
-		
+
 		// Generate HPKE keypair
 		pubKey, privKey, err := hpke.GenerateKeyPair()
 		if err != nil {
@@ -524,9 +524,9 @@ var kdcDebugHpkeDecryptCmd = &cobra.Command{
 
 func init() {
 	KdcDebugDistribCmd.AddCommand(kdcDebugDistribGenerateCmd, kdcDebugDistribListCmd, kdcDebugDistribDeleteCmd)
-	KdcDebugCmd.AddCommand(kdcDebugHpkeGenerateCmd, kdcDebugHpkeEncryptCmd, kdcDebugHpkeDecryptCmd, 
+	KdcDebugCmd.AddCommand(kdcDebugHpkeGenerateCmd, kdcDebugHpkeEncryptCmd, kdcDebugHpkeDecryptCmd,
 		KdcDebugDistribCmd, kdcDebugSetChunkSizeCmd, kdcDebugGetChunkSizeCmd)
-	
+
 	kdcDebugHpkeEncryptCmd.Flags().StringP("keyid", "k", "", "DNSSEC key ID to encrypt")
 	kdcDebugHpkeEncryptCmd.Flags().StringP("nodeid", "n", "", "Node ID to encrypt for")
 	kdcDebugHpkeEncryptCmd.Flags().StringP("output", "o", "", "Output file for encrypted key (optional)")

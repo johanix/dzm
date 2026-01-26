@@ -21,9 +21,9 @@ import (
 
 // KrsKeysPost represents a request to the KRS keys API
 type KrsKeysPost struct {
-	Command string `json:"command"` // "list", "get", "get-by-zone", "hash", "purge", "delete"
-	KeyID   string `json:"key_id,omitempty"`
-	ZoneID  string `json:"zone_id,omitempty"`
+	Command  string `json:"command"` // "list", "get", "get-by-zone", "hash", "purge", "delete"
+	KeyID    string `json:"key_id,omitempty"`
+	ZoneID   string `json:"zone_id,omitempty"`
 	ZoneName string `json:"zone_name,omitempty"` // For purge and delete commands
 }
 
@@ -52,9 +52,9 @@ type KrsConfigResponse struct {
 
 // KrsQueryPost represents a request to the KRS query API
 type KrsQueryPost struct {
-	Command       string `json:"command"`        // "query-kmreq"
+	Command        string `json:"command"` // "query-kmreq"
 	DistributionID string `json:"distribution_id,omitempty"`
-	ZoneID        string `json:"zone_id,omitempty"`
+	ZoneID         string `json:"zone_id,omitempty"`
 }
 
 // KrsQueryResponse represents a response from the KRS query API
@@ -67,7 +67,7 @@ type KrsQueryResponse struct {
 
 // KrsDebugPost represents a request to the KRS debug API
 type KrsDebugPost struct {
-	Command       string `json:"command"`        // "fetch-distribution"
+	Command        string `json:"command"` // "fetch-distribution"
 	DistributionID string `json:"distribution_id,omitempty"`
 }
 
@@ -118,7 +118,7 @@ func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *tnm.KrsConf, tdns
 			}
 		}
 	}
-	
+
 	// Create subrouter for KRS routes under /api/v1/krs
 	// The router passed in already has /api/v1 routes set up via SetupAPIRouter.
 	// We create a subrouter for /api/v1/krs/* with the same API key header requirement.
@@ -129,14 +129,14 @@ func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *tnm.KrsConf, tdns
 	} else {
 		sr = router.PathPrefix("/api/v1/krs").Subrouter()
 	}
-	
+
 	// Register KRS routes on the subrouter (paths are relative to the prefix)
 	sr.HandleFunc("/keys", APIKrsKeys(krsDB)).Methods("POST")
 	sr.HandleFunc("/config", APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
 	sr.HandleFunc("/query", APIKrsQuery(krsDB, conf)).Methods("POST")
 	sr.HandleFunc("/debug", APIKrsDebug(krsDB, conf)).Methods("POST")
 	sr.HandleFunc("/components", APIKrsComponents(krsDB)).Methods("POST")
-	
+
 	log.Printf("KRS API routes registered: /api/v1/krs/keys, /api/v1/krs/config, /api/v1/krs/query, /api/v1/krs/debug, /api/v1/krs/components")
 }
 
@@ -288,11 +288,11 @@ func APIKrsConfig(krsDB *KrsDB, conf *tnm.KrsConf, tdnsConf interface{}) http.Ha
 				configResp := map[string]interface{}{
 					"id":            config.ID,
 					"kdc_address":   config.KdcAddress,
-					"control_zone":   config.ControlZone,
-					"registered_at":  config.RegisteredAt,
-					"last_seen":      config.LastSeen,
-					"dns_addresses":  conf.DnsEngine.Addresses,
-					"api_addresses":  apiAddresses,
+					"control_zone":  config.ControlZone,
+					"registered_at": config.RegisteredAt,
+					"last_seen":     config.LastSeen,
+					"dns_addresses": conf.DnsEngine.Addresses,
+					"api_addresses": apiAddresses,
 				}
 				resp.Config = configResp
 			}

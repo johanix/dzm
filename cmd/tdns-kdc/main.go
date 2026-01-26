@@ -105,8 +105,8 @@ func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 		return fmt.Errorf(`FATAL: kdc_hpke_priv_key is not configured in KDC config file.
 
 The KDC requires a long-term HPKE (Hybrid Public Key Encryption) keypair to:
-  - Encrypt bootstrap confirmations sent to KRS nodes
-  - Decrypt bootstrap requests from KRS nodes
+  - Encrypt enrollment confirmations sent to KRS nodes
+  - Decrypt enrollment requests from KRS nodes
 
 To fix this:
   1. Generate an HPKE keypair using: kdc-cli hpke generate --outfile /path/to/kdc.hpke.privatekey
@@ -124,8 +124,8 @@ both the private key and public key information.`)
 		return fmt.Errorf(`FATAL: Failed to load HPKE keypair from %s: %v
 
 The KDC cannot start without a valid HPKE keypair. This keypair is required to:
-  - Encrypt bootstrap confirmations sent to KRS nodes
-  - Decrypt bootstrap requests from KRS nodes
+  - Encrypt enrollment confirmations sent to KRS nodes
+  - Decrypt enrollment requests from KRS nodes
 
 To fix this:
   1. If the key file does not exist, generate a new HPKE keypair:
@@ -134,13 +134,18 @@ To fix this:
   3. Ensure the path in kdc_hpke_priv_key in your KDC config is correct
   4. Restart the KDC
 
-Note: If you generate a NEW keypair, you must regenerate all bootstrap blobs that were
+Note: If you generate a NEW keypair, you must regenerate all enrollment blobs that were
 created with the old public key, as they will no longer be decryptable.`, kdcConf.KdcHpkePrivKey, err, kdcConf.KdcHpkePrivKey)
 	}
-	
+
 	// Log successful key loading (public key for verification)
 	pubKeyHex := fmt.Sprintf("%x", hpkeKeys.PublicKey)
 	log.Printf("KDC: Loaded HPKE keypair from %s (public key: %s...)", kdcConf.KdcHpkePrivKey, pubKeyHex[:16])
+
+	// Warn if JOSE key is missing when crypto-v2 is enabled
+	if kdcConf.ShouldUseCryptoV2() && kdcConf.KdcJosePrivKey == "" {
+		log.Printf("KDC: Warning: kdc_jose_priv_key not configured; JOSE enrollment/key distribution will fail")
+	}
 
 	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, &kdcConf)
 	if err != nil {
@@ -241,30 +246,30 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	}
 	log.Printf("KDC: Registered NOTIFY handler for CHUNK")
 
-	// Register KDC bootstrap UPDATE handler (handles bootstrap DNS UPDATE requests)
-	// Matches UPDATEs with name pattern _bootstrap.*
-	bootstrapMatcher := func(dur *tdns.DnsUpdateRequest) bool {
-		// Check if any RR in the UPDATE section has a name starting with "_bootstrap."
+	// Register KDC enrollment UPDATE handler (handles enrollment DNS UPDATE requests)
+	// Matches UPDATEs with name pattern _enroll.*
+	enrollmentMatcher := func(dur *tdns.DnsUpdateRequest) bool {
+		// Check if any RR in the UPDATE section has a name starting with "_enroll."
 		for _, rr := range dur.Msg.Ns {
-			if strings.HasPrefix(rr.Header().Name, "_bootstrap.") {
+			if strings.HasPrefix(rr.Header().Name, "_enroll.") {
 				return true
 			}
 		}
 		return false
 	}
 
-	bootstrapUpdateHandler := func(ctx context.Context, dur *tdns.DnsUpdateRequest) error {
+	enrollmentUpdateHandler := func(ctx context.Context, dur *tdns.DnsUpdateRequest) error {
 		if tdns.Globals.Debug {
-			log.Printf("KDC: BootstrapUpdateHandler invoked (qname=%s)", dur.Qname)
+			log.Printf("KDC: EnrollmentUpdateHandler invoked (qname=%s)", dur.Qname)
 		}
-		// Call KDC bootstrap handler
-		return kdc.HandleBootstrapUpdate(ctx, dur, kdcDB, &kdcConf)
+		// Call KDC enrollment handler
+		return kdc.HandleEnrollmentUpdate(ctx, dur, kdcDB, &kdcConf)
 	}
 
-	if err := tdns.RegisterUpdateHandler(bootstrapMatcher, bootstrapUpdateHandler); err != nil {
-		return fmt.Errorf("failed to register bootstrap UPDATE handler: %v", err)
+	if err := tdns.RegisterUpdateHandler(enrollmentMatcher, enrollmentUpdateHandler); err != nil {
+		return fmt.Errorf("failed to register enrollment UPDATE handler: %v", err)
 	}
-	log.Printf("KDC: Registered bootstrap UPDATE handler for _bootstrap.* pattern")
+	log.Printf("KDC: Registered enrollment UPDATE handler for _enroll.* pattern")
 
 	// Register engines using the registration API
 	if err := tdns.RegisterEngine("DnsEngine", func(ctx context.Context) error {
@@ -285,4 +290,3 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	log.Printf("TDNS %s (%s): KDC started successfully", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
 	return nil
 }
-
