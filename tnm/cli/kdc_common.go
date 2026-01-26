@@ -18,6 +18,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// validateCryptoBackend validates that a crypto backend string is either empty, "hpke", or "jose"
+// Returns an error if the value is invalid, nil otherwise
+func validateCryptoBackend(crypto string) error {
+	if crypto != "" && crypto != "hpke" && crypto != "jose" {
+		return fmt.Errorf("--crypto must be either 'hpke' or 'jose' (got: %s)", crypto)
+	}
+	return nil
+}
+
 // Shared variables for node commands
 var nodeid, nodename, pubkeyfile string
 

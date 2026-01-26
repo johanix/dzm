@@ -751,7 +751,7 @@ func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
 }
 
 // migrateMakeNodeConfigKeysNullable makes long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config table
-// and renames long_term_pub_key -> long_term_hpke_pub_key, long_term_hpke_priv_key -> long_term_hpke_priv_key
+// and renames long_term_pub_key -> long_term_hpke_pub_key, long_term_priv_key -> long_term_hpke_priv_key
 // This allows JOSE-only nodes to have NULL for HPKE keys and makes the column names clearer
 // TEMPORARY: Remove this migration once all databases have been upgraded
 func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {

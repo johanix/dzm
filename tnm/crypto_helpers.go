@@ -47,6 +47,22 @@ func SelectBackend(supportedCrypto []string, forcedCrypto string) string {
 	return "hpke"
 }
 
+// ExtractEphemeralKey extracts the ephemeral public key from ciphertext using the backend's GetEphemeralKey method.
+// This is a helper function that standardizes the pattern of calling GetEphemeralKey and handling nil returns.
+// Returns the ephemeral key bytes (or empty slice if backend returns nil, e.g., for JOSE where key is in JWE header).
+func ExtractEphemeralKey(backend crypto.Backend, ciphertext []byte) ([]byte, error) {
+	ephemeralPub, err := backend.GetEphemeralKey(ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract ephemeral key from ciphertext: %v", err)
+	}
+	// If backend returns nil (e.g., JOSE where ephemeral key is in JWE header),
+	// convert to empty slice for consistency
+	if ephemeralPub == nil {
+		ephemeralPub = []byte{}
+	}
+	return ephemeralPub, nil
+}
+
 // EncryptPayload encrypts an arbitrary plaintext payload using the specified crypto backend.
 // This is the core encryption function that abstracts crypto backend selection and encryption
 // from operation-specific logic. Both KDC and KRS can use this function.
@@ -111,23 +127,11 @@ func EncryptPayload(plaintext []byte, publicKeyData []byte, backendName string, 
 		return nil, nil, fmt.Errorf("failed to encrypt payload with %s backend: %v", backendName, err)
 	}
 
-	// Handle ephemeral public key extraction based on backend
-	// - HPKE: Extract from ciphertext (first 32 bytes is encapsulated key)
-	// - JOSE: Ephemeral key is embedded in JWE header, return empty
-	if backendName == "hpke" {
-		// For HPKE, the first 32 bytes of ciphertext is the encapsulated key (ephemeral public key)
-		// NOTE: This embeds HPKE-specific ciphertext format knowledge. If HPKE format changes, this will break.
-		// TODO: Consider adding GetEphemeralKey(ciphertext []byte) []byte method to crypto.Backend interface
-		if len(ciphertext) >= 32 {
-			ephemeralPub = make([]byte, 32)
-			copy(ephemeralPub, ciphertext[:32])
-		}
-	} else {
-		// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
-		// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
-		// so there's no separate ephemeralPubKey field needed. The recipient extracts it
-		// from the JWE header during decryption. Set to empty to indicate this difference.
-		ephemeralPub = []byte{}
+	// Extract ephemeral public key using backend-agnostic method
+	// This abstracts backend-specific ciphertext format knowledge
+	ephemeralPub, err = ExtractEphemeralKey(backend, ciphertext)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	log.Printf("TNM: Successfully encrypted %s using %s backend (ciphertext length: %d)", logCtx, backendName, len(ciphertext))

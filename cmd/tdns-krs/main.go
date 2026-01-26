@@ -8,12 +8,10 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -128,29 +126,10 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 			return fmt.Errorf("HPKE private key not configured (long_term_hpke_priv_key is empty) but HPKE is in supported_crypto list. Either add the key path to the config or remove 'hpke' from supported_crypto")
 		}
 
-		// Load HPKE private key
-		privKeyData, err := os.ReadFile(krsConf.Node.LongTermHpkePrivKey)
+		// Load HPKE private key using shared helper
+		privKey, err := tnm.LoadPrivateKey(krsConf.Node.LongTermHpkePrivKey)
 		if err != nil {
-			return fmt.Errorf("failed to read HPKE long-term private key from %s: %v", krsConf.Node.LongTermHpkePrivKey, err)
-		}
-
-		// Parse private key (hex format with optional comments)
-		privKeyHex := ""
-		lines := strings.Split(string(privKeyData), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				privKeyHex += line
-			}
-		}
-
-		// Decode hex private key
-		privKey, err := hex.DecodeString(privKeyHex)
-		if err != nil {
-			return fmt.Errorf("failed to decode HPKE private key from %s (must be hex): %v", krsConf.Node.LongTermHpkePrivKey, err)
-		}
-		if len(privKey) != 32 {
-			return fmt.Errorf("HPKE private key from %s must be 32 bytes (got %d)", krsConf.Node.LongTermHpkePrivKey, len(privKey))
+			return fmt.Errorf("failed to load HPKE long-term private key from %s: %v", krsConf.Node.LongTermHpkePrivKey, err)
 		}
 
 		// Derive public key from private key

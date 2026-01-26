@@ -84,23 +84,12 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 		return nil, nil, "", fmt.Errorf("failed to encrypt key with %s backend: %v", backend.Name(), err)
 	}
 
-	// For ephemeral public key:
-	// - HPKE: Returns the encapsulated key (32 bytes for X25519)
-	// - JOSE: JWE includes ephemeral key in the header, so we return nil
-	// To maintain compatibility with existing code, extract ephemeral key from ciphertext for HPKE
-	// TODO: Consider adding GetEphemeralKey(ciphertext []byte) []byte method to crypto.Backend interface
-	// to properly abstract ephemeral key extraction and avoid embedding backend-specific knowledge
-	// (e.g., HPKE ciphertext format) in this generic V2 function.
-	var ephemeralPub []byte
-	if backend.Name() == "hpke" {
-		// For HPKE, the first 32 bytes of ciphertext is the encapsulated key (ephemeral public key)
-		// NOTE: This embeds HPKE-specific ciphertext format knowledge. If HPKE format changes, this will break.
-		if len(ciphertext) >= 32 {
-			ephemeralPub = make([]byte, 32)
-			copy(ephemeralPub, ciphertext[:32])
-		}
+	// Extract ephemeral public key using backend-agnostic method
+	// This abstracts backend-specific ciphertext format knowledge
+	ephemeralPub, err := tnm.ExtractEphemeralKey(backend, ciphertext)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	// For JOSE, ephemeralPub remains nil (ephemeral key is in JWE header)
 
 	// Generate a unique ID for this distribution record
 	distRecordID := make([]byte, 16)

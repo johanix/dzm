@@ -97,11 +97,16 @@ func calculateUseCryptoV2(supportedCrypto []string) bool {
 
 // RunEnroll performs the complete enrollment process
 // blobFile: Path to enrollment blob file
-// configDir: Directory where config and keys will be written (default: /etc/tdns)
-// notifyAddress: IP:port address where KDC should send NOTIFY messages
-// cryptoBackend: Optional crypto backend to use ("hpke" or "jose"). If empty, uses both if available.
+// Parameters:
+//   - blobFile: Path to enrollment blob file
+//   - configDir: Directory for config and key files
+//   - notifyAddress: IP:port where KDC should send NOTIFY messages
+//   - cryptoBackend: Optional crypto backend ("hpke" or "jose"), empty string for auto-select
+//   - apiAddress: Optional API server address (default: "127.0.0.1:8990")
+//   - dbPath: Optional database file path (default: "/var/lib/tdns/krs.db")
+//   - logFile: Optional log file path (default: "/var/log/tdns/tdns-krs.log")
 // Returns: error
-func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBackend string) error {
+func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBackend string, apiAddress string, dbPath string, logFile string) error {
 	// 1. Parse enrollment blob file
 	blob, err := kdc.ParseEnrollmentBlob(blobFile)
 	if err != nil {
@@ -621,18 +626,34 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 	}
 
 	// 14. Ensure database directory exists (before generating config)
-	// The database DSN is hardcoded in the config, so we check it here
-	dbDSN := "/var/lib/tdns/krs.db"
-	if err := tnm.EnsureDatabaseDirectory(dbDSN); err != nil {
+	// Set defaults for optional parameters
+	if apiAddress == "" {
+		apiAddress = "127.0.0.1:8990"
+	}
+	if dbPath == "" {
+		dbPath = "/var/lib/tdns/krs.db"
+	}
+	if logFile == "" {
+		logFile = "/var/log/tdns/tdns-krs.log"
+	}
+
+	// The database DSN is configurable, so we check it here
+	if err := tnm.EnsureDatabaseDirectory(dbPath); err != nil {
 		return fmt.Errorf("failed to ensure database directory: %v", err)
 	}
-	log.Printf("KRS: Database directory ready: %s", filepath.Dir(dbDSN))
+	log.Printf("KRS: Database directory ready: %s", filepath.Dir(dbPath))
 
 	// 15. Generate config file
 	configFile := filepath.Join(configDir, "tdns-krs.yaml")
 	// Construct baseurl with /api/v1 path (API always uses TLS, no trailing slash)
-	apiAddress := "127.0.0.1:8990"
 	baseURL := fmt.Sprintf("https://%s/api/v1", apiAddress)
+	
+	// Generate API key (fail fast on crypto/rand errors)
+	apiKey, err := generateApiKey()
+	if err != nil {
+		return fmt.Errorf("failed to generate API key: %v", err)
+	}
+	
 	config := BootstrapConfig{
 		Service: ServiceConfig{
 			Name:    "TDNS-KRS",
@@ -640,12 +661,12 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 			Debug:   false,
 		},
 		Log: LogConfig{
-			File: "/var/log/tdns/tdns-krs.log",
+			File: logFile,
 		},
 		ApiServer: ApiServerConfig{
 			// UseTLS not set - omitted from config (defaults to true in tdns)
 			Addresses: []string{apiAddress},
-			ApiKey:    generateApiKey(),
+			ApiKey:    apiKey,
 			CertFile:  certFileAbs,
 			KeyFile:   keyFileAbs,
 			BaseURL:   baseURL, // Base URL for krs-cli API client (includes /api/v1/ path)
@@ -658,7 +679,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 		},
 		Krs: KrsBootstrapConf{
 			Database: tnm.KrsDatabaseConf{
-				DSN: "/var/lib/tdns/krs.db",
+				DSN: dbPath,
 			},
 			Node: tnm.NodeConf{
 				ID:                  blob.NodeID,
@@ -733,7 +754,7 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 	}
 
 	// Generate private key
-	_, privKey, err := ed25519.GenerateKey(nil)
+	_, privKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to generate private key: %v", err)
 	}
@@ -783,17 +804,13 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 }
 
 // generateApiKey generates a random API key
-func generateApiKey() string {
+// Returns the hex-encoded 64-character API key, or an error if crypto/rand fails
+func generateApiKey() (string, error) {
 	// Generate 32 random bytes and encode as hex
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
-		// Fallback to timestamp-based key if crypto/rand fails
-		keyStr := fmt.Sprintf("%x", time.Now().UnixNano())
-		for len(keyStr) < 64 {
-			keyStr += "0"
-		}
-		return keyStr[:64]
+		return "", fmt.Errorf("failed to generate random API key: %v", err)
 	}
-	return hex.EncodeToString(key)
+	return hex.EncodeToString(key), nil
 }
 

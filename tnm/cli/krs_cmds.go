@@ -147,6 +147,11 @@ The --crypto flag is optional and can be used to restrict enrollment to a specif
 crypto backend ('hpke' or 'jose'). If not specified, both backends will be used if
 available in the enrollment blob.
 
+Optional flags:
+  --api-address: API server address (default: 127.0.0.1:8990)
+  --db-path: Database file path (default: /var/lib/tdns/krs.db)
+  --log-file: Log file path (default: /var/log/tdns/tdns-krs.log)
+
 This command does not require a config file and will skip config initialization.`,
 	// Override PersistentPreRun to skip config initialization
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -176,9 +181,14 @@ This command does not require a config file and will skip config initialization.
 
 		// Get crypto backend flag (optional)
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
-		if cryptoBackend != "" && cryptoBackend != "hpke" && cryptoBackend != "jose" {
-			log.Fatalf("Error: --crypto must be either 'hpke' or 'jose' (got: %s)", cryptoBackend)
+		if err := validateCryptoBackend(cryptoBackend); err != nil {
+			log.Fatalf("Error: %v", err)
 		}
+
+		// Get optional flags with defaults
+		apiAddress, _ := cmd.Flags().GetString("api-address")
+		dbPath, _ := cmd.Flags().GetString("db-path")
+		logFile, _ := cmd.Flags().GetString("log-file")
 
 		// Verify config directory exists
 		if info, err := os.Stat(configDir); err != nil {
@@ -191,7 +201,7 @@ This command does not require a config file and will skip config initialization.
 		}
 
 		// Call enrollment function from krs package
-		if err := krs.RunEnroll(packageFile, configDir, notifyAddress, cryptoBackend); err != nil {
+		if err := krs.RunEnroll(packageFile, configDir, notifyAddress, cryptoBackend, apiAddress, dbPath, logFile); err != nil {
 			log.Fatalf("Enrollment failed: %v", err)
 		}
 	},
@@ -936,6 +946,9 @@ func init() {
 	KrsEnrollCmd.Flags().String("notify-address", "", "Notify address (IP:port) where KDC should send NOTIFY messages (required)")
 	KrsEnrollCmd.MarkFlagRequired("notify-address")
 	KrsEnrollCmd.Flags().String("crypto", "", "Crypto backend to use: 'hpke' or 'jose' (optional, defaults to both if available)")
+	KrsEnrollCmd.Flags().String("api-address", "", "API server address (IP:port) (default: 127.0.0.1:8990)")
+	KrsEnrollCmd.Flags().String("db-path", "", "Database file path (default: /var/lib/tdns/krs.db)")
+	KrsEnrollCmd.Flags().String("log-file", "", "Log file path (default: /var/log/tdns/tdns-krs.log)")
 }
 
 // formatDateTime formats an ISO 8601 datetime string to "year-mo-dy hr:min:sec"
