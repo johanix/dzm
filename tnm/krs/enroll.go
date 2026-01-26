@@ -285,8 +285,8 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 		Format:     core.FormatJSON,
 		HMACLen:    0, // No HMAC for enrollment
 		HMAC:       nil,
-		Sequence:   0,
-		Total:      0, // Total=0 indicates enrollment/manifest
+		Sequence:   0, // Sequence=0 indicates enrollment/manifest chunk
+		Total:      0, // Total=0 for enrollment (no data chunks)
 		DataLength: uint16(len(encryptedReq)),
 		Data:       encryptedReq,
 	}

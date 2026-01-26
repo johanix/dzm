@@ -594,20 +594,28 @@ func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 func (krs *KrsDB) GetNodeConfig() (*NodeConfig, error) {
 	var config NodeConfig
 	// Use nullable intermediates for BLOB columns that can be NULL
+	// Note: sql.RawBytes can only be used with Query(), not QueryRow()
 	var hpkePubKey, hpkePrivKey sql.RawBytes
 
-	err := krs.DB.QueryRow(
+	rows, err := krs.DB.Query(
 		`SELECT id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen
 			FROM node_config LIMIT 1`,
-	).Scan(
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node config: %v", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		return nil, fmt.Errorf("node config not found")
+	}
+
+	err = rows.Scan(
 		&config.ID, &hpkePubKey, &hpkePrivKey,
 		&config.KdcAddress, &config.ControlZone, &config.RegisteredAt, &config.LastSeen,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("node config not found")
-		}
-		return nil, fmt.Errorf("failed to get node config: %v", err)
+		return nil, fmt.Errorf("failed to scan node config: %v", err)
 	}
 
 	// Convert nullable BLOB columns: nil when NULL, copy bytes when present
@@ -771,13 +779,11 @@ func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
 // This allows JOSE-only nodes to have NULL for HPKE keys and makes the column names clearer
 // TEMPORARY: Remove this migration once all databases have been upgraded
 func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
-	// Check if table exists using PRAGMA table_info (more robust than parsing SQL)
+	// Check table schema using PRAGMA table_info (more robust than parsing SQL)
+	// Note: If table doesn't exist, PRAGMA returns an empty result set (no error),
+	// which will be handled by the subsequent logic checking for column existence
 	rows, err := krs.DB.Query("PRAGMA table_info(node_config)")
 	if err != nil {
-		// Table doesn't exist yet - initSchema will create it with correct column names, nothing to do
-		if err == sql.ErrNoRows {
-			return nil
-		}
 		return fmt.Errorf("failed to check node_config table schema: %v", err)
 	}
 	defer rows.Close()
@@ -793,6 +799,7 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 		var defaultValue, pk interface{}
 
 		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			log.Printf("KRS: Warning: Failed to scan PRAGMA table_info row: %v", err)
 			continue
 		}
 

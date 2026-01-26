@@ -107,25 +107,32 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					} else {
 						resp.Msg = fmt.Sprintf("Test distribution %s created successfully for node %s", req.DistributionID, nodeIDFQDN)
 						resp.DistributionID = req.DistributionID
+						// Helper to safely get chunk count and handle errors
+						getChunkCount := func() (uint16, bool) {
+							count, err := safeChunkCount(len(prepared.chunks))
+							if err != nil {
+								sendJSONError(w, http.StatusInternalServerError, err.Error())
+								return 0, false
+							}
+							return count, true
+						}
 						// Get chunk count from first CHUNK (manifest)
-						if len(prepared.chunks) > 0 && prepared.chunks[0].Total == 0 {
+						if len(prepared.chunks) > 0 && prepared.chunks[0].Sequence == 0 {
 							manifestData, err := tnm.ExtractManifestData(prepared.chunks[0])
 							if err == nil {
 								resp.ChunkCount = manifestData.ChunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, manifestData.ChunkCount)
 							} else {
-								chunkCount, err := safeChunkCount(len(prepared.chunks))
-								if err != nil {
-									sendJSONError(w, http.StatusInternalServerError, err.Error())
+								chunkCount, ok := getChunkCount()
+								if !ok {
 									return
 								}
 								resp.ChunkCount = chunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
 							}
 						} else {
-							chunkCount, err := safeChunkCount(len(prepared.chunks))
-							if err != nil {
-								sendJSONError(w, http.StatusInternalServerError, err.Error())
+							chunkCount, ok := getChunkCount()
+							if !ok {
 								return
 							}
 							resp.ChunkCount = chunkCount

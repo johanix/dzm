@@ -345,6 +345,10 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
 		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
+		if dataChunks == nil && len(base64Data) > 0 {
+			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(base64Data), chunkSizeInt)
+		}
 		// Check for integer overflow before converting to uint16
 		if len(dataChunks) > math.MaxUint16 {
 			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
@@ -371,7 +375,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		copy(manifestData.Payload, base64Data)
 	}
 
-	// Create manifest CHUNK (Total=0)
+	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
 	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
@@ -406,7 +410,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 }
 
 // GetCHUNKForNode retrieves a CHUNK record for a node's distribution event
-// chunkID 0 returns the manifest CHUNK (Total=0), chunkID > 0 returns data CHUNK (Total>0)
+// chunkID 0 returns the manifest CHUNK (Sequence=0), chunkID > 0 returns data CHUNK (Sequence>0)
 func (kdc *KdcDB) GetCHUNKForNode(nodeID, distributionID string, chunkID uint16, conf *tnm.KdcConf) (*core.CHUNK, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
@@ -417,7 +421,29 @@ func (kdc *KdcDB) GetCHUNKForNode(nodeID, distributionID string, chunkID uint16,
 		return nil, fmt.Errorf("CHUNK ID %d out of range (max %d)", chunkID, len(prepared.chunks)-1)
 	}
 
-	return prepared.chunks[chunkID], nil
+	chunk := prepared.chunks[chunkID]
+	// Debug: Check if Data field is JSON or base64
+	dataPreview := ""
+	if len(chunk.Data) > 0 {
+		if chunk.Data[0] == '{' || chunk.Data[0] == '[' {
+			dataPreview = "JSON"
+			if len(chunk.Data) > 50 {
+				dataPreview += fmt.Sprintf(" (starts with: %q...)", string(chunk.Data[:50]))
+			} else {
+				dataPreview += fmt.Sprintf(" (content: %q)", string(chunk.Data))
+			}
+		} else {
+			dataPreview = "base64"
+			if len(chunk.Data) > 20 {
+				dataPreview += fmt.Sprintf(" (starts with: %q...)", string(chunk.Data[:20]))
+			} else {
+				dataPreview += fmt.Sprintf(" (content: %q)", string(chunk.Data))
+			}
+		}
+	}
+	log.Printf("KDC: GetCHUNKForNode: returning chunkID=%d (array index %d): sequence=%d, total=%d, data_len=%d, data_type=%s",
+		chunkID, chunkID, chunk.Sequence, chunk.Total, len(chunk.Data), dataPreview)
+	return chunk, nil
 }
 
 // GetDistributionRecordsForDistributionID gets all distribution records for a distribution ID
@@ -691,6 +717,10 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
 		dataChunks = tnm.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
+		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
+		if dataChunks == nil && len(dataToChunk) > 0 {
+			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(dataToChunk), chunkSizeInt)
+		}
 		// Check for integer overflow before converting to uint16
 		if len(dataChunks) > math.MaxUint16 {
 			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
@@ -721,7 +751,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		copy(manifestData.Payload, dataToChunk)
 	}
 
-	// Create manifest CHUNK (Total=0)
+	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
 	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)

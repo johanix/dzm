@@ -316,10 +316,11 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		return returnError(dns.RcodeFormatError, "Failed to parse CHUNK data", "", nil, kdcHpkeKeys)
 	}
 
-	// Validate CHUNK format: Sequence=0, Total=0 (enrollment), HMACLen=0
-	if chunk.Sequence != 0 || chunk.Total != 0 || chunk.HMACLen != 0 {
-		log.Printf("KDC: Invalid CHUNK format for enrollment: Sequence=%d, Total=%d, HMACLen=%d", chunk.Sequence, chunk.Total, chunk.HMACLen)
-		return returnError(dns.RcodeFormatError, fmt.Sprintf("Invalid CHUNK format for enrollment: Sequence=%d, Total=%d, HMACLen=%d (all must be 0)", chunk.Sequence, chunk.Total, chunk.HMACLen), "", nil, kdcHpkeKeys)
+	// Validate CHUNK format: Sequence=0 (enrollment manifest), HMACLen=0
+	// Note: Total can be 0 (enrollment with no data chunks) or >0 (enrollment with data chunks)
+	if chunk.Sequence != 0 || chunk.HMACLen != 0 {
+		log.Printf("KDC: Invalid CHUNK format for enrollment: Sequence=%d, HMACLen=%d", chunk.Sequence, chunk.HMACLen)
+		return returnError(dns.RcodeFormatError, fmt.Sprintf("Invalid CHUNK format for enrollment: Sequence=%d, HMACLen=%d (Sequence must be 0, HMACLen must be 0)", chunk.Sequence, chunk.HMACLen), "", nil, kdcHpkeKeys)
 	}
 
 	// 3. Extract encrypted enrollment request from CHUNK data
@@ -448,10 +449,17 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 
 	// Validate JOSE pubkey if provided
 	if enrollmentReq.JosePubKey != "" {
-		var joseKeyJSON interface{}
-		if err := json.Unmarshal(josePubKeyBytes, &joseKeyJSON); err != nil {
-			log.Printf("KDC: Invalid JOSE public key format (not valid JSON): %v", err)
-			return returnError(dns.RcodeFormatError, "Invalid JOSE public key format (must be valid JWK JSON)", token.NodeID, hpkePubKey, kdcHpkeKeys)
+		// Get JOSE backend to validate the public key structure and curve
+		joseBackend, err := crypto.GetBackend("jose")
+		if err != nil {
+			log.Printf("KDC: Failed to get JOSE backend for validation: %v", err)
+			return returnError(dns.RcodeServerFailure, "Failed to validate JOSE public key (backend unavailable)", token.NodeID, hpkePubKey, kdcHpkeKeys)
+		}
+		// Parse and validate the JOSE public key (validates JWK structure and supported curves)
+		_, err = joseBackend.ParsePublicKey(josePubKeyBytes)
+		if err != nil {
+			log.Printf("KDC: Invalid JOSE public key (invalid JWK or unsupported curve): %v", err)
+			return returnError(dns.RcodeFormatError, "Invalid JOSE public key (invalid JWK or unsupported curve)", token.NodeID, hpkePubKey, kdcHpkeKeys)
 		}
 	}
 

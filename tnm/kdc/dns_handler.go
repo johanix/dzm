@@ -264,7 +264,7 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 		// Try to parse first label as chunk ID
 		if _, parseErr := strconv.ParseUint(labels[0], 10, 16); parseErr == nil {
 			// First label is a number - this is a data chunk query
-			_, nodeID, distributionID, err = ParseQnameForOLDCHUNK(qname, conf.ControlZone)
+			chunkID, nodeID, distributionID, err = ParseQnameForOLDCHUNK(qname, conf.ControlZone)
 			if err != nil {
 				log.Printf("KDC: Error parsing CHUNK data chunk QNAME %s: %v", qname, err)
 				m.SetRcode(msg, dns.RcodeFormatError)
@@ -345,12 +345,32 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 	}
 
 	m.Answer = append(m.Answer, chunkRR)
+	log.Printf("KDC: Sending CHUNK response: %s", chunkRR.String())
 	m.SetRcode(msg, dns.RcodeSuccess)
 
-	if chunk.Total == 0 {
-		// Manifest chunk
-		log.Printf("KDC: Sending CHUNK manifest response (format=%d, hmac_len=%d, data_len=%d)",
-			chunk.Format, chunk.HMACLen, len(chunk.Data))
+	if chunk.Sequence == 0 {
+		// Manifest chunk - inspect Data field
+		dataType := "unknown"
+		dataPreview := ""
+		if len(chunk.Data) > 0 {
+			if chunk.Data[0] == '{' || chunk.Data[0] == '[' {
+				dataType = "JSON"
+				if len(chunk.Data) > 100 {
+					dataPreview = string(chunk.Data[:100]) + "..."
+				} else {
+					dataPreview = string(chunk.Data)
+				}
+			} else {
+				dataType = "base64"
+				if len(chunk.Data) > 50 {
+					dataPreview = string(chunk.Data[:50]) + "..."
+				} else {
+					dataPreview = string(chunk.Data)
+				}
+			}
+		}
+		log.Printf("KDC: Sending CHUNK manifest response (format=%d, hmac_len=%d, total=%d, data_len=%d, data_type=%s, data_preview=%q)",
+			chunk.Format, chunk.HMACLen, chunk.Total, len(chunk.Data), dataType, dataPreview)
 	} else {
 		// Data chunk
 		log.Printf("KDC: Sending CHUNK data chunk response (sequence=%d, total=%d, data_len=%d)",

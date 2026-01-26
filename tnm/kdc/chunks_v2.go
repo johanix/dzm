@@ -40,21 +40,288 @@ func selectBackendForNode(node *Node, forcedCrypto string) string {
 	return backendName
 }
 
+// determineContentType analyzes distribution records to determine the content type
+// based on the operations present (node_operations, key_operations, mgmt_operations, or mixed_operations).
+func determineContentType(records []*DistributionRecord) string {
+	hasNodeOps := false // update_components
+	hasKeyOps := false  // roll_key, delete_key
+	hasMgmtOps := false // ping
+
+	for _, record := range records {
+		switch record.Operation {
+		case "update_components":
+			hasNodeOps = true
+		case "roll_key", "delete_key":
+			hasKeyOps = true
+		case "ping":
+			hasMgmtOps = true
+		}
+	}
+
+	// Determine contentType based on operation mix
+	contentType := "key_operations" // default
+	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
+		contentType = "node_operations"
+	} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
+		contentType = "key_operations"
+	} else if !hasNodeOps && !hasKeyOps && hasMgmtOps {
+		contentType = "mgmt_operations"
+	} else if hasNodeOps || hasKeyOps || hasMgmtOps {
+		contentType = "mixed_operations"
+	}
+
+	return contentType
+}
+
+// buildNodeOperationsPayload prepares the payload for node_operations (update_components).
+// It returns the base64-encoded encrypted payload and metadata counts.
+func (kdc *KdcDB) buildNodeOperationsPayload(
+	nodeRecords []*DistributionRecord,
+	distributionID string,
+) ([]byte, int, int, error) {
+	if len(nodeRecords) != 1 {
+		return nil, 0, 0, fmt.Errorf("node_operations distribution should have exactly one record, got %d", len(nodeRecords))
+	}
+
+	record := nodeRecords[0]
+	if record.Operation != "update_components" {
+		return nil, 0, 0, fmt.Errorf("node_operations distribution has non-update_components operation: %s", record.Operation)
+	}
+
+	// The distribution record contains encrypted component list
+	// For v2, this should already be encrypted with the correct backend
+	// Just base64 encode for transport
+	base64Data := []byte(base64.StdEncoding.EncodeToString(record.EncryptedKey))
+
+	log.Printf("KDC: Using encrypted component list from distribution record: %d bytes -> base64 %d bytes",
+		len(record.EncryptedKey), len(base64Data))
+
+	return base64Data, 0, 0, nil
+}
+
+// buildKeyOperationsPayload prepares the payload for key_operations, mgmt_operations, or mixed_operations.
+// It builds the JSON structure, encrypts it, and returns the base64-encoded ciphertext with metadata counts.
+func (kdc *KdcDB) buildKeyOperationsPayload(
+	nodeRecords []*DistributionRecord,
+	distributionID string,
+	nodeID string,
+	backend crypto.Backend,
+	backendName string,
+	nodePubKey crypto.PublicKey,
+) ([]byte, int, int, int, error) {
+	// Prepare JSON structure with operation-based distribution entries
+	entries := make([]tnm.DistributionEntry, 0, len(nodeRecords))
+	zoneSet := make(map[string]bool)
+
+	for _, record := range nodeRecords {
+		entry := tnm.DistributionEntry{
+			Operation: record.Operation,
+			Metadata:  record.Payload,
+		}
+
+		switch record.Operation {
+		case string(OperationRollKey):
+			// Fetch key details from dnssec_keys table
+			key, err := kdc.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
+			if err != nil {
+				log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
+				continue
+			}
+
+			// Populate entry with key details
+			entry.ZoneName = record.ZoneName
+			entry.KeyID = record.KeyID
+			entry.KeyType = string(key.KeyType)
+			entry.Algorithm = key.Algorithm
+			entry.Flags = key.Flags
+			entry.PublicKey = key.PublicKey
+			entry.PrivateKey = base64.StdEncoding.EncodeToString(key.PrivateKey)
+
+			zoneSet[record.ZoneName] = true
+
+		case string(OperationPing):
+			// Ping operation - metadata already contains nonce and timestamp
+			// No additional fields needed
+
+		case string(OperationDeleteKey):
+			// Delete key operation
+			entry.ZoneName = record.ZoneName
+			entry.KeyID = record.KeyID
+			zoneSet[record.ZoneName] = true
+
+		default:
+			log.Printf("KDC: Warning: Unknown operation type %q in distribution %s", record.Operation, distributionID)
+			continue
+		}
+
+		entries = append(entries, entry)
+	}
+
+	operationCount := len(entries)
+	keyCount := 0
+	for _, entry := range entries {
+		if entry.Operation == "roll_key" || entry.Operation == "delete_key" {
+			keyCount++
+		}
+	}
+	zoneCount := len(zoneSet)
+
+	if operationCount == 0 {
+		return nil, 0, 0, 0, fmt.Errorf("no valid operations found for node %s, distribution %s", nodeID, distributionID)
+	}
+
+	// Marshal to JSON (cleartext)
+	entriesJSON, err := json.Marshal(entries)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("failed to marshal entries JSON: %v", err)
+	}
+
+	// Debug logging: log cleartext content (masking private keys)
+	if tdns.Globals.Debug {
+		// Create a copy for logging with masked private keys
+		logEntries := make([]map[string]interface{}, len(entries))
+		for i, entry := range entries {
+			logEntry := map[string]interface{}{
+				"operation": entry.Operation,
+				"zone_name": entry.ZoneName,
+				"key_id":    entry.KeyID,
+			}
+			if entry.Operation == string(OperationRollKey) {
+				logEntry["key_type"] = entry.KeyType
+				logEntry["algorithm"] = entry.Algorithm
+				logEntry["flags"] = entry.Flags
+				logEntry["public_key"] = entry.PublicKey
+				logEntry["private_key"] = "***MASKED***"
+			}
+			if entry.Metadata != nil {
+				logEntry["metadata"] = entry.Metadata
+			}
+			logEntries[i] = logEntry
+		}
+		logJSON, _ := json.Marshal(logEntries)
+		log.Printf("KDC: DEBUG: Cleartext distribution payload (private keys masked): %s", string(logJSON))
+	}
+
+	log.Printf("KDC: Prepared %d operations (%d key ops) for %d zones, JSON size: %d bytes",
+		operationCount, keyCount, zoneCount, len(entriesJSON))
+
+	// Encrypt the entire JSON payload using the selected backend
+	ciphertext, err := backend.Encrypt(nodePubKey, entriesJSON)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("failed to encrypt distribution payload with %s backend: %v", backendName, err)
+	}
+
+	// Base64 encode for transport
+	base64Data := []byte(base64.StdEncoding.EncodeToString(ciphertext))
+	log.Printf("KDC: Encrypted distribution payload with %s: cleartext %d bytes -> ciphertext %d bytes -> base64 %d bytes",
+		backendName, len(entriesJSON), len(ciphertext), len(base64Data))
+
+	return base64Data, zoneCount, keyCount, operationCount, nil
+}
+
+// buildManifestMetadata creates manifest metadata with extra fields based on content type.
+func buildManifestMetadata(
+	contentType string,
+	distributionID string,
+	nodeID string,
+	backendName string,
+	zoneCount int,
+	keyCount int,
+	operationCount int,
+	componentCount int,
+	conf *tnm.KdcConf,
+) map[string]interface{} {
+	extraFields := make(map[string]interface{})
+	if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
+		extraFields["zone_count"] = zoneCount
+		extraFields["key_count"] = keyCount
+		extraFields["operation_count"] = operationCount
+	} else if contentType == "node_operations" {
+		extraFields["component_count"] = componentCount
+	}
+	// Add retire_time from config if available
+	if conf != nil && conf.RetireTime > 0 {
+		extraFields["retire_time"] = conf.RetireTime.String()
+	}
+	// Add distribution_ttl from config if available (for KRS validation)
+	if conf != nil && conf.GetDistributionTTL() > 0 {
+		extraFields["distribution_ttl"] = conf.GetDistributionTTL().String()
+	}
+	// Add crypto backend to metadata
+	extraFields["crypto"] = backendName
+
+	return tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
+}
+
+// splitIntoChunks determines if payload should be included inline or split into chunks,
+// and returns the chunk count, chunk size, and data chunks.
+func splitIntoChunks(
+	base64Data []byte,
+	metadata map[string]interface{},
+	conf *tnm.KdcConf,
+) (uint16, uint16, []*core.CHUNK, error) {
+	// Determine if payload should be included inline
+	payloadSize := len(base64Data)
+	testSize := tnm.EstimateManifestSize(metadata, base64Data)
+
+	// Check if the manifest fits in DNS message
+	const estimatedDNSOverhead = 150
+	estimatedTotalSize := estimatedDNSOverhead + testSize
+	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
+
+	var dataChunks []*core.CHUNK
+	var chunkCount uint16
+	var chunkSize uint16
+
+	if includeInline {
+		chunkCount = 0
+		chunkSize = 0
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
+			payloadSize, testSize, estimatedTotalSize)
+		} else {
+			// Use default chunk size if conf is nil
+			const defaultChunkSize = 60000
+			var chunkSizeInt int
+			if conf != nil {
+				chunkSizeInt = conf.GetChunkMaxSize()
+			} else {
+				chunkSizeInt = defaultChunkSize
+			}
+			dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+			// Check if SplitIntoCHUNKs returned nil (overflow condition)
+			if dataChunks == nil {
+				return 0, 0, nil, fmt.Errorf("failed to split data into chunks (overflow or invalid chunk size)")
+			}
+			// Check for integer overflow before converting to uint16
+			if len(dataChunks) > math.MaxUint16 {
+				return 0, 0, nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
+			}
+			if chunkSizeInt > math.MaxUint16 {
+				return 0, 0, nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+			}
+			if len(dataChunks) == 0 {
+				return 0, 0, nil, fmt.Errorf("no chunks created from data (data may be empty)")
+			}
+			chunkCount = uint16(len(dataChunks))
+			chunkSize = uint16(chunkSizeInt)
+			log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
+				payloadSize, testSize, estimatedTotalSize, chunkCount)
+		}
+
+	return chunkCount, chunkSize, dataChunks, nil
+}
+
 // prepareChunksForNodeV2 prepares chunks for a node's distribution event
 // using the crypto abstraction layer to support both HPKE and JOSE.
 // This is called on-demand when CHUNK is queried.
 // The crypto backend is selected based on the node's SupportedCrypto field.
 //
-// TODO: Consider refactoring this function (~365 lines) by extracting helper functions
-// for better readability and testability:
-//   - buildKeyOperationsPayload() - handles key_operations, mgmt_operations, mixed_operations
-//   - buildNodeOperationsPayload() - handles node_operations
+// The function delegates to helper functions for better maintainability:
 //   - determineContentType() - analyzes operations to determine content type
+//   - buildNodeOperationsPayload() - handles node_operations
+//   - buildKeyOperationsPayload() - handles key_operations, mgmt_operations, mixed_operations
 //   - buildManifestMetadata() - creates manifest metadata with extra fields
 //   - splitIntoChunks() - handles CHUNK splitting logic
-//
-// This would separate concerns: cache lookup, backend selection, content type determination,
-// payload construction, encryption, manifest creation, and CHUNK splitting.
 func (kdc *KdcDB) prepareChunksForNodeV2(
 	nodeID, distributionID string,
 	conf *tnm.KdcConf,
@@ -154,35 +421,8 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Determine content type by analyzing all operations in this distribution
-	hasNodeOps := false // update_components
-	hasKeyOps := false  // roll_key, delete_key
-	hasMgmtOps := false // ping
-
-	for _, record := range nodeRecords {
-		switch record.Operation {
-		case "update_components":
-			hasNodeOps = true
-		case "roll_key", "delete_key":
-			hasKeyOps = true
-		case "ping":
-			hasMgmtOps = true
-		}
-	}
-
-	// Determine contentType based on operation mix
-	contentType := "key_operations" // default
-	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
-		contentType = "node_operations"
-	} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
-		contentType = "key_operations"
-	} else if !hasNodeOps && !hasKeyOps && hasMgmtOps {
-		contentType = "mgmt_operations"
-	} else if hasNodeOps || hasKeyOps || hasMgmtOps {
-		contentType = "mixed_operations"
-	}
-
-	log.Printf("KDC: Distribution %s contains: node_ops=%v, key_ops=%v, mgmt_ops=%v -> contentType=%s",
-		distributionID, hasNodeOps, hasKeyOps, hasMgmtOps, contentType)
+	contentType := determineContentType(nodeRecords)
+	log.Printf("KDC: Distribution %s -> contentType=%s", distributionID, contentType)
 
 	var base64Data []byte
 	var zoneCount int
@@ -190,134 +430,21 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	var operationCount int
 
 	if contentType == "node_operations" {
-		// For node_operations, use the encrypted data directly from the distribution record
-		// (Already encrypted with the intended component list)
-		if len(nodeRecords) != 1 {
-			return nil, fmt.Errorf("node_operations distribution should have exactly one record, got %d", len(nodeRecords))
+		var err error
+		base64Data, zoneCount, keyCount, err = kdc.buildNodeOperationsPayload(nodeRecords, distributionID)
+		if err != nil {
+			return nil, err
 		}
-
-		record := nodeRecords[0]
-		if record.Operation != "update_components" {
-			return nil, fmt.Errorf("node_operations distribution has non-update_components operation: %s", record.Operation)
-		}
-
-		// The distribution record contains encrypted component list
-		// For v2, this should already be encrypted with the correct backend
-		// Just base64 encode for transport
-		base64Data = []byte(base64.StdEncoding.EncodeToString(record.EncryptedKey))
-
-		log.Printf("KDC: Using encrypted component list from distribution record: %d bytes -> base64 %d bytes",
-			len(record.EncryptedKey), len(base64Data))
-
-		zoneCount = 0
-		keyCount = 0
+		operationCount = 0
 	} else if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
-		// Prepare JSON structure with operation-based distribution entries
-		entries := make([]tnm.DistributionEntry, 0, len(nodeRecords))
-		zoneSet := make(map[string]bool)
-
-		for _, record := range nodeRecords {
-			entry := tnm.DistributionEntry{
-				Operation: record.Operation,
-				Metadata:  record.Payload,
-			}
-
-			switch record.Operation {
-			case string(OperationRollKey):
-				// Fetch key details from dnssec_keys table
-				key, err := kdc.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
-				if err != nil {
-					log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
-					continue
-				}
-
-				// Populate entry with key details
-				entry.ZoneName = record.ZoneName
-				entry.KeyID = record.KeyID
-				entry.KeyType = string(key.KeyType)
-				entry.Algorithm = key.Algorithm
-				entry.Flags = key.Flags
-				entry.PublicKey = key.PublicKey
-				entry.PrivateKey = base64.StdEncoding.EncodeToString(key.PrivateKey)
-
-				zoneSet[record.ZoneName] = true
-
-			case string(OperationPing):
-				// Ping operation - metadata already contains nonce and timestamp
-				// No additional fields needed
-
-			case string(OperationDeleteKey):
-				// Delete key operation
-				entry.ZoneName = record.ZoneName
-				entry.KeyID = record.KeyID
-				zoneSet[record.ZoneName] = true
-
-			default:
-				log.Printf("KDC: Warning: Unknown operation type %q in distribution %s", record.Operation, distributionID)
-				continue
-			}
-
-			entries = append(entries, entry)
-		}
-
-		operationCount = len(entries)
-		keyCount = 0
-		for _, entry := range entries {
-			if entry.Operation == "roll_key" || entry.Operation == "delete_key" {
-				keyCount++
-			}
-		}
-		zoneCount = len(zoneSet)
-
-		if operationCount == 0 {
-			return nil, fmt.Errorf("no valid operations found for node %s, distribution %s", nodeID, distributionID)
-		}
-
-		// Marshal to JSON (cleartext)
-		entriesJSON, err := json.Marshal(entries)
+		var err error
+		base64Data, zoneCount, keyCount, operationCount, err = kdc.buildKeyOperationsPayload(
+			nodeRecords, distributionID, nodeID, backend, backendName, nodePubKey)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal entries JSON: %v", err)
+			return nil, err
 		}
-
-		// Debug logging: log cleartext content (masking private keys)
-		if tdns.Globals.Debug {
-			// Create a copy for logging with masked private keys
-			logEntries := make([]map[string]interface{}, len(entries))
-			for i, entry := range entries {
-				logEntry := map[string]interface{}{
-					"operation": entry.Operation,
-					"zone_name": entry.ZoneName,
-					"key_id":    entry.KeyID,
-				}
-				if entry.Operation == string(OperationRollKey) {
-					logEntry["key_type"] = entry.KeyType
-					logEntry["algorithm"] = entry.Algorithm
-					logEntry["flags"] = entry.Flags
-					logEntry["public_key"] = entry.PublicKey
-					logEntry["private_key"] = "***MASKED***"
-				}
-				if entry.Metadata != nil {
-					logEntry["metadata"] = entry.Metadata
-				}
-				logEntries[i] = logEntry
-			}
-			logJSON, _ := json.Marshal(logEntries)
-			log.Printf("KDC: DEBUG: Cleartext distribution payload (private keys masked): %s", string(logJSON))
-		}
-
-		log.Printf("KDC: Prepared %s: %d operations (%d key ops) for %d zones, JSON size: %d bytes",
-			contentType, operationCount, keyCount, zoneCount, len(entriesJSON))
-
-		// Encrypt the entire JSON payload using the selected backend
-		ciphertext, err := backend.Encrypt(nodePubKey, entriesJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt distribution payload with %s backend: %v", backendName, err)
-		}
-
-		// Base64 encode for transport
-		base64Data = []byte(base64.StdEncoding.EncodeToString(ciphertext))
-		log.Printf("KDC: Encrypted distribution payload with %s: cleartext %d bytes -> ciphertext %d bytes -> base64 %d bytes",
-			backendName, len(entriesJSON), len(ciphertext), len(base64Data))
+		log.Printf("KDC: Prepared %s: %d operations (%d key ops) for %d zones",
+			contentType, operationCount, keyCount, zoneCount)
 	} else {
 		return nil, fmt.Errorf("invalid or unsupported content type: %s for distribution %s", contentType, distributionID)
 	}
@@ -326,75 +453,27 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	hash := sha256.Sum256([]byte(base64Data))
 	checksum := fmt.Sprintf("sha256:%x", hash)
 
-	// Create manifest metadata with crypto field
-	extraFields := make(map[string]interface{})
-	if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
-		extraFields["zone_count"] = zoneCount
-		extraFields["key_count"] = keyCount
-		extraFields["operation_count"] = operationCount
-	} else if contentType == "node_operations" {
-		// Get component count from stored distribution component list
+	// Get component count for node_operations if needed
+	componentCount := 0
+	if contentType == "node_operations" {
 		_, intendedComponents, err := kdc.GetDistributionComponentList(distributionID)
 		if err == nil {
-			extraFields["component_count"] = len(intendedComponents)
-			log.Printf("KDC: Set component_count in metadata to %d (from stored distribution component list)", len(intendedComponents))
+			componentCount = len(intendedComponents)
+			log.Printf("KDC: Set component_count in metadata to %d (from stored distribution component list)", componentCount)
 		} else {
 			log.Printf("KDC: Warning: Failed to get component list for distribution %s to set metadata: %v", distributionID, err)
 		}
 	}
-	// Add retire_time from config if available
-	if conf != nil && conf.RetireTime > 0 {
-		extraFields["retire_time"] = conf.RetireTime.String()
-	}
-	// Add distribution_ttl from config if available (for KRS validation)
-	if conf != nil && conf.GetDistributionTTL() > 0 {
-		extraFields["distribution_ttl"] = conf.GetDistributionTTL().String()
-	}
 
-	// NEW: Add crypto backend to metadata
-	extraFields["crypto"] = backendName
+	// Create manifest metadata
+	metadata := buildManifestMetadata(
+		contentType, distributionID, nodeID, backendName,
+		zoneCount, keyCount, operationCount, componentCount, conf)
 
-	metadata := tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
-
-	// Determine if payload should be included inline
-	payloadSize := len(base64Data)
-	testSize := tnm.EstimateManifestSize(metadata, base64Data)
-
-	// Check if the manifest fits in DNS message
-	const estimatedDNSOverhead = 150
-	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
-
-	var dataChunks []*core.CHUNK
-	var chunkCount uint16
-	var chunkSize uint16
-
-	if includeInline {
-		chunkCount = 0
-		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
-			payloadSize, testSize, estimatedTotalSize)
-	} else {
-		// Use default chunk size if conf is nil
-		const defaultChunkSize = 60000
-		var chunkSizeInt int
-		if conf != nil {
-			chunkSizeInt = conf.GetChunkMaxSize()
-		} else {
-			chunkSizeInt = defaultChunkSize
-		}
-		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
-		// Check for integer overflow before converting to uint16
-		if len(dataChunks) > math.MaxUint16 {
-			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
-		}
-		if chunkSizeInt > math.MaxUint16 {
-			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
-		}
-		chunkCount = uint16(len(dataChunks))
-		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
-			payloadSize, testSize, estimatedTotalSize, chunkCount)
+	// Split into chunks (or include inline)
+	chunkCount, chunkSize, dataChunks, err := splitIntoChunks(base64Data, metadata, conf)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create manifest data
@@ -404,13 +483,13 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		Metadata:   metadata,
 	}
 
-	// Include payload inline if it fits
-	if includeInline {
+	// Include payload inline if chunkCount is 0 (indicates inline payload)
+	if chunkCount == 0 {
 		manifestData.Payload = make([]byte, len(base64Data))
 		copy(manifestData.Payload, base64Data)
 	}
 
-	// Create manifest CHUNK (Total=0)
+	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
 	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
@@ -464,7 +543,32 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	// Create CHUNK records (manifest + data chunks)
 	allChunks := make([]*core.CHUNK, 0)
 	allChunks = append(allChunks, manifestCHUNK)
-	allChunks = append(allChunks, dataChunks...)
+	if chunkCount > 0 {
+		if dataChunks == nil || len(dataChunks) == 0 {
+			return nil, fmt.Errorf("expected %d data chunks but got %d", chunkCount, len(dataChunks))
+		}
+		if len(dataChunks) != int(chunkCount) {
+			return nil, fmt.Errorf("chunk count mismatch: expected %d data chunks but got %d", chunkCount, len(dataChunks))
+		}
+		// Validate chunk sequence numbers before appending
+		for i, chunk := range dataChunks {
+			if chunk.Sequence == 0 || chunk.Total == 0 {
+				return nil, fmt.Errorf("invalid chunk at index %d: sequence=%d, total=%d (expected sequence=%d, total=%d)",
+					i, chunk.Sequence, chunk.Total, i+1, chunkCount)
+			}
+			if chunk.Sequence != uint16(i+1) {
+				return nil, fmt.Errorf("chunk sequence mismatch at index %d: got sequence=%d, expected %d",
+					i, chunk.Sequence, i+1)
+			}
+			if chunk.Total != chunkCount {
+				return nil, fmt.Errorf("chunk total mismatch at index %d: got total=%d, expected %d",
+					i, chunk.Total, chunkCount)
+			}
+		}
+		allChunks = append(allChunks, dataChunks...)
+		log.Printf("KDC: Assembled %d chunks: manifest (index 0) + %d data chunks (indices 1-%d)",
+			len(allChunks), len(dataChunks), len(allChunks)-1)
+	}
 
 	prepared := &preparedChunks{
 		chunks:    allChunks,
