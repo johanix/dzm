@@ -105,14 +105,27 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	conf.Internal.KrsDB = krsDB
 
 	// Determine which crypto backends are supported
+	// If SupportedCrypto is empty, infer from configured key paths
+	// Otherwise, honor the explicit SupportedCrypto list
 	hasHpke := false
 	hasJose := false
-	for _, backend := range krsConf.SupportedCrypto {
-		if backend == "hpke" {
+	if len(krsConf.SupportedCrypto) == 0 {
+		// Infer from key paths when SupportedCrypto is not specified
+		if krsConf.Node.LongTermHpkePrivKey != "" {
 			hasHpke = true
 		}
-		if backend == "jose" {
+		if krsConf.Node.LongTermJosePrivKey != "" {
 			hasJose = true
+		}
+	} else {
+		// Honor explicit SupportedCrypto list
+		for _, backend := range krsConf.SupportedCrypto {
+			if backend == "hpke" {
+				hasHpke = true
+			}
+			if backend == "jose" {
+				hasJose = true
+			}
 		}
 	}
 
@@ -159,7 +172,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 
 	// Validate at least one backend is configured
 	if !hasHpke && !hasJose {
-		return fmt.Errorf("no crypto backends configured (supported_crypto is empty or invalid). At least one of 'hpke' or 'jose' must be in supported_crypto")
+		return fmt.Errorf("no crypto backends configured. Either set supported_crypto in config, or configure at least one of long_term_hpke_priv_key or long_term_jose_priv_key")
 	}
 
 	// Store node config in database (HPKE keys are optional for JOSE-only nodes)

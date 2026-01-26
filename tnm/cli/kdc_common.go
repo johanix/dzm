@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -19,12 +20,18 @@ import (
 )
 
 // validateCryptoBackend validates that a crypto backend string is either empty, "hpke", or "jose"
-// Returns an error if the value is invalid, nil otherwise
-func validateCryptoBackend(crypto string) error {
-	if crypto != "" && crypto != "hpke" && crypto != "jose" {
-		return fmt.Errorf("--crypto must be either 'hpke' or 'jose' (got: %s)", crypto)
+// Normalizes input to lowercase for better UX (e.g., "HPKE" -> "hpke")
+// Returns the normalized value and an error if the value is invalid, or nil error if valid
+func validateCryptoBackend(crypto string) (string, error) {
+	if crypto == "" {
+		return "", nil
 	}
-	return nil
+	// Normalize to lowercase for better UX
+	normalized := strings.ToLower(crypto)
+	if normalized != "hpke" && normalized != "jose" {
+		return "", fmt.Errorf("--crypto must be either 'hpke' or 'jose' (got: %s)", crypto)
+	}
+	return normalized, nil
 }
 
 // Shared variables for node commands

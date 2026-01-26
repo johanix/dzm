@@ -483,7 +483,9 @@ var kdcDistribMultiCmd = &cobra.Command{
 		// Add crypto flag if specified
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
 		if cryptoBackend != "" {
-			if err := validateCryptoBackend(cryptoBackend); err != nil {
+			var err error
+			cryptoBackend, err = validateCryptoBackend(cryptoBackend)
+			if err != nil {
 				log.Fatalf("Error: %v", err)
 			}
 			req["crypto"] = cryptoBackend

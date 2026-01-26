@@ -179,9 +179,11 @@ This command does not require a config file and will skip config initialization.
 			log.Fatalf("Error: invalid notify address format '%s': %v (expected format: IP:port or hostname:port)", notifyAddress, err)
 		}
 
-		// Get crypto backend flag (optional)
+		// Get crypto backend flag (optional, normalized to lowercase)
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
-		if err := validateCryptoBackend(cryptoBackend); err != nil {
+		var err error
+		cryptoBackend, err = validateCryptoBackend(cryptoBackend)
+		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 
@@ -189,6 +191,13 @@ This command does not require a config file and will skip config initialization.
 		apiAddress, _ := cmd.Flags().GetString("api-address")
 		dbPath, _ := cmd.Flags().GetString("db-path")
 		logFile, _ := cmd.Flags().GetString("log-file")
+		
+		// Validate API address format if provided
+		if apiAddress != "" {
+			if _, _, err := net.SplitHostPort(apiAddress); err != nil {
+				log.Fatalf("Error: invalid API address format '%s': %v (expected format: IP:port or hostname:port)", apiAddress, err)
+			}
+		}
 
 		// Verify config directory exists
 		if info, err := os.Stat(configDir); err != nil {

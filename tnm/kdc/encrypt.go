@@ -88,9 +88,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
-		// Log error but don't fail - the encryption succeeded
-		// TODO: Consider making this a hard error
-		fmt.Printf("Warning: Failed to store distribution record: %v\n", err)
+		return nil, nil, "", fmt.Errorf("failed to store distribution record: %v", err)
 	}
 
 	return ciphertext, ephemeralPub, distID, nil

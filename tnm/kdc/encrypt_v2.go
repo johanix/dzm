@@ -12,7 +12,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -125,9 +124,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
-		// Log error but don't fail - the encryption succeeded
-		// TODO: Consider making this a hard error
-		log.Printf("KDC: Warning: Failed to store distribution record: %v", err)
+		return nil, nil, "", fmt.Errorf("failed to store distribution record: %v", err)
 	}
 
 	return ciphertext, ephemeralPub, distID, nil

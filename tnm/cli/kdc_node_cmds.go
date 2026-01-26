@@ -623,8 +623,9 @@ The output directory must exist.`,
 		comment, _ := cmd.Flags().GetString("comment")
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
 		
-		// Validate crypto backend if provided
-		if err := validateCryptoBackend(cryptoBackend); err != nil {
+		// Validate crypto backend if provided (normalized to lowercase)
+		cryptoBackend, err = validateCryptoBackend(cryptoBackend)
+		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 		
@@ -988,10 +989,12 @@ Either --nodeid or --all must be specified.`,
 			req["node_id"] = nodeID
 		}
 		
-		// Add crypto flag if specified
+		// Add crypto flag if specified (normalized to lowercase)
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
 		if cryptoBackend != "" {
-			if err := validateCryptoBackend(cryptoBackend); err != nil {
+			var err error
+			cryptoBackend, err = validateCryptoBackend(cryptoBackend)
+			if err != nil {
 				log.Fatalf("Error: %v", err)
 			}
 			req["crypto"] = cryptoBackend

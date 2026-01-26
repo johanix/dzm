@@ -755,9 +755,8 @@ func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
 // This allows JOSE-only nodes to have NULL for HPKE keys and makes the column names clearer
 // TEMPORARY: Remove this migration once all databases have been upgraded
 func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
-	// Check if table exists
-	var sqlStr string
-	err := krs.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='node_config'").Scan(&sqlStr)
+	// Check if table exists using PRAGMA table_info (more robust than parsing SQL)
+	rows, err := krs.DB.Query("PRAGMA table_info(node_config)")
 	if err != nil {
 		// Table doesn't exist yet - initSchema will create it with correct column names, nothing to do
 		if err == sql.ErrNoRows {
@@ -765,11 +764,47 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 		}
 		return fmt.Errorf("failed to check node_config table schema: %v", err)
 	}
+	defer rows.Close()
 	
-	// Check if columns need to be renamed or made nullable
-	needsRename := strings.Contains(sqlStr, "long_term_pub_key") || strings.Contains(sqlStr, "long_term_priv_key")
-	needsNullable := strings.Contains(sqlStr, "long_term_pub_key BLOB NOT NULL") || strings.Contains(sqlStr, "long_term_priv_key BLOB NOT NULL") ||
-	                 strings.Contains(sqlStr, "long_term_hpke_pub_key BLOB NOT NULL") || strings.Contains(sqlStr, "long_term_hpke_priv_key BLOB NOT NULL")
+	// Scan table info to detect column names and nullability
+	var hasOldPubKey, hasOldPrivKey, hasNewPubKey, hasNewPrivKey bool
+	var oldPubKeyNullable, oldPrivKeyNullable, newPubKeyNullable, newPrivKeyNullable bool
+	
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull int
+		var defaultValue, pk interface{}
+		
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			continue
+		}
+		
+		// Check for old column names
+		if name == "long_term_pub_key" {
+			hasOldPubKey = true
+			oldPubKeyNullable = (notNull == 0)
+		}
+		if name == "long_term_priv_key" {
+			hasOldPrivKey = true
+			oldPrivKeyNullable = (notNull == 0)
+		}
+		
+		// Check for new column names
+		if name == "long_term_hpke_pub_key" {
+			hasNewPubKey = true
+			newPubKeyNullable = (notNull == 0)
+		}
+		if name == "long_term_hpke_priv_key" {
+			hasNewPrivKey = true
+			newPrivKeyNullable = (notNull == 0)
+		}
+	}
+	
+	// Determine if migration is needed
+	needsRename := hasOldPubKey || hasOldPrivKey
+	needsNullable := (hasNewPubKey && !newPubKeyNullable) || (hasNewPrivKey && !newPrivKeyNullable) ||
+	                 (hasOldPubKey && !oldPubKeyNullable) || (hasOldPrivKey && !oldPrivKeyNullable)
 	
 	if !needsRename && !needsNullable {
 		// Already has correct column names and nullable, nothing to do
@@ -802,17 +837,21 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 	}
 	
 	// Copy all data from old table to new table (handle both old and new column names)
-	// Check which columns exist in the old table
+	// Determine which columns exist in the old table
 	var oldPubKeyCol, oldPrivKeyCol string
-	if strings.Contains(sqlStr, "long_term_hpke_pub_key") {
+	if hasNewPubKey {
 		oldPubKeyCol = "long_term_hpke_pub_key"
-	} else {
+	} else if hasOldPubKey {
 		oldPubKeyCol = "long_term_pub_key"
-	}
-	if strings.Contains(sqlStr, "long_term_hpke_priv_key") {
-		oldPrivKeyCol = "long_term_hpke_priv_key"
 	} else {
+		oldPubKeyCol = "NULL"
+	}
+	if hasNewPrivKey {
+		oldPrivKeyCol = "long_term_hpke_priv_key"
+	} else if hasOldPrivKey {
 		oldPrivKeyCol = "long_term_priv_key"
+	} else {
+		oldPrivKeyCol = "NULL"
 	}
 	
 	_, err = tx.Exec(fmt.Sprintf(`

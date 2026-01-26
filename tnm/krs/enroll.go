@@ -759,9 +759,14 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 		return "", "", fmt.Errorf("failed to generate private key: %v", err)
 	}
 
-	// Create certificate template
+	// Create certificate template (random serial)
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate certificate serial: %v", err)
+	}
 	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName:   "localhost",
 			Organization: []string{"TDNS-KRS"},
