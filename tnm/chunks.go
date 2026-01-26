@@ -41,10 +41,7 @@ func SplitIntoCHUNKs(data []byte, chunkSize int, format uint8) []*core.CHUNK {
 		chunkData := make([]byte, end-start)
 		copy(chunkData, data[start:end])
 
-		// Check for integer overflow before converting to uint16
-		if i+1 > math.MaxUint16 {
-			return nil // Return nil if overflow would occur
-		}
+		// Check for chunk data length overflow before converting to uint16
 		if len(chunkData) > math.MaxUint16 {
 			return nil // Return nil if overflow would occur
 		}

@@ -516,10 +516,17 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	}
 
 	// 11. Mark token as used
+	// This must succeed to maintain database consistency (node created but token reusable is invalid)
 	if err := kdcDB.MarkEnrollmentTokenUsed(enrollmentReq.AuthToken); err != nil {
 		log.Printf("KDC: Failed to mark token as used: %v", err)
-		// Node is already created, but token not marked - this is a problem
-		// For now, continue but log the error
+		// Rollback: delete the node to maintain consistency
+		// Node was created but token marking failed - this leaves DB in inconsistent state
+		if deleteErr := kdcDB.DeleteNode(nodeID); deleteErr != nil {
+			log.Printf("KDC: Critical: Failed to rollback node creation after token marking failure: %v (node %s may be orphaned)", deleteErr, nodeID)
+			return returnError(dns.RcodeServerFailure, fmt.Sprintf("Failed to mark enrollment token as used and rollback failed: token error: %v, rollback error: %v", err, deleteErr), nodeID, hpkePubKey, kdcHpkeKeys)
+		}
+		log.Printf("KDC: Rolled back node creation for %s after token marking failure", nodeID)
+		return returnError(dns.RcodeServerFailure, fmt.Sprintf("Failed to mark enrollment token as used: %v (node creation rolled back)", err), nodeID, hpkePubKey, kdcHpkeKeys)
 	}
 
 	log.Printf("KDC: Enrollment successful for node %s", nodeID)

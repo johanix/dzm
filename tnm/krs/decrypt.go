@@ -28,16 +28,18 @@ func DecryptAndStoreKeyV1(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []
 	// For now, we'll store it as-is
 	log.Printf("KRS: Successfully decrypted key for distribution %s, zone %s (size: %d bytes)", distributionID, zoneID, len(plaintext))
 
-	// TODO: Extract key metadata from the distribution or from a separate metadata query
-	// For now, create a basic ReceivedKey structure
+	// TODO: Parse the decrypted plaintext as a DNSSEC private key (PEM format) to extract metadata
+	// TODO: Alternatively, extract KeyType, Algorithm, Flags, PublicKey, and KeyID from distribution record metadata
+	// For now, we store the key with unknown metadata to avoid persisting misleading DNSKEY/DS material
+	// The metadata should be populated from the distribution record or parsed from the plaintext before use
 	key := &ReceivedKey{
 		ID:             distributionID,
-		ZoneName:       zoneID, // zoneID parameter is actually zone name
-		KeyID:          0,      // TODO: Extract from metadata
-		KeyType:        "ZSK",  // TODO: Extract from metadata
-		Algorithm:      15,     // TODO: Extract from metadata (ED25519)
-		Flags:          256,    // TODO: Extract from metadata (ZSK flags)
-		PublicKey:      "",     // TODO: Extract from metadata
+		ZoneName:       zoneID,    // zoneID parameter is actually zone name
+		KeyID:          0,         // TODO: Extract from distribution record metadata or parse from plaintext
+		KeyType:        "unknown", // TODO: Extract from distribution record metadata or parse from plaintext
+		Algorithm:      0,         // TODO: Extract from distribution record metadata or parse from plaintext
+		Flags:          0,         // TODO: Extract from distribution record metadata or parse from plaintext
+		PublicKey:      "",        // TODO: Extract from distribution record metadata or parse from plaintext
 		PrivateKey:     plaintext,
 		State:          "received",
 		ReceivedAt:     time.Now(),

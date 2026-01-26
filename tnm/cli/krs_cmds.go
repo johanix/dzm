@@ -165,9 +165,6 @@ This command does not require a config file and will skip config initialization.
 		}
 
 		configDir, _ := cmd.Flags().GetString("configdir")
-		if configDir == "" {
-			configDir = "/etc/tdns"
-		}
 
 		notifyAddress, _ := cmd.Flags().GetString("notify-address")
 		if notifyAddress == "" {
@@ -187,12 +184,12 @@ This command does not require a config file and will skip config initialization.
 			log.Fatalf("Error: %v", err)
 		}
 
-		// Get optional flags with defaults
+		// Get optional flags (now have defaults set in flag definitions)
 		apiAddress, _ := cmd.Flags().GetString("api-address")
 		dbPath, _ := cmd.Flags().GetString("db-path")
 		logFile, _ := cmd.Flags().GetString("log-file")
 
-		// Validate API address format if provided
+		// Validate API address format
 		if apiAddress != "" {
 			if _, _, err := net.SplitHostPort(apiAddress); err != nil {
 				log.Fatalf("Error: invalid API address format '%s': %v (expected format: IP:port or hostname:port)", apiAddress, err)
@@ -951,13 +948,13 @@ func init() {
 	// Enrollment command flags
 	KrsEnrollCmd.Flags().String("package", "", "Path to enrollment blob file (required)")
 	KrsEnrollCmd.MarkFlagRequired("package")
-	KrsEnrollCmd.Flags().String("configdir", "", "Config directory (default: /etc/tdns)")
+	KrsEnrollCmd.Flags().String("configdir", "/etc/tdns", "Config directory")
 	KrsEnrollCmd.Flags().String("notify-address", "", "Notify address (IP:port) where KDC should send NOTIFY messages (required)")
 	KrsEnrollCmd.MarkFlagRequired("notify-address")
 	KrsEnrollCmd.Flags().String("crypto", "", "Crypto backend to use: 'hpke' or 'jose' (optional, defaults to both if available)")
-	KrsEnrollCmd.Flags().String("api-address", "", "API server address (IP:port) (default: 127.0.0.1:8990)")
-	KrsEnrollCmd.Flags().String("db-path", "", "Database file path (default: /var/lib/tdns/krs.db)")
-	KrsEnrollCmd.Flags().String("log-file", "", "Log file path (default: /var/log/tdns/tdns-krs.log)")
+	KrsEnrollCmd.Flags().String("api-address", "127.0.0.1:8990", "API server address (IP:port)")
+	KrsEnrollCmd.Flags().String("db-path", "/var/lib/tdns/krs.db", "Database file path")
+	KrsEnrollCmd.Flags().String("log-file", "/var/log/tdns/tdns-krs.log", "Log file path")
 }
 
 // formatDateTime formats an ISO 8601 datetime string to "year-mo-dy hr:min:sec"

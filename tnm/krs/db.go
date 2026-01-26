@@ -854,6 +854,7 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 
 	// Copy all data from old table to new table (handle both old and new column names)
 	// Determine which columns exist in the old table
+	// Validate column names are safe (whitelist) before using in query
 	var oldPubKeyCol, oldPrivKeyCol string
 	if hasNewPubKey {
 		oldPubKeyCol = "long_term_hpke_pub_key"
@@ -870,6 +871,20 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 		oldPrivKeyCol = "NULL"
 	}
 
+	// Validate column names are in whitelist (safety check)
+	validColumns := map[string]bool{
+		"long_term_hpke_pub_key":  true,
+		"long_term_pub_key":       true,
+		"long_term_hpke_priv_key": true,
+		"long_term_priv_key":      true,
+		"NULL":                    true,
+	}
+	if !validColumns[oldPubKeyCol] || !validColumns[oldPrivKeyCol] {
+		return fmt.Errorf("invalid column name detected: pubKey=%s, privKey=%s", oldPubKeyCol, oldPrivKeyCol)
+	}
+
+	// Build query with validated column names
+	// Note: Column names cannot be parameterized in SQL, so we validate them above
 	_, err = tx.Exec(fmt.Sprintf(`
 		INSERT INTO node_config_new (id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen)
 		SELECT id, %s, %s, kdc_address, control_zone, registered_at, last_seen

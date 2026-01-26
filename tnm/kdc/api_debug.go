@@ -19,6 +19,19 @@ import (
 	"github.com/miekg/dns"
 )
 
+// safeChunkCount returns a bounded chunk count or an error if it exceeds uint16 max.
+// It subtracts 1 from the total chunks (to exclude the manifest) and validates the result.
+func safeChunkCount(chunks int) (uint16, error) {
+	count := chunks - 1 // -1 for manifest
+	if count < 0 {
+		count = 0
+	}
+	if count > math.MaxUint16 {
+		return 0, fmt.Errorf("too many chunks: %d (max: %d)", count, math.MaxUint16)
+	}
+	return uint16(count), nil
+}
+
 // KdcDebugPost represents a request to the KDC debug API
 type KdcDebugPost struct {
 	Command        string `json:"command"`         // "test-distribution", "list-distributions", "delete-distribution", "set-chunk-size"
@@ -101,27 +114,21 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 								resp.ChunkCount = manifestData.ChunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, manifestData.ChunkCount)
 							} else {
-								chunkCount := len(prepared.chunks) - 1 // -1 for manifest
-								if chunkCount < 0 {
-									chunkCount = 0
-								}
-								if chunkCount > math.MaxUint16 {
-									sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("too many chunks: %d (max: %d)", chunkCount, math.MaxUint16))
+								chunkCount, err := safeChunkCount(len(prepared.chunks))
+								if err != nil {
+									sendJSONError(w, http.StatusInternalServerError, err.Error())
 									return
 								}
-								resp.ChunkCount = uint16(chunkCount)
+								resp.ChunkCount = chunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
 							}
 						} else {
-							chunkCount := len(prepared.chunks) - 1 // -1 for manifest
-							if chunkCount < 0 {
-								chunkCount = 0
-							}
-							if chunkCount > math.MaxUint16 {
-								sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("too many chunks: %d (max: %d)", chunkCount, math.MaxUint16))
+							chunkCount, err := safeChunkCount(len(prepared.chunks))
+							if err != nil {
+								sendJSONError(w, http.StatusInternalServerError, err.Error())
 								return
 							}
-							resp.ChunkCount = uint16(chunkCount)
+							resp.ChunkCount = chunkCount
 							log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
 						}
 					}

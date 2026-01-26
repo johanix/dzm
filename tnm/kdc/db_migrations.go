@@ -1000,19 +1000,31 @@ func (kdc *KdcDB) migrateMakeDistributionZoneKeyNullable() error {
 // TEMPORARY: Remove this migration once all databases have been upgraded
 func (kdc *KdcDB) migrateMakeDistributionConfirmationsZoneKeyNullable() error {
 	if kdc.DBType == "sqlite" {
-		// SQLite: Check if columns are already nullable by trying to insert NULL
-		// Actually, SQLite doesn't enforce NOT NULL constraints on existing tables when we alter them
-		// We need to recreate the table or use a workaround
-		// For now, let's check if we can insert a NULL value
-		var testID string = "migration_test_" + fmt.Sprintf("%d", time.Now().Unix())
-		_, err := kdc.DB.Exec(
-			`INSERT INTO distribution_confirmations (id, distribution_id, zone_name, key_id, node_id) 
-			 VALUES (?, 'test', NULL, NULL, 'test')`,
-			testID,
-		)
-		if err == nil {
-			// NULL is allowed, delete test record
-			kdc.DB.Exec("DELETE FROM distribution_confirmations WHERE id = ?", testID)
+		// SQLite: Check if columns are already nullable using schema introspection
+		// Prefer schema inspection over a probe insert to avoid FK side effects
+		rows, err := kdc.DB.Query("PRAGMA table_info(distribution_confirmations)")
+		if err != nil {
+			return fmt.Errorf("failed to query table info: %v", err)
+		}
+		defer rows.Close()
+		var zoneNameNullable, keyIDNullable bool
+		for rows.Next() {
+			var cid int
+			var name, dataType string
+			var notNull int
+			var defaultValue, pk interface{}
+			if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+				continue
+			}
+			if name == "zone_name" {
+				zoneNameNullable = (notNull == 0)
+			}
+			if name == "key_id" {
+				keyIDNullable = (notNull == 0)
+			}
+		}
+		if zoneNameNullable && keyIDNullable {
+			// Already nullable, nothing to do
 			return nil
 		}
 
@@ -1328,33 +1340,11 @@ func (kdc *KdcDB) migrateMakeEphemeralPubKeyNullable() error {
 		}
 		defer tx.Rollback()
 
-		// Create new table with nullable ephemeral_pub_key
-		_, err = tx.Exec(`
-			CREATE TABLE distribution_records_new (
-				id TEXT PRIMARY KEY,
-				zone_name TEXT,
-				key_id TEXT,
-				node_id TEXT,
-				encrypted_key BLOB NOT NULL,
-				ephemeral_pub_key BLOB NULL,
-				created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				expires_at DATETIME,
-				status TEXT NOT NULL DEFAULT 'pending',
-				distribution_id TEXT NOT NULL,
-				completed_at DATETIME,
-				operation TEXT,
-				payload TEXT,
-				FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
-				FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
-				FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
-				CHECK (status IN ('pending', 'delivered', 'active', 'revoked', 'completed'))
-			)`)
-		if err != nil {
-			return fmt.Errorf("failed to create new distribution_records table: %v", err)
-		}
-
-		// Check if operation and payload columns exist
+		// Check if operation and payload columns exist, and detect operation column constraints
 		var operationExists, payloadExists bool
+		var operationNotNull bool
+		var operationDefaultValue string
+		var operationIndexExists bool
 		rows2, err := tx.Query("PRAGMA table_info(distribution_records)")
 		if err == nil {
 			defer rows2.Close()
@@ -1368,11 +1358,54 @@ func (kdc *KdcDB) migrateMakeEphemeralPubKeyNullable() error {
 				}
 				if name == "operation" {
 					operationExists = true
+					operationNotNull = (notNull == 1)
+					if defaultValue != nil {
+						// SQLite returns default values as strings, may include quotes
+						operationDefaultValue = strings.Trim(fmt.Sprintf("%v", defaultValue), "'\"")
+					}
 				}
 				if name == "payload" {
 					payloadExists = true
 				}
 			}
+		}
+
+		// Check if idx_distribution_records_operation index exists
+		var indexCount int
+		err = tx.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_distribution_records_operation'").Scan(&indexCount)
+		if err == nil && indexCount > 0 {
+			operationIndexExists = true
+		}
+
+		// Create new table with nullable ephemeral_pub_key
+		// Preserve operation column constraints if they existed (NOT NULL DEFAULT 'ping')
+		operationColumnDef := "operation TEXT"
+		if operationExists && operationNotNull && operationDefaultValue == "ping" {
+			operationColumnDef = "operation TEXT NOT NULL DEFAULT 'ping'"
+		}
+		createTableStmt := fmt.Sprintf(`
+			CREATE TABLE distribution_records_new (
+				id TEXT PRIMARY KEY,
+				zone_name TEXT,
+				key_id TEXT,
+				node_id TEXT,
+				encrypted_key BLOB NOT NULL,
+				ephemeral_pub_key BLOB NULL,
+				created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				expires_at DATETIME,
+				status TEXT NOT NULL DEFAULT 'pending',
+				distribution_id TEXT NOT NULL,
+				completed_at DATETIME,
+				%s,
+				payload TEXT,
+				FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
+				FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
+				FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+				CHECK (status IN ('pending', 'delivered', 'active', 'revoked', 'completed'))
+			)`, operationColumnDef)
+		_, err = tx.Exec(createTableStmt)
+		if err != nil {
+			return fmt.Errorf("failed to create new distribution_records table: %v", err)
 		}
 
 		// Copy data from old table to new table (handle optional operation/payload columns)
@@ -1416,6 +1449,10 @@ func (kdc *KdcDB) migrateMakeEphemeralPubKeyNullable() error {
 			"CREATE INDEX IF NOT EXISTS idx_distribution_records_status ON distribution_records(status)",
 			"CREATE INDEX IF NOT EXISTS idx_distribution_records_distribution_id ON distribution_records(distribution_id)",
 			"CREATE INDEX IF NOT EXISTS idx_distribution_records_completed_at ON distribution_records(completed_at)",
+		}
+		// Recreate operation index if it existed in the original table
+		if operationIndexExists {
+			indexes = append(indexes, "CREATE INDEX IF NOT EXISTS idx_distribution_records_operation ON distribution_records(operation)")
 		}
 		for _, idxStmt := range indexes {
 			if _, err := tx.Exec(idxStmt); err != nil {

@@ -79,8 +79,8 @@ func ExtractEphemeralKey(backend crypto.Backend, ciphertext []byte) ([]byte, err
 //   - ephemeralPub: Ephemeral public key (32 bytes for HPKE, empty for JOSE)
 //   - error: Any error during encryption
 func EncryptPayload(plaintext []byte, publicKeyData []byte, backendName string, supportedCrypto []string, context string) (ciphertext []byte, ephemeralPub []byte, err error) {
-	if plaintext == nil {
-		return nil, nil, fmt.Errorf("plaintext is nil")
+	if len(plaintext) == 0 {
+		return nil, nil, fmt.Errorf("plaintext is nil or empty")
 	}
 	if len(publicKeyData) == 0 {
 		return nil, nil, fmt.Errorf("public key data is nil or empty")

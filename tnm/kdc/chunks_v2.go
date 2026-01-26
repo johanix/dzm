@@ -10,6 +10,7 @@ package kdc
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -374,7 +375,14 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
-		chunkSizeInt := conf.GetChunkMaxSize()
+		// Use default chunk size if conf is nil
+		const defaultChunkSize = 60000
+		var chunkSizeInt int
+		if conf != nil {
+			chunkSizeInt = conf.GetChunkMaxSize()
+		} else {
+			chunkSizeInt = defaultChunkSize
+		}
 		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
 		// Check for integer overflow before converting to uint16
 		if len(dataChunks) > math.MaxUint16 {
@@ -431,11 +439,20 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		if !ok {
 			return nil, fmt.Errorf("node %s JOSE public key is not an ECDSA key (required for HMAC)", nodeID)
 		}
+		// Validate curve is P-256 (required for this backend)
+		if ecdsaKey.Curve != elliptic.P256() {
+			return nil, fmt.Errorf("node %s JOSE public key uses unsupported curve: %s (expected P-256)", nodeID, ecdsaKey.Curve.Params().Name)
+		}
 		// Extract x-coordinate (32 bytes for P-256)
 		xBytes := ecdsaKey.X.Bytes()
-		// Pad to 32 bytes if needed (ECDSA coordinates are variable length)
-		hmacKey = make([]byte, 32)
-		copy(hmacKey[32-len(xBytes):], xBytes)
+		// Calculate expected coordinate length for P-256: (256 bits + 7) / 8 = 32 bytes
+		expectedLen := (ecdsaKey.Curve.Params().BitSize + 7) / 8
+		if len(xBytes) > expectedLen {
+			return nil, fmt.Errorf("node %s JOSE public key x-coordinate too large: %d bytes (max: %d for P-256)", nodeID, len(xBytes), expectedLen)
+		}
+		// Pad to expectedLen bytes if needed (ECDSA coordinates are variable length)
+		hmacKey = make([]byte, expectedLen)
+		copy(hmacKey[expectedLen-len(xBytes):], xBytes)
 	} else {
 		return nil, fmt.Errorf("unsupported crypto backend for HMAC: %s", backendName)
 	}

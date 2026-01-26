@@ -78,8 +78,8 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	// Defensive check: refuse HPKE operations for JOSE-only nodes
-	if err := validateHPKEForNode(node, nodeID, "HMAC"); err != nil {
+	// Validate HPKE eligibility once at the start (covers HMAC and encryption operations)
+	if err := validateHPKEForNode(node, nodeID, "HPKE operations"); err != nil {
 		return nil, err
 	}
 
@@ -275,10 +275,6 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		log.Printf("KDC: Prepared %s: %d operations (%d key ops) for %d zones, JSON size: %d bytes",
 			contentType, operationCount, keyCount, zoneCount, len(entriesJSON))
 
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if err := validateHPKEForNode(node, nodeID, "encryption"); err != nil {
-			return nil, err
-		}
 		// Encrypt the entire JSON payload using HPKE and encode for transport
 		base64Data, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, entriesJSON)
 		if err != nil {
@@ -383,10 +379,6 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
-	// Defensive check: refuse HPKE operations for JOSE-only nodes
-	if err := validateHPKEForNode(node, nodeID, "HMAC"); err != nil {
-		return nil, err
-	}
 	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
@@ -774,11 +766,11 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// the way we query (we also check cache)
 		distRecord := &DistributionRecord{
 			ID:              distRecordIDHex,
-			ZoneName:        "test", // Placeholder zone for test distributions
-			KeyID:           "test", // Placeholder key for test distributions
+			ZoneName:        "_test_distribution_", // Placeholder zone for test distributions
+			KeyID:           "_test_key_",          // Placeholder key for test distributions
 			NodeID:          nodeID,
-			EncryptedKey:    []byte("test"), // Dummy data
-			EphemeralPubKey: []byte("test"), // Dummy data
+			EncryptedKey:    []byte{},       // Empty for test distributions
+			EphemeralPubKey: []byte{},       // Empty for test distributions
 			CreatedAt:       time.Now(),
 			ExpiresAt:       nil,
 			Status:          hpke.DistributionStatusPending,
