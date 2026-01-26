@@ -68,10 +68,10 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 			return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use %s", node.ID, backend.Name())
 		}
-		if node.LongTermPubKey == nil || len(node.LongTermPubKey) == 0 {
+		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) == 0 {
 			return nil, nil, "", fmt.Errorf("node %s does not have a public key stored (required for %s backend)", node.ID, backend.Name())
 		}
-		nodePubKeyData = node.LongTermPubKey
+		nodePubKeyData = node.LongTermHpkePubKey
 	}
 	nodePubKey, err := backend.ParsePublicKey(nodePubKeyData)
 	if err != nil {

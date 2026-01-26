@@ -36,6 +36,7 @@ type KrsConf struct {
 	ControlZone string       `yaml:"control_zone" mapstructure:"control_zone"` // DNS zone for distribution events
 	DnsEngine   DnsEngineConf `yaml:"dnsengine" mapstructure:"dnsengine"`       // DNS engine config for NOTIFY
 	UseCryptoV2 bool `yaml:"use_crypto_v2" mapstructure:"use_crypto_v2"` // Feature flag: use crypto abstraction layer (v2) instead of direct HPKE (v1), default: false
+	SupportedCrypto []string `yaml:"supported_crypto" mapstructure:"supported_crypto"` // List of supported crypto backends (e.g., ["hpke", "jose"])
 }
 
 // DatabaseConf represents database configuration for KDC

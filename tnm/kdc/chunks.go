@@ -49,8 +49,8 @@ func validateHPKEForNode(node *Node, nodeID, purpose string) error {
 	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 		return fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for %s", nodeID, purpose)
 	}
-	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-		return fmt.Errorf("node %s has invalid public key for %s: length %d (expected 32)", nodeID, purpose, len(node.LongTermPubKey))
+	if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
+		return fmt.Errorf("node %s has invalid public key for %s: length %d (expected 32)", nodeID, purpose, len(node.LongTermHpkePubKey))
 	}
 	return nil
 }
@@ -279,7 +279,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 			return nil, err
 		}
 		// Encrypt the entire JSON payload using HPKE and encode for transport
-		base64Data, err = tnm.EncryptAndEncode(node.LongTermPubKey, entriesJSON)
+		base64Data, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, entriesJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
 		}
@@ -379,7 +379,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	if err := validateHPKEForNode(node, nodeID, "HMAC"); err != nil {
 		return nil, err
 	}
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
+	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
 	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
@@ -650,7 +650,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 			return nil, err
 		}
 		// Encrypt the text using HPKE and encode for transport
-		dataToChunk, err = tnm.EncryptAndEncode(node.LongTermPubKey, []byte(text))
+		dataToChunk, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, []byte(text))
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt text: %v", err)
 		}
@@ -728,7 +728,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	if err := validateHPKEForNode(node, nodeID, "HMAC"); err != nil {
 		return nil, err
 	}
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermPubKey); err != nil {
+	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
 	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))

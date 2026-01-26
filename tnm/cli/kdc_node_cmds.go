@@ -108,7 +108,7 @@ var kdcNodeAddCmd = &cobra.Command{
 			"node": map[string]interface{}{
 				"id":               nodeIDFQDN,
 				"name":             nodename,
-				"long_term_pub_key": pubkey,
+				"long_term_hpke_pub_key": pubkey,
 				"state":            "online",
 				"comment":          "",
 			},
@@ -287,9 +287,9 @@ var kdcNodeUpdateCmd = &cobra.Command{
 			updateNode["notify_address"] = addr
 		}
 
-		// Preserve long_term_pub_key (required field)
+		// Preserve long_term_hpke_pub_key (required field)
 		// JSON encodes []byte as base64 string, so we need to decode it back to []byte
-		if pubkeyVal, ok := nodeMap["long_term_pub_key"]; ok {
+		if pubkeyVal, ok := nodeMap["long_term_hpke_pub_key"]; ok {
 			var pubkeyBytes []byte
 			if pubkeyStr, ok := pubkeyVal.(string); ok {
 				// Decode base64 string back to []byte
@@ -300,7 +300,7 @@ var kdcNodeUpdateCmd = &cobra.Command{
 			} else {
 				log.Fatalf("Error: public key has unexpected type: %T", pubkeyVal)
 			}
-			updateNode["long_term_pub_key"] = pubkeyBytes
+			updateNode["long_term_hpke_pub_key"] = pubkeyBytes
 		} else {
 			log.Fatalf("Error: public key not found in node data")
 		}

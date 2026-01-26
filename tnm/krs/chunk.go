@@ -181,72 +181,99 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 		return fmt.Errorf("failed to extract manifest from CHUNK: %v", err)
 	}
 
-	// Verify CHUNK manifest HMAC using this node's long-term public key
-	var hmacKey []byte
+	// Verify CHUNK manifest HMAC using this node's long-term public key(s)
+	// Try both HPKE and JOSE keys when available, since the manifest HMAC could have been
+	// created using either key depending on which backend was used for encryption
+	var hmacKeys [][]byte
+	var hmacKeyNames []string
+	
+	// Try HPKE key if available
 	if conf.Node.LongTermHpkePrivKey != "" {
 		// Load node's HPKE private key
 		privateKey, err := loadPrivateKey(conf.Node.LongTermHpkePrivKey)
 		if err != nil {
-			return fmt.Errorf("failed to load node HPKE private key: %v", err)
+			log.Printf("KRS: Warning: Failed to load node HPKE private key: %v", err)
+		} else {
+			// Derive public key from private key
+			publicKey, err := hpke.DerivePublicKey(privateKey)
+			if err != nil {
+				log.Printf("KRS: Warning: Failed to derive public key from HPKE private key: %v", err)
+			} else {
+				// For HPKE, use the public key directly as HMAC key (32 bytes)
+				hmacKeys = append(hmacKeys, publicKey)
+				hmacKeyNames = append(hmacKeyNames, "HPKE")
+			}
 		}
-
-		// Derive public key from private key
-		publicKey, err := hpke.DerivePublicKey(privateKey)
-		if err != nil {
-			return fmt.Errorf("failed to derive public key from HPKE private key: %v", err)
-		}
-
-		// For HPKE, use the public key directly as HMAC key (32 bytes)
-		hmacKey = publicKey
-	} else if conf.Node.LongTermJosePrivKey != "" {
+	}
+	
+	// Try JOSE key if available
+	if conf.Node.LongTermJosePrivKey != "" {
 		// Load JOSE private key using loadPrivateKeyForBackend
 		joseKeyJSON, err := loadPrivateKeyForBackend(conf, "jose")
 		if err != nil {
-			return fmt.Errorf("failed to load node JOSE private key: %v", err)
+			log.Printf("KRS: Warning: Failed to load node JOSE private key: %v", err)
+		} else {
+			// Parse JWK to extract ECDSA private key
+			var jwk jose.JSONWebKey
+			if err := json.Unmarshal(joseKeyJSON, &jwk); err != nil {
+				log.Printf("KRS: Warning: Failed to parse JOSE private key JSON: %v", err)
+			} else {
+				// Extract ECDSA private key
+				ecdsaKey, ok := jwk.Key.(*ecdsa.PrivateKey)
+				if !ok {
+					log.Printf("KRS: Warning: JOSE private key is not an ECDSA key (required for HMAC)")
+				} else {
+					// Validate curve is P-256 (required for 32-byte x-coordinate)
+					if ecdsaKey.Curve != elliptic.P256() {
+						log.Printf("KRS: Warning: JOSE private key uses unsupported curve: %s (expected P-256 for HMAC)", ecdsaKey.Curve.Params().Name)
+					} else {
+						// Extract x-coordinate from the ECDSA private key's public key (32 bytes for P-256)
+						xBytes := ecdsaKey.PublicKey.X.Bytes()
+						
+						// Validate x-coordinate length (defensive check - should be <= 32 for P-256)
+						if len(xBytes) > 32 {
+							log.Printf("KRS: Warning: JOSE private key x-coordinate length %d exceeds 32 bytes (curve: %s)", len(xBytes), ecdsaKey.Curve.Params().Name)
+						} else {
+							// Left-pad to 32 bytes if needed (ECDSA coordinates are variable length)
+							hmacKey := make([]byte, 32)
+							copy(hmacKey[32-len(xBytes):], xBytes)
+							hmacKeys = append(hmacKeys, hmacKey)
+							hmacKeyNames = append(hmacKeyNames, "JOSE")
+						}
+					}
+				}
+			}
 		}
-
-		// Parse JWK to extract ECDSA private key
-		var jwk jose.JSONWebKey
-		if err := json.Unmarshal(joseKeyJSON, &jwk); err != nil {
-			return fmt.Errorf("failed to parse JOSE private key JSON: %v", err)
-		}
-
-		// Extract ECDSA private key
-		ecdsaKey, ok := jwk.Key.(*ecdsa.PrivateKey)
-		if !ok {
-			return fmt.Errorf("JOSE private key is not an ECDSA key (required for HMAC)")
-		}
-
-		// Validate curve is P-256 (required for 32-byte x-coordinate)
-		if ecdsaKey.Curve != elliptic.P256() {
-			return fmt.Errorf("JOSE private key uses unsupported curve: %s (expected P-256 for HMAC)", ecdsaKey.Curve.Params().Name)
-		}
-
-		// Extract x-coordinate from the ECDSA private key's public key (32 bytes for P-256)
-		xBytes := ecdsaKey.PublicKey.X.Bytes()
-		
-		// Validate x-coordinate length (defensive check - should be <= 32 for P-256)
-		if len(xBytes) > 32 {
-			return fmt.Errorf("JOSE private key x-coordinate length %d exceeds 32 bytes (curve: %s)", len(xBytes), ecdsaKey.Curve.Params().Name)
-		}
-
-		// Left-pad to 32 bytes if needed (ECDSA coordinates are variable length)
-		hmacKey = make([]byte, 32)
-		copy(hmacKey[32-len(xBytes):], xBytes)
-	} else {
-		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
 	}
-
-	// Verify HMAC if we have a key
-	if hmacKey != nil {
-		valid, err := tnm.VerifyCHUNKHMAC(manifestChunk, hmacKey)
-		if err != nil {
-			return fmt.Errorf("failed to verify CHUNK manifest HMAC: %v", err)
+	
+	// Verify HMAC with all available keys
+	if len(hmacKeys) == 0 {
+		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
+	} else {
+		verified := false
+		var lastErr error
+		for i, hmacKey := range hmacKeys {
+			valid, err := tnm.VerifyCHUNKHMAC(manifestChunk, hmacKey)
+			if err != nil {
+				log.Printf("KRS: Warning: Failed to verify CHUNK manifest HMAC with %s key: %v", hmacKeyNames[i], err)
+				lastErr = err
+				continue
+			}
+			if valid {
+				log.Printf("KRS: CHUNK manifest HMAC verified successfully using node's %s public key", hmacKeyNames[i])
+				verified = true
+				break
+			}
+			// HMAC didn't match, try next key
+			log.Printf("KRS: CHUNK manifest HMAC verification failed with %s key, trying next key", hmacKeyNames[i])
 		}
-		if !valid {
-			return fmt.Errorf("CHUNK manifest HMAC verification failed - possible tampering or key mismatch")
+		
+		if !verified {
+			if lastErr != nil {
+				return fmt.Errorf("CHUNK manifest HMAC verification failed with all available keys (%s) - last error: %v", strings.Join(hmacKeyNames, ", "), lastErr)
+			}
+			return fmt.Errorf("CHUNK manifest HMAC verification failed with all available keys (%s) - possible tampering or key mismatch", strings.Join(hmacKeyNames, ", "))
 		}
-		log.Printf("KRS: CHUNK manifest HMAC verified successfully using node's public key")
 	}
 
 	// Extract content type, retire_time, timestamp, distribution_ttl, and crypto from metadata

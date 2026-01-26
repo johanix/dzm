@@ -63,6 +63,15 @@ var kdcDistribListCmd = &cobra.Command{
 						distID := getString(s, "distribution_id")
 						fmt.Printf("\n  Distribution ID: %s\n", distID)
 						
+						// Show operations
+						if operations, ok := s["operations"].([]interface{}); ok && len(operations) > 0 {
+							opStrs := make([]string, len(operations))
+							for i, op := range operations {
+								opStrs[i] = fmt.Sprintf("%v", op)
+							}
+							fmt.Printf("    Operation: %s\n", strings.Join(opStrs, ", "))
+						}
+						
 						if nodes, ok := s["nodes"].([]interface{}); ok {
 							nodeStrs := make([]string, len(nodes))
 							for i, n := range nodes {

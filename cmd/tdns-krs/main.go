@@ -106,46 +106,92 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 	conf.Internal.KrsDB = krsDB
 
-	// Load node configuration (long-term HPKE private key)
-	privKeyData, err := os.ReadFile(krsConf.Node.LongTermHpkePrivKey)
-	if err != nil {
-		return fmt.Errorf("failed to read long-term private key: %v", err)
-	}
-
-	// Parse private key (hex format with optional comments)
-	privKeyHex := ""
-	lines := strings.Split(string(privKeyData), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			privKeyHex += line
+	// Determine which crypto backends are supported
+	hasHpke := false
+	hasJose := false
+	for _, backend := range krsConf.SupportedCrypto {
+		if backend == "hpke" {
+			hasHpke = true
+		}
+		if backend == "jose" {
+			hasJose = true
 		}
 	}
 
-	// Decode hex private key
-	privKey, err := hex.DecodeString(privKeyHex)
-	if err != nil {
-		return fmt.Errorf("failed to decode private key (must be hex): %v", err)
-	}
-	if len(privKey) != 32 {
-		return fmt.Errorf("private key must be 32 bytes (got %d)", len(privKey))
+	// Load and validate keys only for configured backends
+	var hpkePubKey []byte
+	var hpkePrivKey []byte
+
+	if hasHpke {
+		// Validate HPKE key is configured
+		if krsConf.Node.LongTermHpkePrivKey == "" {
+			return fmt.Errorf("HPKE private key not configured (long_term_hpke_priv_key is empty) but HPKE is in supported_crypto list. Either add the key path to the config or remove 'hpke' from supported_crypto")
+		}
+
+		// Load HPKE private key
+		privKeyData, err := os.ReadFile(krsConf.Node.LongTermHpkePrivKey)
+		if err != nil {
+			return fmt.Errorf("failed to read HPKE long-term private key from %s: %v", krsConf.Node.LongTermHpkePrivKey, err)
+		}
+
+		// Parse private key (hex format with optional comments)
+		privKeyHex := ""
+		lines := strings.Split(string(privKeyData), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				privKeyHex += line
+			}
+		}
+
+		// Decode hex private key
+		privKey, err := hex.DecodeString(privKeyHex)
+		if err != nil {
+			return fmt.Errorf("failed to decode HPKE private key from %s (must be hex): %v", krsConf.Node.LongTermHpkePrivKey, err)
+		}
+		if len(privKey) != 32 {
+			return fmt.Errorf("HPKE private key from %s must be 32 bytes (got %d)", krsConf.Node.LongTermHpkePrivKey, len(privKey))
+		}
+
+		// Derive public key from private key
+		pubKey, err := hpke.DerivePublicKey(privKey)
+		if err != nil {
+			return fmt.Errorf("failed to derive HPKE public key from private key in %s: %v", krsConf.Node.LongTermHpkePrivKey, err)
+		}
+
+		hpkePubKey = pubKey
+		hpkePrivKey = privKey
+		log.Printf("KRS: Loaded HPKE keypair from %s", krsConf.Node.LongTermHpkePrivKey)
 	}
 
-	// Derive public key from private key
-	pubKey, err := hpke.DerivePublicKey(privKey)
-	if err != nil {
-		return fmt.Errorf("failed to derive public key: %v", err)
+	if hasJose {
+		// Validate JOSE key is configured
+		if krsConf.Node.LongTermJosePrivKey == "" {
+			return fmt.Errorf("JOSE private key not configured (long_term_jose_priv_key is empty) but JOSE is in supported_crypto list. Either add the key path to the config or remove 'jose' from supported_crypto")
+		}
+
+		// Validate JOSE key file exists and is readable
+		if _, err := os.Stat(krsConf.Node.LongTermJosePrivKey); err != nil {
+			return fmt.Errorf("failed to access JOSE long-term private key file %s: %v", krsConf.Node.LongTermJosePrivKey, err)
+		}
+
+		log.Printf("KRS: JOSE keypair configured at %s (will be loaded on demand)", krsConf.Node.LongTermJosePrivKey)
 	}
 
-	// Store node config in database
+	// Validate at least one backend is configured
+	if !hasHpke && !hasJose {
+		return fmt.Errorf("no crypto backends configured (supported_crypto is empty or invalid). At least one of 'hpke' or 'jose' must be in supported_crypto")
+	}
+
+	// Store node config in database (HPKE keys are optional for JOSE-only nodes)
 	nodeConfig := &krs.NodeConfig{
-		ID:              krsConf.Node.ID,
-		LongTermPubKey:  pubKey,
-		LongTermPrivKey: privKey,
-		KdcAddress:      krsConf.Node.KdcAddress,
-		ControlZone:     krsConf.ControlZone,
-		RegisteredAt:    time.Now(),
-		LastSeen:        time.Now(),
+		ID:                 krsConf.Node.ID,
+		LongTermHpkePubKey:  hpkePubKey,  // nil for JOSE-only nodes
+		LongTermHpkePrivKey: hpkePrivKey, // nil for JOSE-only nodes
+		KdcAddress:          krsConf.Node.KdcAddress,
+		ControlZone:         krsConf.ControlZone,
+		RegisteredAt:        time.Now(),
+		LastSeen:            time.Now(),
 	}
 	if err := krsDB.SetNodeConfig(nodeConfig); err != nil {
 		return fmt.Errorf("failed to store node config: %v", err)

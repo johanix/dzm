@@ -72,6 +72,13 @@ func NewKrsDB(dsn string) (*KrsDB, error) {
 		log.Printf("KRS: Warning: Failed to migrate retire_time column and removed state: %v", err)
 	}
 
+	// Migrate: Make long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config
+	// and rename long_term_pub_key -> long_term_hpke_pub_key, long_term_priv_key -> long_term_hpke_priv_key
+	// This allows JOSE-only nodes to have NULL for HPKE keys
+	if err := krs.migrateMakeNodeConfigKeysNullable(); err != nil {
+		log.Printf("KRS: Warning: Failed to make node_config keys nullable: %v", err)
+	}
+
 	return krs, nil
 }
 
@@ -100,10 +107,11 @@ func (krs *KrsDB) initSchema() error {
 		)`,
 
 		// Node config table (stores node identity)
+		// long_term_hpke_pub_key and long_term_hpke_priv_key are nullable to support JOSE-only nodes
 		`CREATE TABLE IF NOT EXISTS node_config (
 			id TEXT PRIMARY KEY,
-			long_term_pub_key BLOB NOT NULL,
-			long_term_priv_key BLOB NOT NULL,
+			long_term_hpke_pub_key BLOB,
+			long_term_hpke_priv_key BLOB,
 			kdc_address TEXT NOT NULL,
 			control_zone TEXT NOT NULL,
 			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -569,11 +577,11 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 // SetNodeConfig stores the node configuration
 func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 	query := `INSERT OR REPLACE INTO node_config 
-		(id, long_term_pub_key, long_term_priv_key, kdc_address, control_zone, registered_at, last_seen)
+		(id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := krs.DB.Exec(query,
-		config.ID, config.LongTermPubKey, config.LongTermPrivKey,
+		config.ID, config.LongTermHpkePubKey, config.LongTermHpkePrivKey,
 		config.KdcAddress, config.ControlZone, config.RegisteredAt, config.LastSeen,
 	)
 	if err != nil {
@@ -587,10 +595,10 @@ func (krs *KrsDB) GetNodeConfig() (*NodeConfig, error) {
 	var config NodeConfig
 
 	err := krs.DB.QueryRow(
-		`SELECT id, long_term_pub_key, long_term_priv_key, kdc_address, control_zone, registered_at, last_seen
+		`SELECT id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen
 			FROM node_config LIMIT 1`,
 	).Scan(
-		&config.ID, &config.LongTermPubKey, &config.LongTermPrivKey,
+		&config.ID, &config.LongTermHpkePubKey, &config.LongTermHpkePrivKey,
 		&config.KdcAddress, &config.ControlZone, &config.RegisteredAt, &config.LastSeen,
 	)
 	if err != nil {
@@ -739,6 +747,100 @@ func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
 		}
 	}
 	// If no records exist or constraint already allows 'removed', nothing to do
+	return nil
+}
+
+// migrateMakeNodeConfigKeysNullable makes long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config table
+// and renames long_term_pub_key -> long_term_hpke_pub_key, long_term_hpke_priv_key -> long_term_hpke_priv_key
+// This allows JOSE-only nodes to have NULL for HPKE keys and makes the column names clearer
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
+	// Check if table exists
+	var sqlStr string
+	err := krs.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='node_config'").Scan(&sqlStr)
+	if err != nil {
+		// Table doesn't exist yet - initSchema will create it with correct column names, nothing to do
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("failed to check node_config table schema: %v", err)
+	}
+	
+	// Check if columns need to be renamed or made nullable
+	needsRename := strings.Contains(sqlStr, "long_term_pub_key") || strings.Contains(sqlStr, "long_term_priv_key")
+	needsNullable := strings.Contains(sqlStr, "long_term_pub_key BLOB NOT NULL") || strings.Contains(sqlStr, "long_term_priv_key BLOB NOT NULL") ||
+	                 strings.Contains(sqlStr, "long_term_hpke_pub_key BLOB NOT NULL") || strings.Contains(sqlStr, "long_term_hpke_priv_key BLOB NOT NULL")
+	
+	if !needsRename && !needsNullable {
+		// Already has correct column names and nullable, nothing to do
+		return nil
+	}
+	
+	// Need to rebuild table to rename columns and/or make them nullable
+	log.Printf("KRS: Recreating node_config table to rename columns and make HPKE keys nullable")
+	
+	// Start transaction
+	tx, err := krs.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+	
+	// Create new table with correct column names and nullable keys
+	_, err = tx.Exec(`
+		CREATE TABLE node_config_new (
+			id TEXT PRIMARY KEY,
+			long_term_hpke_pub_key BLOB,
+			long_term_hpke_priv_key BLOB,
+			kdc_address TEXT NOT NULL,
+			control_zone TEXT NOT NULL,
+			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`)
+	if err != nil {
+		return fmt.Errorf("failed to create new node_config table: %v", err)
+	}
+	
+	// Copy all data from old table to new table (handle both old and new column names)
+	// Check which columns exist in the old table
+	var oldPubKeyCol, oldPrivKeyCol string
+	if strings.Contains(sqlStr, "long_term_hpke_pub_key") {
+		oldPubKeyCol = "long_term_hpke_pub_key"
+	} else {
+		oldPubKeyCol = "long_term_pub_key"
+	}
+	if strings.Contains(sqlStr, "long_term_hpke_priv_key") {
+		oldPrivKeyCol = "long_term_hpke_priv_key"
+	} else {
+		oldPrivKeyCol = "long_term_priv_key"
+	}
+	
+	_, err = tx.Exec(fmt.Sprintf(`
+		INSERT INTO node_config_new (id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen)
+		SELECT id, %s, %s, kdc_address, control_zone, registered_at, last_seen
+		FROM node_config`, oldPubKeyCol, oldPrivKeyCol))
+	if err != nil {
+		return fmt.Errorf("failed to copy data to new table: %v", err)
+	}
+	
+	// Drop old table
+	_, err = tx.Exec("DROP TABLE node_config")
+	if err != nil {
+		return fmt.Errorf("failed to drop old table: %v", err)
+	}
+	
+	// Rename new table
+	_, err = tx.Exec("ALTER TABLE node_config_new RENAME TO node_config")
+	if err != nil {
+		return fmt.Errorf("failed to rename new table: %v", err)
+	}
+	
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+	
+	log.Printf("KRS: Successfully renamed and made long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config table")
 	return nil
 }
 

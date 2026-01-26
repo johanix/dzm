@@ -33,8 +33,8 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 		return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", node.ID)
 	}
-	if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-		return nil, nil, "", fmt.Errorf("node long-term public key must be 32 bytes (got %d)", len(node.LongTermPubKey))
+	if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
+		return nil, nil, "", fmt.Errorf("node long-term public key must be 32 bytes (got %d)", len(node.LongTermHpkePubKey))
 	}
 
 	// Use provided distribution ID, or get/create one for this key
@@ -49,7 +49,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 
 	// Encrypt the private key using HPKE
 	// Note: HPKE Base mode generates its own ephemeral key internally
-	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, key.PrivateKey)
+	ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermHpkePubKey, nil, key.PrivateKey)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to encrypt key: %v", err)
 	}

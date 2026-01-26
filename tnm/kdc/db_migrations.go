@@ -8,6 +8,7 @@
 package kdc
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -883,7 +884,7 @@ func (kdc *KdcDB) migrateMakeDistributionZoneKeyNullable() error {
 		// Need to recreate table to make columns nullable
 		log.Printf("KDC: Recreating distribution_records table to make zone_name and key_id nullable")
 		
-		// Create new table with nullable zone_name and key_id
+		// Create new table with nullable zone_name, key_id, and ephemeral_pub_key
 		_, err = kdc.DB.Exec(`
 			CREATE TABLE IF NOT EXISTS distribution_records_new (
 				id TEXT PRIMARY KEY,
@@ -891,7 +892,7 @@ func (kdc *KdcDB) migrateMakeDistributionZoneKeyNullable() error {
 				key_id TEXT,
 				node_id TEXT,
 				encrypted_key BLOB NOT NULL,
-				ephemeral_pub_key BLOB NOT NULL,
+				ephemeral_pub_key BLOB NULL,
 				created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				expires_at DATETIME,
 				status TEXT NOT NULL DEFAULT 'pending',
@@ -1124,24 +1125,36 @@ func (kdc *KdcDB) migrateMakeDistributionConfirmationsZoneKeyNullable() error {
 	return nil
 }
 
-// migrateMakeLongTermPubKeyNullable makes long_term_pub_key nullable in nodes table
-// This allows JOSE-only nodes to have NULL for LongTermPubKey
+// migrateMakeLongTermPubKeyNullable makes long_term_hpke_pub_key nullable in nodes table
+// and renames long_term_pub_key -> long_term_hpke_pub_key
+// This allows JOSE-only nodes to have NULL for HPKE keys and makes the column name clearer
 // TEMPORARY: Remove this migration once all databases have been upgraded
 func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
 	if kdc.DBType == "sqlite" {
-		// SQLite: Check if column is already nullable by checking the schema
-		var sql string
-		err := kdc.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes'").Scan(&sql)
-		if err == nil {
-			// Check if NOT NULL is in the schema
-			if !strings.Contains(sql, "long_term_pub_key BLOB NOT NULL") && !strings.Contains(sql, "long_term_pub_key BLOB UNIQUE NOT NULL") {
-				// Already nullable or doesn't have NOT NULL
+		// SQLite: Check if column needs to be renamed or made nullable
+		var sqlStr string
+		err := kdc.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes'").Scan(&sqlStr)
+		if err != nil {
+			// Table doesn't exist yet - initSchema will create it with correct column name, nothing to do
+			if err == sql.ErrNoRows {
 				return nil
 			}
+			return fmt.Errorf("failed to check nodes table schema: %v", err)
 		}
 		
-		// Column has NOT NULL, need to rebuild table to make it nullable
-		log.Printf("KDC: Recreating nodes table to make long_term_pub_key nullable")
+		// Check if column needs to be renamed
+		needsRename := strings.Contains(sqlStr, "long_term_pub_key") && !strings.Contains(sqlStr, "long_term_hpke_pub_key")
+		// Check if column needs to be made nullable
+		needsNullable := strings.Contains(sqlStr, "long_term_pub_key BLOB NOT NULL") || strings.Contains(sqlStr, "long_term_pub_key BLOB UNIQUE NOT NULL") ||
+		                 strings.Contains(sqlStr, "long_term_hpke_pub_key BLOB NOT NULL") || strings.Contains(sqlStr, "long_term_hpke_pub_key BLOB UNIQUE NOT NULL")
+		
+		if !needsRename && !needsNullable {
+			// Already has correct column name and nullable, nothing to do
+			return nil
+		}
+		
+		// Need to rebuild table to rename column and/or make it nullable
+		log.Printf("KDC: Recreating nodes table to rename long_term_pub_key -> long_term_hpke_pub_key and make it nullable")
 		
 		// Start transaction
 		tx, err := kdc.DB.Begin()
@@ -1150,12 +1163,12 @@ func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
 		}
 		defer tx.Rollback()
 		
-		// Create new table with nullable long_term_pub_key (keep UNIQUE constraint - SQLite allows multiple NULLs)
+		// Create new table with correct column name and nullable (keep UNIQUE constraint - SQLite allows multiple NULLs)
 		_, err = tx.Exec(`
 			CREATE TABLE nodes_new (
 				id TEXT PRIMARY KEY,
 				name TEXT NOT NULL,
-				long_term_pub_key BLOB UNIQUE,
+				long_term_hpke_pub_key BLOB UNIQUE,
 				long_term_jose_pub_key BLOB,
 				supported_crypto TEXT,
 				sig0_pubkey TEXT,
@@ -1170,12 +1183,20 @@ func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
 			return fmt.Errorf("failed to create new nodes table: %v", err)
 		}
 		
-		// Copy all data from old table to new table
-		_, err = tx.Exec(`
+		// Copy all data from old table to new table (handle both old and new column names)
+		// Check which column name exists in the old table
+		var oldColName string
+		if strings.Contains(sqlStr, "long_term_hpke_pub_key") {
+			oldColName = "long_term_hpke_pub_key"
+		} else {
+			oldColName = "long_term_pub_key"
+		}
+		
+		_, err = tx.Exec(fmt.Sprintf(`
 			INSERT INTO nodes_new 
-			SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, 
+			SELECT id, name, %s, long_term_jose_pub_key, supported_crypto, 
 			       sig0_pubkey, notify_address, registered_at, last_seen, state, comment
-			FROM nodes`)
+			FROM nodes`, oldColName))
 		if err != nil {
 			return fmt.Errorf("failed to copy data to new table: %v", err)
 		}
@@ -1219,25 +1240,221 @@ func (kdc *KdcDB) migrateMakeLongTermPubKeyNullable() error {
 			return fmt.Errorf("failed to commit transaction: %v", err)
 		}
 		
-		log.Printf("KDC: Successfully made long_term_pub_key nullable in nodes table")
+		log.Printf("KDC: Successfully renamed long_term_pub_key -> long_term_hpke_pub_key and made it nullable in nodes table")
 	} else {
-		// MySQL/MariaDB: Check if column is already nullable
-		var isNullable string
+		// MySQL/MariaDB: Check if column needs to be renamed
+		var oldColExists, newColExists bool
+		var oldColNullable, newColNullable string
+		
+		// Check if old column name exists
 		err := kdc.DB.QueryRow(
 			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'nodes' AND COLUMN_NAME = 'long_term_pub_key'",
-		).Scan(&isNullable)
-		if err == nil && isNullable == "YES" {
+		).Scan(&oldColNullable)
+		oldColExists = (err == nil)
+		
+		// Check if new column name exists
+		err = kdc.DB.QueryRow(
+			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'nodes' AND COLUMN_NAME = 'long_term_hpke_pub_key'",
+		).Scan(&newColNullable)
+		newColExists = (err == nil)
+		
+		if oldColExists && !newColExists {
+			// Need to rename column
+			log.Printf("KDC: Renaming long_term_pub_key -> long_term_hpke_pub_key in nodes table")
+			_, err = kdc.DB.Exec("ALTER TABLE nodes CHANGE COLUMN long_term_pub_key long_term_hpke_pub_key BLOB NULL")
+			if err != nil {
+				return fmt.Errorf("failed to rename long_term_pub_key to long_term_hpke_pub_key: %v", err)
+			}
+			log.Printf("KDC: Successfully renamed long_term_pub_key -> long_term_hpke_pub_key in nodes table")
+		} else if newColExists && newColNullable != "YES" {
+			// Column already renamed, just need to make it nullable
+			alterStmt := "ALTER TABLE nodes MODIFY COLUMN long_term_hpke_pub_key BLOB NULL"
+			_, err = kdc.DB.Exec(alterStmt)
+			if err != nil {
+				return fmt.Errorf("failed to make long_term_hpke_pub_key nullable: %v", err)
+			}
+			log.Printf("KDC: Made long_term_hpke_pub_key nullable in nodes table")
+		} else if newColExists && newColNullable == "YES" {
+			// Already renamed and nullable, nothing to do
+			return nil
+		}
+	}
+	
+	return nil
+}
+
+// migrateMakeEphemeralPubKeyNullable makes ephemeral_pub_key nullable in distribution_records table
+// This allows JOSE backend distributions to have NULL for ephemeral_pub_key (JWE embeds it in the header)
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateMakeEphemeralPubKeyNullable() error {
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if column is already nullable by checking table info
+		var ephemeralPubKeyNullable bool
+		
+		rows, err := kdc.DB.Query("PRAGMA table_info(distribution_records)")
+		if err != nil {
+			return fmt.Errorf("failed to query table info: %v", err)
+		}
+		defer rows.Close()
+		
+		for rows.Next() {
+			var cid int
+			var name, dataType string
+			var notNull int
+			var defaultValue, pk interface{}
+			
+			if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+				continue
+			}
+			
+			if name == "ephemeral_pub_key" {
+				ephemeralPubKeyNullable = (notNull == 0)
+				break
+			}
+		}
+		
+		if ephemeralPubKeyNullable {
 			// Already nullable, nothing to do
 			return nil
 		}
 		
-		// Modify column to allow NULL (UNIQUE constraint is preserved automatically)
-		alterStmt := "ALTER TABLE nodes MODIFY COLUMN long_term_pub_key BLOB NULL"
-		_, err = kdc.DB.Exec(alterStmt)
+		// Need to recreate table to make column nullable
+		log.Printf("KDC: Recreating distribution_records table to make ephemeral_pub_key nullable")
+		
+		// Start transaction
+		tx, err := kdc.DB.Begin()
 		if err != nil {
-			return fmt.Errorf("failed to make long_term_pub_key nullable: %v", err)
+			return fmt.Errorf("failed to begin transaction: %v", err)
 		}
-		log.Printf("KDC: Made long_term_pub_key nullable in nodes table")
+		defer tx.Rollback()
+		
+		// Create new table with nullable ephemeral_pub_key
+		_, err = tx.Exec(`
+			CREATE TABLE distribution_records_new (
+				id TEXT PRIMARY KEY,
+				zone_name TEXT,
+				key_id TEXT,
+				node_id TEXT,
+				encrypted_key BLOB NOT NULL,
+				ephemeral_pub_key BLOB NULL,
+				created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				expires_at DATETIME,
+				status TEXT NOT NULL DEFAULT 'pending',
+				distribution_id TEXT NOT NULL,
+				completed_at DATETIME,
+				operation TEXT,
+				payload TEXT,
+				FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
+				FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
+				FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+				CHECK (status IN ('pending', 'delivered', 'active', 'revoked', 'completed'))
+			)`)
+		if err != nil {
+			return fmt.Errorf("failed to create new distribution_records table: %v", err)
+		}
+		
+		// Check if operation and payload columns exist
+		var operationExists, payloadExists bool
+		rows2, err := tx.Query("PRAGMA table_info(distribution_records)")
+		if err == nil {
+			defer rows2.Close()
+			for rows2.Next() {
+				var cid int
+				var name, dataType string
+				var notNull int
+				var defaultValue, pk interface{}
+				if err := rows2.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+					continue
+				}
+				if name == "operation" {
+					operationExists = true
+				}
+				if name == "payload" {
+					payloadExists = true
+				}
+			}
+		}
+		
+		// Copy data from old table to new table (handle optional operation/payload columns)
+		var copyStmt string
+		if operationExists && payloadExists {
+			copyStmt = `
+			INSERT INTO distribution_records_new 
+			SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, 
+			       created_at, expires_at, status, distribution_id, completed_at, operation, payload
+			FROM distribution_records`
+		} else {
+			// operation/payload columns don't exist yet - use NULL for them
+			copyStmt = `
+			INSERT INTO distribution_records_new 
+			SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, 
+			       created_at, expires_at, status, distribution_id, completed_at, NULL, NULL
+			FROM distribution_records`
+		}
+		_, err = tx.Exec(copyStmt)
+		if err != nil {
+			return fmt.Errorf("failed to copy data to new table: %v", err)
+		}
+		
+		// Drop old table
+		_, err = tx.Exec("DROP TABLE distribution_records")
+		if err != nil {
+			return fmt.Errorf("failed to drop old table: %v", err)
+		}
+		
+		// Rename new table
+		_, err = tx.Exec("ALTER TABLE distribution_records_new RENAME TO distribution_records")
+		if err != nil {
+			return fmt.Errorf("failed to rename new table: %v", err)
+		}
+		
+		// Recreate indexes
+		indexes := []string{
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_zone_name ON distribution_records(zone_name)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_key_id ON distribution_records(key_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_node_id ON distribution_records(node_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_status ON distribution_records(status)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_distribution_id ON distribution_records(distribution_id)",
+			"CREATE INDEX IF NOT EXISTS idx_distribution_records_completed_at ON distribution_records(completed_at)",
+		}
+		for _, idxStmt := range indexes {
+			if _, err := tx.Exec(idxStmt); err != nil {
+				log.Printf("KDC: Warning: Failed to recreate index: %v", err)
+			}
+		}
+		
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %v", err)
+		}
+		
+		log.Printf("KDC: Successfully made ephemeral_pub_key nullable in distribution_records table")
+	} else {
+		// MySQL/MariaDB: Use ALTER TABLE to modify column
+		// Check if column is already nullable
+		var ephemeralPubKeyNullable bool
+		
+		var ephemeralPubKeyNull string
+		err := kdc.DB.QueryRow(
+			"SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'distribution_records' AND COLUMN_NAME = 'ephemeral_pub_key'",
+		).Scan(&ephemeralPubKeyNull)
+		if err == nil {
+			ephemeralPubKeyNullable = (ephemeralPubKeyNull == "YES")
+		}
+		
+		if ephemeralPubKeyNullable {
+			// Already nullable, nothing to do
+			return nil
+		}
+		
+		// Modify column to allow NULL
+		_, err = kdc.DB.Exec(
+			"ALTER TABLE distribution_records MODIFY COLUMN ephemeral_pub_key BLOB NULL",
+		)
+		if err != nil {
+			return fmt.Errorf("failed to make ephemeral_pub_key nullable: %v", err)
+		}
+		log.Printf("KDC: Made ephemeral_pub_key nullable in distribution_records")
 	}
 	
 	return nil

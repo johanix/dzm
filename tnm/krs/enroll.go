@@ -99,8 +99,9 @@ func calculateUseCryptoV2(supportedCrypto []string) bool {
 // blobFile: Path to enrollment blob file
 // configDir: Directory where config and keys will be written (default: /etc/tdns)
 // notifyAddress: IP:port address where KDC should send NOTIFY messages
+// cryptoBackend: Optional crypto backend to use ("hpke" or "jose"). If empty, uses both if available.
 // Returns: error
-func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
+func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBackend string) error {
 	// 1. Parse enrollment blob file
 	blob, err := kdc.ParseEnrollmentBlob(blobFile)
 	if err != nil {
@@ -117,6 +118,36 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 		return fmt.Errorf("enrollment blob must contain at least one KDC public key (hpke or jose)")
 	}
 
+	// Determine which backends to use based on crypto flag
+	useHpke := false
+	useJose := false
+	
+	if cryptoBackend == "" {
+		// No restriction: use both if available
+		useHpke = hasHpkeKey
+		useJose = hasJoseKey
+	} else if cryptoBackend == "hpke" {
+		// Only HPKE
+		if !hasHpkeKey {
+			return fmt.Errorf("enrollment blob does not contain KDC HPKE public key (required for --crypto hpke)")
+		}
+		useHpke = true
+		useJose = false
+	} else if cryptoBackend == "jose" {
+		// Only JOSE
+		if !hasJoseKey {
+			return fmt.Errorf("enrollment blob does not contain KDC JOSE public key (required for --crypto jose)")
+		}
+		useHpke = false
+		useJose = true
+	} else {
+		return fmt.Errorf("invalid crypto backend: %s (must be 'hpke' or 'jose')", cryptoBackend)
+	}
+
+	if !useHpke && !useJose {
+		return fmt.Errorf("no crypto backend selected (KDC keys available: hpke=%v, jose=%v, requested: %s)", hasHpkeKey, hasJoseKey, cryptoBackend)
+	}
+
 	var hpkePubKey []byte
 	var hpkePrivKey []byte
 	var josePrivKey crypto.PrivateKey
@@ -125,8 +156,8 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	var josePubKeyBytes []byte
 	var supportedCrypto []string
 
-	// Generate HPKE keypair if KDC has HPKE key
-	if hasHpkeKey {
+	// Generate HPKE keypair if requested and KDC has HPKE key
+	if useHpke {
 		hpkePubKey, hpkePrivKey, err = hpke.GenerateKeyPair()
 		if err != nil {
 			return fmt.Errorf("failed to generate HPKE keypair: %v", err)
@@ -135,8 +166,8 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 		log.Printf("KRS: Generated HPKE keypair")
 	}
 
-	// Generate JOSE keypair if KDC has JOSE key
-	if hasJoseKey {
+	// Generate JOSE keypair if requested and KDC has JOSE key
+	if useJose {
 		joseBackend, err := crypto.GetBackend("jose")
 		if err != nil {
 			return fmt.Errorf("failed to get JOSE backend: %v", err)
@@ -188,12 +219,12 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	}
 
 	// Add HPKE pubkey if we generated it
-	if hasHpkeKey {
+	if useHpke {
 		enrollmentReq["hpke_pubkey"] = hex.EncodeToString(hpkePubKey)
 	}
 
 	// Add JOSE pubkey if we generated it
-	if hasJoseKey {
+	if useJose {
 		enrollmentReq["jose_pubkey"] = string(josePubKeyBytes) // JWK JSON
 	}
 
@@ -203,45 +234,40 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	}
 
 	// 5. Encrypt enrollment request using the appropriate KDC public key
-	// Prefer HPKE if available (for backward compatibility), otherwise use JOSE
-	var encryptedReq []byte
+	// Determine which backend to use (prefer HPKE if both available, otherwise use what we have)
 	var encryptionBackend string
+	var kdcPubKeyData []byte
 
-	if hasHpkeKey {
-		// Use HPKE Base mode
-		kdcHpkePubKey, err := hex.DecodeString(blob.KdcHpkePubKey)
+	if useHpke {
+		encryptionBackend = "hpke"
+		if !hasHpkeKey {
+			return fmt.Errorf("KDC HPKE public key not available in enrollment blob (required for --crypto hpke)")
+		}
+		var err error
+		kdcPubKeyData, err = hex.DecodeString(blob.KdcHpkePubKey)
 		if err != nil {
 			return fmt.Errorf("failed to decode KDC HPKE public key: %v", err)
 		}
-		encryptedReq, _, err = hpke.Encrypt(kdcHpkePubKey, nil, reqJSON)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt enrollment request with HPKE: %v", err)
+	} else if useJose {
+		encryptionBackend = "jose"
+		if !hasJoseKey {
+			return fmt.Errorf("KDC JOSE public key not available in enrollment blob (required for --crypto jose)")
 		}
-		encryptionBackend = "hpke"
-		log.Printf("KRS: Encrypted enrollment request using HPKE (length: %d)", len(encryptedReq))
-	} else if hasJoseKey {
-		// Use JOSE encryption
-		kdcJosePubKeyBytes, err := base64.StdEncoding.DecodeString(blob.KdcJosePubKey)
+		var err error
+		kdcPubKeyData, err = base64.StdEncoding.DecodeString(blob.KdcJosePubKey)
 		if err != nil {
 			return fmt.Errorf("failed to decode KDC JOSE public key: %v", err)
 		}
-		joseBackend, err := crypto.GetBackend("jose")
-		if err != nil {
-			return fmt.Errorf("failed to get JOSE backend: %v", err)
-		}
-		kdcJosePubKey, err := joseBackend.ParsePublicKey(kdcJosePubKeyBytes)
-		if err != nil {
-			return fmt.Errorf("failed to parse KDC JOSE public key: %v", err)
-		}
-		encryptedReq, err = joseBackend.Encrypt(kdcJosePubKey, reqJSON)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt enrollment request with JOSE: %v", err)
-		}
-		encryptionBackend = "jose"
-		log.Printf("KRS: Encrypted enrollment request using JOSE (length: %d)", len(encryptedReq))
 	} else {
-		return fmt.Errorf("no KDC public key available for encryption")
+		return fmt.Errorf("no crypto backend selected for encryption")
 	}
+
+	// Use shared encryption function (operation-agnostic, crypto-agnostic)
+	encryptedReq, _, err := tnm.EncryptPayload(reqJSON, kdcPubKeyData, encryptionBackend, supportedCrypto, "enrollment request to KDC")
+	if err != nil {
+		return fmt.Errorf("failed to encrypt enrollment request: %v", err)
+	}
+	log.Printf("KRS: Encrypted enrollment request using %s backend (length: %d)", encryptionBackend, len(encryptedReq))
 
 	// 6. Create CHUNK record with encrypted enrollment request
 	chunk := &core.CHUNK{
@@ -431,7 +457,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	var keyFileAbs string
 
 	// Write HPKE private key if we generated it
-	if hasHpkeKey {
+	if useHpke {
 		hpkeKeyFile := filepath.Join(configDir, fmt.Sprintf("%s.hpke.privatekey", nodeIDNoDot))
 		hpkeKeyContent := fmt.Sprintf(`# KRS HPKE Private Key (X25519)
 # Generated: %s
@@ -461,7 +487,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	}
 
 	// Write JOSE private key if we generated it
-	if hasJoseKey {
+	if useJose {
 		joseKeyFile := filepath.Join(configDir, fmt.Sprintf("%s.jose.privatekey", nodeIDNoDot))
 		// Parse JSON to pretty-print it
 		var joseKeyJSON interface{}
@@ -501,7 +527,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	var kdcJosePubKeyFileAbs string
 
 	// Write KDC HPKE public key to disk if present
-	if hasHpkeKey {
+	if useHpke {
 		kdcHpkePubKeyFile := filepath.Join(configDir, "kdc.hpke.pubkey")
 		kdcHpkePubKeyContent := fmt.Sprintf(`# KDC HPKE Public Key
 # Received during enrollment: %s
@@ -524,7 +550,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	}
 
 	// Write KDC JOSE public key to disk if present
-	if hasJoseKey {
+	if useJose {
 		kdcJosePubKeyBytes, err := base64.StdEncoding.DecodeString(blob.KdcJosePubKey)
 		if err != nil {
 			return fmt.Errorf("failed to decode KDC JOSE public key: %v", err)
@@ -639,8 +665,8 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 				LongTermHpkePrivKey: hpkeKeyFileAbs, // Only set if HPKE key was generated
 				LongTermJosePrivKey: joseKeyFileAbs, // Only set if JOSE key was generated
 				KdcAddress:          blob.KdcEnrollmentAddress,
-				KdcHpkePubKey:      kdcHpkePubKeyFileAbs, // Only set if HPKE key present in blob
-				KdcJosePubKey:      kdcJosePubKeyFileAbs, // Only set if JOSE key present in blob
+				KdcHpkePubKey:      kdcHpkePubKeyFileAbs, // Only set if HPKE key was generated
+				KdcJosePubKey:      kdcJosePubKeyFileAbs, // Only set if JOSE key was generated
 			},
 			ControlZone:     blob.ControlZone,
 			UseCryptoV2:     calculateUseCryptoV2(supportedCrypto),
@@ -657,7 +683,8 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	headerComment := fmt.Sprintf("# This configuration file was auto-generated by krs-cli enroll\n# Generated at: %s\n#\n# WARNING: This file is auto-generated. Manual edits may be overwritten.\n# To regenerate, run: krs-cli enroll --package <blobfile> --configdir <dir>\n#\n", time.Now().Format(time.RFC3339))
 	configWithHeader := []byte(headerComment + string(configYAML))
 
-	if err := os.WriteFile(configFile, configWithHeader, 0644); err != nil {
+	// Write config file with restrictive permissions (0600) since it contains sensitive API keys
+	if err := os.WriteFile(configFile, configWithHeader, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %v", err)
 	}
 		log.Printf("KRS: Wrote configuration file to %s", configFile)
@@ -668,19 +695,20 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string) error {
 	fmt.Printf("\n")
 	fmt.Printf("Configuration written to: %s\n", configDir)
 	fmt.Printf("  - Config file: %s\n", configFile)
-	if hasHpkeKey {
+	if useHpke {
 		fmt.Printf("  - HPKE key: %s\n", hpkeKeyFileAbs)
 	}
-	if hasJoseKey {
+	if useJose {
 		fmt.Printf("  - JOSE key: %s\n", joseKeyFileAbs)
 	}
 	fmt.Printf("  - SIG(0) key: %s\n", sig0KeyFileAbs)
 	fmt.Printf("  - API cert: %s\n", certFileAbs)
-	fmt.Printf("  - API key: %s\n", keyFileAbs)
-	if hasHpkeKey {
+	fmt.Printf("  - API TLS key: %s\n", keyFileAbs)
+	fmt.Printf("  - API key (config): stored in %s (apiserver.apikey)\n", configFile)
+	if useHpke {
 		fmt.Printf("  - KDC HPKE pubkey: %s\n", kdcHpkePubKeyFileAbs)
 	}
-	if hasJoseKey {
+	if useJose {
 		fmt.Printf("  - KDC JOSE pubkey: %s\n", kdcJosePubKeyFileAbs)
 	}
 	fmt.Printf("\n")
@@ -726,7 +754,7 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 	}
 
 	// Create certificate
-	certDER, err := x509.CreateCertificate(nil, &template, &template, privKey.Public(), privKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, privKey.Public(), privKey)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create certificate: %v", err)
 	}

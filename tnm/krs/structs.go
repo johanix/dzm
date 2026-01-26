@@ -31,9 +31,9 @@ type ReceivedKey struct {
 
 // NodeConfig represents the edge node's configuration
 type NodeConfig struct {
-	ID              string    `json:"id"`              // Node ID (must match KDC)
-	LongTermPubKey  []byte    `json:"-"`               // HPKE long-term public key (never sent in API)
-	LongTermPrivKey []byte    `json:"-"`               // HPKE long-term private key (never sent in API)
+	ID                 string    `json:"id"`              // Node ID (must match KDC)
+	LongTermHpkePubKey []byte    `json:"-"`               // HPKE long-term public key (never sent in API)
+	LongTermHpkePrivKey []byte    `json:"-"`               // HPKE long-term private key (never sent in API)
 	KdcAddress      string    `json:"kdc_address"`     // KDC server address (IP:port)
 	ControlZone     string    `json:"control_zone"`   // Control zone name (e.g., "kdc.example.com.")
 	RegisteredAt    time.Time `json:"registered_at"`

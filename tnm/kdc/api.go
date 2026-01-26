@@ -1196,13 +1196,13 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 				return
 			}
 			// Allow nil LongTermPubKey for JOSE-only nodes
-			if req.Node.LongTermPubKey != nil && len(req.Node.LongTermPubKey) != 32 {
-				sendJSONError(w, http.StatusBadRequest, "node.long_term_pub_key must be 32 bytes (X25519) or nil for JOSE-only nodes")
+			if req.Node.LongTermHpkePubKey != nil && len(req.Node.LongTermHpkePubKey) != 32 {
+				sendJSONError(w, http.StatusBadRequest, "node.long_term_hpke_pub_key must be 32 bytes (X25519) or nil for JOSE-only nodes")
 				return
 			}
 			// Require at least one public key (HPKE or JOSE)
-			if (req.Node.LongTermPubKey == nil || len(req.Node.LongTermPubKey) == 0) && (req.Node.LongTermJosePubKey == nil || len(req.Node.LongTermJosePubKey) == 0) {
-				sendJSONError(w, http.StatusBadRequest, "node must include either a 32-byte long_term_pub_key or a JOSE public key")
+			if (req.Node.LongTermHpkePubKey == nil || len(req.Node.LongTermHpkePubKey) == 0) && (req.Node.LongTermJosePubKey == nil || len(req.Node.LongTermJosePubKey) == 0) {
+				sendJSONError(w, http.StatusBadRequest, "node must include either a 32-byte long_term_hpke_pub_key or a JOSE public key")
 				return
 			}
 			if req.Node.State == "" {

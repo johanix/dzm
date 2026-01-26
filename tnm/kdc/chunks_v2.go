@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/go-jose/go-jose/v4"
 	tdns "github.com/johanix/tdns/v2"
@@ -26,27 +27,15 @@ import (
 
 // selectBackendForNode determines which crypto backend to use for a node
 // based on the node's SupportedCrypto field.
+// This is a convenience wrapper around tnm.SelectBackend that works with Node structs.
 // forcedCrypto: if provided ("hpke" or "jose"), forces that backend (if node supports it)
 // Returns the backend name (e.g., "hpke", "jose")
 func selectBackendForNode(node *Node, forcedCrypto string) string {
-	// If forced crypto is specified, use it if the node supports it
-	if forcedCrypto != "" {
-		for _, supported := range node.SupportedCrypto {
-			if supported == forcedCrypto {
-				return forcedCrypto
-			}
-		}
-		// Node doesn't support the forced crypto - fall through to auto-select
-		log.Printf("KDC: Warning: Node %s does not support forced crypto backend %s, auto-selecting instead", node.ID, forcedCrypto)
+	backendName := tnm.SelectBackend(node.SupportedCrypto, forcedCrypto)
+	if forcedCrypto != "" && backendName != forcedCrypto {
+		log.Printf("KDC: Warning: Node %s does not support forced crypto backend %s, auto-selected %s instead", node.ID, forcedCrypto, backendName)
 	}
-	
-	// Use the first supported backend
-	// Later: could have policy (prefer JOSE, fallback to HPKE, etc.)
-	if len(node.SupportedCrypto) > 0 {
-		return node.SupportedCrypto[0]
-	}
-	// Fallback to HPKE if no supported crypto is specified
-	return "hpke"
+	return backendName
 }
 
 // prepareChunksForNodeV2 prepares chunks for a node's distribution event
@@ -126,10 +115,10 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 			return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
 		}
-		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-			return nil, fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
+			return nil, fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
 		}
-		nodePubKey, err = backend.ParsePublicKey(node.LongTermPubKey)
+		nodePubKey, err = backend.ParsePublicKey(node.LongTermHpkePubKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse node HPKE public key: %v", err)
 		}
@@ -146,9 +135,12 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Filter to records for this node (or all nodes if nodeID is empty)
+	// Normalize node IDs for comparison (handle trailing dot differences)
+	nodeIDNormalized := strings.TrimSuffix(nodeID, ".")
 	var nodeRecords []*DistributionRecord
 	for _, record := range records {
-		if record.NodeID == nodeID || record.NodeID == "" {
+		recordNodeIDNormalized := strings.TrimSuffix(record.NodeID, ".")
+		if recordNodeIDNormalized == nodeIDNormalized || record.NodeID == "" {
 			nodeRecords = append(nodeRecords, record)
 		}
 	}
@@ -412,10 +404,10 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	var hmacKey []byte
 	if backendName == "hpke" {
 		// For HPKE, use the X25519 public key directly (32 bytes)
-		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-			return nil, fmt.Errorf("node %s has invalid HPKE public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
+			return nil, fmt.Errorf("node %s has invalid HPKE public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
 		}
-		hmacKey = node.LongTermPubKey
+		hmacKey = node.LongTermHpkePubKey
 	} else if backendName == "jose" {
 		// For JOSE, extract the x-coordinate from the ECDSA P-256 public key (32 bytes)
 		if len(node.LongTermJosePubKey) == 0 {

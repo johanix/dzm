@@ -20,7 +20,6 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // MariaDB driver
 	tnm "github.com/johanix/tdns-nm/tnm"
-	"github.com/johanix/tdns/v2/crypto"
 	_ "github.com/johanix/tdns/v2/crypto/jose" // Auto-register JOSE backend
 	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
@@ -148,7 +147,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id VARCHAR(255) PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
-			long_term_pub_key BLOB,
+			long_term_hpke_pub_key BLOB,
 			long_term_jose_pub_key BLOB,
 			supported_crypto JSON,
 			notify_address VARCHAR(255),
@@ -158,7 +157,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			comment TEXT,
 			INDEX idx_state (state),
 			INDEX idx_last_seen (last_seen),
-			INDEX idx_long_term_pub_key (long_term_pub_key(32))
+			INDEX idx_long_term_hpke_pub_key (long_term_hpke_pub_key(32))
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		// DNSSEC keys table
@@ -193,7 +192,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			key_id VARCHAR(255) NULL,
 			node_id VARCHAR(255),
 			encrypted_key BLOB NOT NULL,
-			ephemeral_pub_key BLOB NOT NULL,
+			ephemeral_pub_key BLOB NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at TIMESTAMP NULL,
 			status ENUM('pending', 'delivered', 'active', 'revoked', 'completed') NOT NULL DEFAULT 'pending',
@@ -420,7 +419,7 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			long_term_pub_key BLOB UNIQUE,
+			long_term_hpke_pub_key BLOB UNIQUE,
 			long_term_jose_pub_key BLOB,
 			supported_crypto TEXT,
 			notify_address TEXT,
@@ -468,7 +467,7 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			key_id TEXT NULL,
 			node_id TEXT,
 			encrypted_key BLOB NOT NULL,
-			ephemeral_pub_key BLOB NOT NULL,
+			ephemeral_pub_key BLOB NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at DATETIME,
 			status TEXT NOT NULL DEFAULT 'pending',
@@ -643,6 +642,18 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 	// This allows node_components confirmations to use NULL (they're not about zones/keys)
 	if err := kdc.migrateMakeDistributionConfirmationsZoneKeyNullable(); err != nil {
 		log.Printf("KDC: Warning: Failed to make zone_name/key_id nullable in distribution_confirmations: %v", err)
+	}
+	
+	// Migrate: Make long_term_hpke_pub_key nullable in nodes table
+	// This allows JOSE-only nodes to have NULL for LongTermPubKey
+	if err := kdc.migrateMakeLongTermPubKeyNullable(); err != nil {
+		log.Printf("KDC: Warning: Failed to make long_term_hpke_pub_key nullable: %v", err)
+	}
+	
+	// Migrate: Make ephemeral_pub_key nullable in distribution_records table
+	// This allows JOSE backend distributions to have NULL for ephemeral_pub_key (JWE embeds it in the header)
+	if err := kdc.migrateMakeEphemeralPubKeyNullable(); err != nil {
+		log.Printf("KDC: Warning: Failed to make ephemeral_pub_key nullable: %v", err)
 	}
 	
 	// Ensure default service/component exist
@@ -1313,9 +1324,9 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 	var supportedCryptoJSON sql.NullString
 	var josePubKey []byte
 	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 		nodeIDFQDN,
-	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+	).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Try without trailing dot (for legacy data)
@@ -1323,9 +1334,9 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 				nodeIDNoDot := strings.TrimSuffix(nodeIDFQDN, ".")
 				var josePubKey2 []byte
 				err2 := kdc.DB.QueryRow(
-					"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+					"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 					nodeIDNoDot,
-				).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey2, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+				).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey2, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 				if err2 == nil {
 					josePubKey = josePubKey2
 				}
@@ -1360,7 +1371,7 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 
 // GetAllNodes retrieves all nodes
 func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
-	rows, err := kdc.DB.Query("SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
+	rows, err := kdc.DB.Query("SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query nodes: %v", err)
 	}
@@ -1372,7 +1383,7 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 		var notifyAddr sql.NullString
 		var supportedCryptoJSON sql.NullString
 		var josePubKey []byte
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
@@ -1404,7 +1415,7 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 // GetActiveNodes retrieves all active (online) nodes
 func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 	rows, err := kdc.DB.Query(
-		"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
+		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query active nodes: %v", err)
@@ -1417,7 +1428,7 @@ func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 		var notifyAddr sql.NullString
 		var supportedCryptoJSON sql.NullString
 		var josePubKey []byte
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
@@ -1448,9 +1459,9 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 		return nil, nil // Cannot query by nil/empty key
 	}
 	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_pub_key = ?",
+		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_hpke_pub_key = ?",
 		pubKey,
-	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+	).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // No node found with this public key
@@ -1475,8 +1486,8 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 // AddNode adds a new node
 func (kdc *KdcDB) AddNode(node *Node) error {
 	// Check if a node with this public key already exists (only if HPKE key is present)
-	if node.LongTermPubKey != nil && len(node.LongTermPubKey) > 0 {
-		existingNode, err := kdc.GetNodeByPublicKey(node.LongTermPubKey)
+	if node.LongTermHpkePubKey != nil && len(node.LongTermHpkePubKey) > 0 {
+		existingNode, err := kdc.GetNodeByPublicKey(node.LongTermHpkePubKey)
 		if err != nil {
 			return fmt.Errorf("failed to check for existing node: %v", err)
 		}
@@ -1496,8 +1507,8 @@ func (kdc *KdcDB) AddNode(node *Node) error {
 	}
 
 	_, err = kdc.DB.Exec(
-		"INSERT INTO nodes (id, name, long_term_pub_key, long_term_jose_pub_key, supported_crypto, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		node.ID, node.Name, node.LongTermPubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
+		"INSERT INTO nodes (id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		node.ID, node.Name, node.LongTermHpkePubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
 	)
 	if err != nil {
 		// Check for unique constraint violation (in case the constraint wasn't in the schema)
@@ -1522,8 +1533,8 @@ func (kdc *KdcDB) UpdateNode(node *Node) error {
 	}
 
 	_, err = kdc.DB.Exec(
-		"UPDATE nodes SET name = ?, long_term_pub_key = ?, long_term_jose_pub_key = ?, supported_crypto = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
-		node.Name, node.LongTermPubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.NotifyAddress, node.State, node.Comment, node.ID,
+		"UPDATE nodes SET name = ?, long_term_hpke_pub_key = ?, long_term_jose_pub_key = ?, supported_crypto = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
+		node.Name, node.LongTermHpkePubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.NotifyAddress, node.State, node.Comment, node.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update node: %v", err)
@@ -1776,6 +1787,14 @@ func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 	} else {
 		keyID = record.KeyID
 	}
+	
+	// Convert nil/empty ephemeral_pub_key to NULL (for JOSE backend)
+	var ephemeralPub interface{}
+	if record.EphemeralPubKey == nil || len(record.EphemeralPubKey) == 0 {
+		ephemeralPub = nil
+	} else {
+		ephemeralPub = record.EphemeralPubKey
+	}
 
 	// Serialize payload to JSON if present
 	var payloadJSON interface{}
@@ -1800,7 +1819,7 @@ func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id, operation, payload)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
-		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
+		ephemeralPub, record.ExpiresAt, record.Status, record.DistributionID,
 		operation, payloadJSON,
 	)
 	if err != nil {
@@ -1822,6 +1841,14 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 		keyID = nil
 	} else {
 		keyID = record.KeyID
+	}
+	
+	// Convert nil/empty ephemeral_pub_key to NULL (for JOSE backend)
+	var ephemeralPub interface{}
+	if record.EphemeralPubKey == nil || len(record.EphemeralPubKey) == 0 {
+		ephemeralPub = nil
+	} else {
+		ephemeralPub = record.EphemeralPubKey
 	}
 
 	// Serialize payload to JSON if present
@@ -1847,7 +1874,7 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 			(id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, expires_at, status, distribution_id, operation, payload)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID, zoneName, keyID, record.NodeID, record.EncryptedKey,
-		record.EphemeralPubKey, record.ExpiresAt, record.Status, record.DistributionID,
+		ephemeralPub, record.ExpiresAt, record.Status, record.DistributionID,
 		operation, payloadJSON,
 	)
 	if err != nil {
@@ -2112,6 +2139,16 @@ func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) 
 	// Determine content type for each distribution based on operations
 	for distID, summary := range distMap {
 		ops := operationMap[distID]
+
+		// Store list of operations for display
+		summary.Operations = make([]string, 0, len(ops))
+		for op := range ops {
+			summary.Operations = append(summary.Operations, op)
+		}
+		// Sort operations for consistent output
+		if len(summary.Operations) > 0 {
+			sort.Strings(summary.Operations)
+		}
 
 		// Categorize operations
 		hasNodeOps := ops["update_components"]
@@ -2416,59 +2453,17 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, force
 		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
 
-	// Select crypto backend
-	backendName := selectBackendForNode(node, forcedCrypto)
-	
-	// Generate random 32-byte nonce
+	// Generate random 32-byte nonce (this is the plaintext payload for ping operation)
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("failed to generate nonce: %v", err)
 	}
 
-	// Encrypt the nonce using the selected backend
-	var ciphertext []byte
-	var ephemeralPub []byte
-	
-	if backendName == "hpke" {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-			return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
-		}
-		// Use HPKE directly
-		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-			return "", fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-		}
-		ciphertext, ephemeralPub, err = hpke.Encrypt(node.LongTermPubKey, nil, nonce)
-		if err != nil {
-			return "", fmt.Errorf("failed to encrypt nonce with HPKE: %v", err)
-		}
-	} else if backendName == "jose" {
-		// Use JOSE via crypto abstraction layer
-		if len(node.LongTermJosePubKey) == 0 {
-			return "", fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE ping)", nodeID)
-		}
-		joseBackend, err2 := crypto.GetBackend("jose")
-		if err2 != nil {
-			return "", fmt.Errorf("failed to get JOSE backend: %v", err2)
-		}
-		// Parse JOSE public key
-		nodeJosePubKey, err2 := joseBackend.ParsePublicKey(node.LongTermJosePubKey)
-		if err2 != nil {
-			return "", fmt.Errorf("failed to parse node JOSE public key: %v", err2)
-		}
-		// Encrypt nonce using JOSE
-		ciphertext, err = joseBackend.Encrypt(nodeJosePubKey, nonce)
-		if err != nil {
-			return "", fmt.Errorf("failed to encrypt nonce with JOSE: %v", err)
-		}
-		// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
-		// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
-		// so there's no separate ephemeralPubKey field needed. The recipient extracts it
-		// from the JWE header during decryption. Set to empty to indicate this difference.
-		ephemeralPub = []byte{}
-		log.Printf("KDC: Encrypted ping nonce using JOSE backend for node %s", nodeID)
-	} else {
-		return "", fmt.Errorf("unsupported crypto backend: %s", backendName)
+	// Encrypt the nonce using the generic encryption helper
+	// This abstracts crypto backend selection and encryption from the operation logic
+	ciphertext, ephemeralPub, backendName, err := EncryptPayloadForNode(node, nonce, forcedCrypto)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt ping nonce: %v", err)
 	}
 
 	// Create payload with nonce (for validation on confirmation), timestamp, and crypto backend
@@ -2552,55 +2547,13 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 		return "", fmt.Errorf("failed to get node: %v", err)
 	}
 
-	// Select crypto backend
-	backendName := selectBackendForNode(node, "")
-	
-	// Encrypt the key ID (so the node can verify it's deleting the right key)
-	var ciphertext []byte
-	var ephemeralPub []byte
-	
-	if backendName == "hpke" {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-			return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
-		}
-		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-			return "", fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-		}
-		// Encrypt using HPKE
-		ciphertext, ephemeralPub, err = hpke.Encrypt(node.LongTermPubKey, nil, []byte(keyID))
-		if err != nil {
-			return "", fmt.Errorf("failed to encrypt key ID with HPKE: %v", err)
-		}
-		log.Printf("KDC: Encrypted delete key ID using HPKE backend for node %s", nodeID)
-	} else if backendName == "jose" {
-		// Use JOSE via crypto abstraction layer
-		if len(node.LongTermJosePubKey) == 0 {
-			return "", fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE key deletion)", nodeID)
-		}
-		joseBackend, err2 := crypto.GetBackend("jose")
-		if err2 != nil {
-			return "", fmt.Errorf("failed to get JOSE backend: %v", err2)
-		}
-		// Parse JOSE public key
-		nodeJosePubKey, err2 := joseBackend.ParsePublicKey(node.LongTermJosePubKey)
-		if err2 != nil {
-			return "", fmt.Errorf("failed to parse node JOSE public key: %v", err2)
-		}
-		// Encrypt key ID using JOSE
-		ciphertext, err = joseBackend.Encrypt(nodeJosePubKey, []byte(keyID))
-		if err != nil {
-			return "", fmt.Errorf("failed to encrypt key ID with JOSE: %v", err)
-		}
-		// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
-		// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
-		// so there's no separate ephemeralPubKey field needed. The recipient extracts it
-		// from the JWE header during decryption. Set to empty to indicate this difference.
-		ephemeralPub = []byte{}
-		log.Printf("KDC: Encrypted delete key ID using JOSE backend for node %s", nodeID)
-	} else {
-		return "", fmt.Errorf("unsupported crypto backend: %s", backendName)
+	// Encrypt the key ID (plaintext payload for delete_key operation)
+	// This abstracts crypto backend selection and encryption from the operation logic
+	ciphertext, ephemeralPub, backendName, err := EncryptPayloadForNode(node, []byte(keyID), "")
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt delete key ID: %v", err)
 	}
+	log.Printf("KDC: Encrypted delete key ID using %s backend for node %s", backendName, nodeID)
 
 	// Create payload with reason, confirmation flag, and crypto backend
 	payload := map[string]interface{}{
@@ -3551,9 +3504,6 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 		return "", fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
 	
-	// Select crypto backend
-	backendName := selectBackendForNode(node, "")
-	
 	// Components list is now passed as parameter (may include pending changes)
 	
 	// Sort components for consistent output
@@ -3579,51 +3529,13 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 	
 	log.Printf("KDC: CreateNodeComponentsDistribution: Creating distribution for node %s with %d components: %v", nodeID, len(components), components)
 	
-	// Encrypt the component list using the selected backend
-	var ciphertext []byte
-	var ephemeralPub []byte
-	
-	if backendName == "hpke" {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-			return "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
-		}
-		if node.LongTermPubKey == nil || len(node.LongTermPubKey) != 32 {
-			return "", fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
-		}
-		// Encrypt using HPKE
-		ciphertext, ephemeralPub, err = hpke.Encrypt(node.LongTermPubKey, nil, componentsJSON)
-		if err != nil {
-			return "", fmt.Errorf("failed to encrypt components with HPKE: %v", err)
-		}
-	} else if backendName == "jose" {
-		// Use JOSE via crypto abstraction layer
-		if len(node.LongTermJosePubKey) == 0 {
-			return "", fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE component distribution)", nodeID)
-		}
-		joseBackend, err2 := crypto.GetBackend("jose")
-		if err2 != nil {
-			return "", fmt.Errorf("failed to get JOSE backend: %v", err2)
-		}
-		// Parse JOSE public key
-		nodeJosePubKey, err2 := joseBackend.ParsePublicKey(node.LongTermJosePubKey)
-		if err2 != nil {
-			return "", fmt.Errorf("failed to parse node JOSE public key: %v", err2)
-		}
-		// Encrypt components using JOSE
-		ciphertext, err = joseBackend.Encrypt(nodeJosePubKey, componentsJSON)
-		if err != nil {
-			return "", fmt.Errorf("failed to encrypt components with JOSE: %v", err)
-		}
-		// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
-		// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
-		// so there's no separate ephemeralPubKey field needed. The recipient extracts it
-		// from the JWE header during decryption. Set to empty to indicate this difference.
-		ephemeralPub = []byte{}
-		log.Printf("KDC: Encrypted component list using JOSE backend for node %s", nodeID)
-	} else {
-		return "", fmt.Errorf("unsupported crypto backend: %s", backendName)
+	// Encrypt the component list (plaintext payload for update_components operation)
+	// This abstracts crypto backend selection and encryption from the operation logic
+	ciphertext, ephemeralPub, backendName, err := EncryptPayloadForNode(node, componentsJSON, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt components: %v", err)
 	}
+	log.Printf("KDC: Encrypted component list using %s backend for node %s", backendName, nodeID)
 	
 	// Generate a UNIQUE distribution ID using monotonic counter
 	// This ensures that purged distributions can never be reused

@@ -131,16 +131,21 @@ sending an enrollment UPDATE to the KDC, and creating the KRS configuration file
 
 This command:
 1. Parses the enrollment blob file
-2. Generates HPKE and SIG(0) keypairs
-3. Creates and sends an encrypted enrollment UPDATE to the KDC
-4. Processes the enrollment confirmation
-5. Writes configuration file and key files to the config directory
+2. Generates HPKE and/or JOSE keypairs (based on KDC capabilities and --crypto flag)
+3. Generates SIG(0) keypair
+4. Creates and sends an encrypted enrollment UPDATE to the KDC
+5. Processes the enrollment confirmation
+6. Writes configuration file and key files to the config directory
 
 The default config directory is /etc/tdns. Use --configdir to specify a different directory.
 
 The --notify-address flag is required and specifies the IP:port address where the KDC
 should send NOTIFY messages. This should match the address where the KRS DNS engine
 will listen (typically the same as the DNS engine address in the generated config).
+
+The --crypto flag is optional and can be used to restrict enrollment to a specific
+crypto backend ('hpke' or 'jose'). If not specified, both backends will be used if
+available in the enrollment blob.
 
 This command does not require a config file and will skip config initialization.`,
 	// Override PersistentPreRun to skip config initialization
@@ -169,6 +174,12 @@ This command does not require a config file and will skip config initialization.
 			log.Fatalf("Error: invalid notify address format '%s': %v (expected format: IP:port or hostname:port)", notifyAddress, err)
 		}
 
+		// Get crypto backend flag (optional)
+		cryptoBackend, _ := cmd.Flags().GetString("crypto")
+		if cryptoBackend != "" && cryptoBackend != "hpke" && cryptoBackend != "jose" {
+			log.Fatalf("Error: --crypto must be either 'hpke' or 'jose' (got: %s)", cryptoBackend)
+		}
+
 		// Verify config directory exists
 		if info, err := os.Stat(configDir); err != nil {
 			if os.IsNotExist(err) {
@@ -180,7 +191,7 @@ This command does not require a config file and will skip config initialization.
 		}
 
 		// Call enrollment function from krs package
-		if err := krs.RunEnroll(packageFile, configDir, notifyAddress); err != nil {
+		if err := krs.RunEnroll(packageFile, configDir, notifyAddress, cryptoBackend); err != nil {
 			log.Fatalf("Enrollment failed: %v", err)
 		}
 	},
@@ -924,6 +935,7 @@ func init() {
 	KrsEnrollCmd.Flags().String("configdir", "", "Config directory (default: /etc/tdns)")
 	KrsEnrollCmd.Flags().String("notify-address", "", "Notify address (IP:port) where KDC should send NOTIFY messages (required)")
 	KrsEnrollCmd.MarkFlagRequired("notify-address")
+	KrsEnrollCmd.Flags().String("crypto", "", "Crypto backend to use: 'hpke' or 'jose' (optional, defaults to both if available)")
 }
 
 // formatDateTime formats an ISO 8601 datetime string to "year-mo-dy hr:min:sec"

@@ -418,7 +418,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		return returnError(dns.RcodeRefused, fmt.Sprintf("Enrollment token validation failed: %v", err), "", hpkePubKey, kdcHpkeKeys)
 	}
 
-	// 8. Validate timestamp (within 5 minutes)
+	// 8. Validate timestamp (within configured window, default 5 minutes)
 	reqTimestamp, err := time.Parse(time.RFC3339, enrollmentReq.Timestamp)
 	if err != nil {
 		log.Printf("KDC: Invalid timestamp format: %v", err)
@@ -426,9 +426,10 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	}
 
 	now := time.Now()
-	if now.Sub(reqTimestamp) > 5*time.Minute || reqTimestamp.Sub(now) > 5*time.Minute {
-		log.Printf("KDC: Enrollment request timestamp too old or too far in future: %s", enrollmentReq.Timestamp)
-		return returnError(dns.RcodeRefused, fmt.Sprintf("Enrollment request timestamp out of range (must be within 5 minutes): %s", enrollmentReq.Timestamp), token.NodeID, hpkePubKey, kdcHpkeKeys)
+	window := kdcConf.GetEnrollmentExpirationWindow()
+	if now.Sub(reqTimestamp) > window || reqTimestamp.Sub(now) > window {
+		log.Printf("KDC: Enrollment request timestamp too old or too far in future: %s (window: %v)", enrollmentReq.Timestamp, window)
+		return returnError(dns.RcodeRefused, fmt.Sprintf("Enrollment request timestamp out of range (must be within %v): %s", window, enrollmentReq.Timestamp), token.NodeID, hpkePubKey, kdcHpkeKeys)
 	}
 
 	// 9. Validate keys - at least one crypto backend must be provided
@@ -499,7 +500,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	node := &Node{
 		ID:                  nodeID,
 		Name:                nodeID, // Use node ID as name initially
-		LongTermPubKey:      nodeLongTermPubKey,
+		LongTermHpkePubKey:      nodeLongTermPubKey,
 		LongTermJosePubKey:  nodeLongTermJosePubKey,
 		SupportedCrypto:     supportedCrypto,
 		Sig0PubKey:          enrollmentReq.Sig0PubKey,
@@ -542,13 +543,34 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		return w.WriteMsg(m)
 	}
 
-	// Encrypt confirmation using the same backend that was used for the request
+	// Encrypt confirmation using the backend that the node actually supports
+	// (not necessarily the same as what was used to encrypt the request)
+	// Prefer HPKE if node supports it, otherwise use JOSE
 	var encryptedConfirmation []byte
-	if encryptionBackend == "hpke" {
+	confirmationBackend := ""
+	if len(supportedCrypto) > 0 {
+		// Use the first supported backend (prefer HPKE if both available)
+		for _, backend := range supportedCrypto {
+			if backend == "hpke" {
+				confirmationBackend = "hpke"
+				break
+			}
+		}
+		if confirmationBackend == "" && len(supportedCrypto) > 0 {
+			confirmationBackend = supportedCrypto[0]
+		}
+	}
+	
+	if confirmationBackend == "hpke" {
 		// Encrypt using HPKE Auth mode
 		// KDC's private key (sender authentication), node's HPKE public key (recipient encryption)
 		if kdcHpkeKeys == nil {
 			log.Printf("KDC: Error: HPKE backend selected but kdcHpkeKeys is nil")
+			m.SetRcode(r, dns.RcodeServerFailure)
+			return w.WriteMsg(m)
+		}
+		if hpkePubKey == nil || len(hpkePubKey) == 0 {
+			log.Printf("KDC: Error: Node does not have HPKE public key but HPKE backend was selected")
 			m.SetRcode(r, dns.RcodeServerFailure)
 			return w.WriteMsg(m)
 		}
@@ -559,7 +581,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 			return w.WriteMsg(m)
 		}
 		log.Printf("KDC: Encrypted enrollment confirmation using HPKE")
-	} else if encryptionBackend == "jose" {
+	} else if confirmationBackend == "jose" {
 		// Encrypt using JOSE
 		joseBackend, err2 := crypto.GetBackend("jose")
 		if err2 != nil {
@@ -582,7 +604,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		}
 		log.Printf("KDC: Encrypted enrollment confirmation using JOSE")
 	} else {
-		log.Printf("KDC: Unknown encryption backend: %s", encryptionBackend)
+		log.Printf("KDC: Error: No supported crypto backend found for confirmation encryption (supported: %v)", supportedCrypto)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		return w.WriteMsg(m)
 	}

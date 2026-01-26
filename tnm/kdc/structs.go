@@ -94,7 +94,7 @@ const (
 type Node struct {
 	ID                 string     `json:"id"`              // Unique identifier for the node
 	Name               string     `json:"name"`            // Human-readable name
-	LongTermPubKey     []byte     `json:"long_term_pub_key"` // HPKE long-term public key (32 bytes, X25519)
+	LongTermHpkePubKey []byte     `json:"long_term_hpke_pub_key"` // HPKE long-term public key (32 bytes, X25519)
 	LongTermJosePubKey []byte     `json:"long_term_jose_pub_key,omitempty"` // JOSE long-term public key (JWK JSON bytes)
 	SupportedCrypto    []string   `json:"supported_crypto,omitempty"` // List of supported crypto backends (e.g., ["hpke", "jose"])
 	Sig0PubKey         string     `json:"sig0_pub_key,omitempty"` // SIG(0) public key (DNSKEY RR format string)
@@ -207,6 +207,7 @@ type DistributionSummaryInfo struct {
 	Nodes          []string          `json:"nodes"`          // Nodes this distribution applies to
 	Zones          []string          `json:"zones"`          // Zones in this distribution
 	ContentType    string            `json:"content_type"`   // node_operations, key_operations, mgmt_operations, or mixed_operations
+	Operations     []string          `json:"operations"`     // List of operation types (e.g., "ping", "roll_key", "delete_key", "update_components")
 	ZSKCount       int               `json:"zsk_count"`     // Number of ZSK keys
 	KSKCount       int               `json:"ksk_count"`     // Number of KSK keys
 	Keys           map[string]string `json:"keys"`          // Map of zone -> key_id (for verbose mode)
