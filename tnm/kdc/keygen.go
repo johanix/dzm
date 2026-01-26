@@ -93,17 +93,17 @@ func (kdc *KdcDB) GenerateDNSSECKey(zoneName string, keyType KeyType, algorithm 
 
 	// Create DNSSECKey struct
 	key := &DNSSECKey{
-		ID:        keyIDStr,
-		ZoneName:  zoneName,
-		KeyType:   keyType,
-		KeyID:     keyID,
-		Algorithm: algorithm,
-		Flags:     dnskey.Flags,
-		PublicKey: dnskey.String(),        // DNSKEY RR string
-		PrivateKey: []byte(privkeyPEM),     // PEM-encoded private key
-		State:     KeyStateCreated,
-		CreatedAt: time.Now(),
-		Comment:   comment,
+		ID:         keyIDStr,
+		ZoneName:   zoneName,
+		KeyType:    keyType,
+		KeyID:      keyID,
+		Algorithm:  algorithm,
+		Flags:      dnskey.Flags,
+		PublicKey:  dnskey.String(),    // DNSKEY RR string
+		PrivateKey: []byte(privkeyPEM), // PEM-encoded private key
+		State:      KeyStateCreated,
+		CreatedAt:  time.Now(),
+		Comment:    comment,
 	}
 
 	log.Printf("Generated %s key for zone %s: KeyID=%d, Algorithm=%d, Flags=%d",
@@ -134,4 +134,3 @@ func privateKeyToPEM(privkey crypto.PrivateKey) (string, error) {
 	pemBytes := pem.EncodeToMemory(pemBlock)
 	return string(pemBytes), nil
 }
-

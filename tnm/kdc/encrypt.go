@@ -73,18 +73,18 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 
 	// Store the distribution record in the database
 	distRecord := &DistributionRecord{
-		ID:             distRecordIDHex,
-		ZoneName:       key.ZoneName,
-		KeyID:          key.ID,
-		NodeID:         node.ID,
-		EncryptedKey:   ciphertext,
+		ID:              distRecordIDHex,
+		ZoneName:        key.ZoneName,
+		KeyID:           key.ID,
+		NodeID:          node.ID,
+		EncryptedKey:    ciphertext,
 		EphemeralPubKey: ephemeralPub,
-		CreatedAt:      time.Now(),
-		ExpiresAt:      expiresAt,
-		Status:         hpke.DistributionStatusPending,
-		DistributionID: distID,
-		Operation:      "roll_key",
-		Payload:        make(map[string]interface{}),
+		CreatedAt:       time.Now(),
+		ExpiresAt:       expiresAt,
+		Status:          hpke.DistributionStatusPending,
+		DistributionID:  distID,
+		Operation:       "roll_key",
+		Payload:         make(map[string]interface{}),
 	}
 
 	if err := kdc.AddDistributionRecord(distRecord); err != nil {
@@ -93,4 +93,3 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 
 	return ciphertext, ephemeralPub, distID, nil
 }
-

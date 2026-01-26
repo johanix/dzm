@@ -140,4 +140,3 @@ func GenerateKeyID(algorithm string, publicKeyBytes []byte) string {
 	// Use first 4 bytes (8 hex chars) for a shorter, still collision-resistant keyid
 	return fmt.Sprintf("%s_%x", algorithm, hash[:4])
 }
-

@@ -453,7 +453,7 @@ func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 	if err != nil {
 		return fmt.Errorf("failed to check for existing key: %v", err)
 	}
-	
+
 	if existingKey != nil {
 		// Key with same ID exists - compare them
 		if compareKeys(existingKey, key) {
@@ -462,7 +462,7 @@ func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 			return nil
 		} else {
 			// Keys are different - this is an error (key ID collision or compromise)
-			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise", 
+			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise",
 				key.KeyID, key.ZoneName, existingKey.Algorithm, key.Algorithm, existingKey.Flags, key.Flags)
 		}
 	}
@@ -523,7 +523,7 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 	if err != nil {
 		return fmt.Errorf("failed to check for existing key: %v", err)
 	}
-	
+
 	if existingKey != nil {
 		// Key with same ID exists - compare them
 		if compareKeys(existingKey, key) {
@@ -532,7 +532,7 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 			return nil
 		} else {
 			// Keys are different - this is an error (key ID collision or compromise)
-			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise", 
+			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise",
 				key.KeyID, key.ZoneName, existingKey.Algorithm, key.Algorithm, existingKey.Flags, key.Flags)
 		}
 	}
@@ -675,8 +675,8 @@ func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
 		if err != nil {
 			// Check if error is "duplicate column" (column already exists - race condition)
 			if !strings.Contains(err.Error(), "duplicate column") &&
-			   !strings.Contains(err.Error(), "already exists") &&
-			   !strings.Contains(err.Error(), "Duplicate column name") {
+				!strings.Contains(err.Error(), "already exists") &&
+				!strings.Contains(err.Error(), "Duplicate column name") {
 				return fmt.Errorf("failed to add retire_time column: %v", err)
 			}
 		} else {
@@ -781,21 +781,21 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 		return fmt.Errorf("failed to check node_config table schema: %v", err)
 	}
 	defer rows.Close()
-	
+
 	// Scan table info to detect column names and nullability
 	var hasOldPubKey, hasOldPrivKey, hasNewPubKey, hasNewPrivKey bool
 	var oldPubKeyNullable, oldPrivKeyNullable, newPubKeyNullable, newPrivKeyNullable bool
-	
+
 	for rows.Next() {
 		var cid int
 		var name, dataType string
 		var notNull int
 		var defaultValue, pk interface{}
-		
+
 		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
 			continue
 		}
-		
+
 		// Check for old column names
 		if name == "long_term_pub_key" {
 			hasOldPubKey = true
@@ -805,7 +805,7 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 			hasOldPrivKey = true
 			oldPrivKeyNullable = (notNull == 0)
 		}
-		
+
 		// Check for new column names
 		if name == "long_term_hpke_pub_key" {
 			hasNewPubKey = true
@@ -816,27 +816,27 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 			newPrivKeyNullable = (notNull == 0)
 		}
 	}
-	
+
 	// Determine if migration is needed
 	needsRename := hasOldPubKey || hasOldPrivKey
 	needsNullable := (hasNewPubKey && !newPubKeyNullable) || (hasNewPrivKey && !newPrivKeyNullable) ||
-	                 (hasOldPubKey && !oldPubKeyNullable) || (hasOldPrivKey && !oldPrivKeyNullable)
-	
+		(hasOldPubKey && !oldPubKeyNullable) || (hasOldPrivKey && !oldPrivKeyNullable)
+
 	if !needsRename && !needsNullable {
 		// Already has correct column names and nullable, nothing to do
 		return nil
 	}
-	
+
 	// Need to rebuild table to rename columns and/or make them nullable
 	log.Printf("KRS: Recreating node_config table to rename columns and make HPKE keys nullable")
-	
+
 	// Start transaction
 	tx, err := krs.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
 	defer tx.Rollback()
-	
+
 	// Create new table with correct column names and nullable keys
 	_, err = tx.Exec(`
 		CREATE TABLE node_config_new (
@@ -851,7 +851,7 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 	if err != nil {
 		return fmt.Errorf("failed to create new node_config table: %v", err)
 	}
-	
+
 	// Copy all data from old table to new table (handle both old and new column names)
 	// Determine which columns exist in the old table
 	var oldPubKeyCol, oldPrivKeyCol string
@@ -869,7 +869,7 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 	} else {
 		oldPrivKeyCol = "NULL"
 	}
-	
+
 	_, err = tx.Exec(fmt.Sprintf(`
 		INSERT INTO node_config_new (id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen)
 		SELECT id, %s, %s, kdc_address, control_zone, registered_at, last_seen
@@ -877,25 +877,24 @@ func (krs *KrsDB) migrateMakeNodeConfigKeysNullable() error {
 	if err != nil {
 		return fmt.Errorf("failed to copy data to new table: %v", err)
 	}
-	
+
 	// Drop old table
 	_, err = tx.Exec("DROP TABLE node_config")
 	if err != nil {
 		return fmt.Errorf("failed to drop old table: %v", err)
 	}
-	
+
 	// Rename new table
 	_, err = tx.Exec("ALTER TABLE node_config_new RENAME TO node_config")
 	if err != nil {
 		return fmt.Errorf("failed to rename new table: %v", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %v", err)
 	}
-	
+
 	log.Printf("KRS: Successfully renamed and made long_term_hpke_pub_key and long_term_hpke_priv_key nullable in node_config table")
 	return nil
 }
-

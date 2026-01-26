@@ -30,15 +30,15 @@ type KdcDebugPost struct {
 
 // KdcDebugResponse represents a response from the KDC debug API
 type KdcDebugResponse struct {
-	Time           time.Time         `json:"time"`
-	Error          bool              `json:"error,omitempty"`
-	ErrorMsg       string            `json:"error_msg,omitempty"`
-	Msg            string            `json:"msg,omitempty"`
-	DistributionID string            `json:"distribution_id,omitempty"`
-	ChunkCount     uint16            `json:"chunk_count,omitempty"`
-	Distributions  []string          `json:"distributions,omitempty"` // For list-distributions (deprecated, use DistributionInfos)
+	Time              time.Time          `json:"time"`
+	Error             bool               `json:"error,omitempty"`
+	ErrorMsg          string             `json:"error_msg,omitempty"`
+	Msg               string             `json:"msg,omitempty"`
+	DistributionID    string             `json:"distribution_id,omitempty"`
+	ChunkCount        uint16             `json:"chunk_count,omitempty"`
+	Distributions     []string           `json:"distributions,omitempty"`      // For list-distributions (deprecated, use DistributionInfos)
 	DistributionInfos []DistributionInfo `json:"distribution_infos,omitempty"` // For list-distributions (with node info)
-	ChunkSize      int               `json:"chunk_size,omitempty"`   // For get/set-chunk-size
+	ChunkSize         int                `json:"chunk_size,omitempty"`         // For get/set-chunk-size
 }
 
 // APIKdcDebug handles debug API requests
@@ -180,4 +180,3 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 		}
 	}
 }
-

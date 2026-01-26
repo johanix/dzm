@@ -59,7 +59,7 @@ func init() {
 
 	// Add all KRS commands directly to root (no "krs" prefix needed)
 	// Note: bootstrap command is added separately since it doesn't require config initialization
-	rootCmd.AddCommand(cli.KrsDnssecCmd, cli.KrsConfigCmd, cli.KrsQueryCmd, cli.KrsDebugCmd, 
+	rootCmd.AddCommand(cli.KrsDnssecCmd, cli.KrsConfigCmd, cli.KrsQueryCmd, cli.KrsDebugCmd,
 		cli.PingCmd, cli.DaemonCmd, cli.KrsEnrollCmd, cli.KrsComponentsCmd)
 }
 
@@ -169,4 +169,3 @@ func main() {
 	tdns.Globals.App.Date = appDate
 	Execute()
 }
-

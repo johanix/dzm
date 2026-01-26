@@ -38,11 +38,11 @@ import (
 
 // BootstrapConfig represents the configuration generated during bootstrap
 type BootstrapConfig struct {
-	Service    ServiceConfig    `yaml:"service"`
-	Log        LogConfig        `yaml:"log"`
-	ApiServer  ApiServerConfig  `yaml:"apiserver"`
-	DnsEngine  DnsEngineConfig  `yaml:"dnsengine"`
-	Krs        KrsBootstrapConf `yaml:"krs"`
+	Service   ServiceConfig    `yaml:"service"`
+	Log       LogConfig        `yaml:"log"`
+	ApiServer ApiServerConfig  `yaml:"apiserver"`
+	DnsEngine DnsEngineConfig  `yaml:"dnsengine"`
+	Krs       KrsBootstrapConf `yaml:"krs"`
 }
 
 type ServiceConfig struct {
@@ -72,10 +72,10 @@ type DnsEngineConfig struct {
 }
 
 type KrsBootstrapConf struct {
-	Database      tnm.KrsDatabaseConf `yaml:"database"`
-	Node          tnm.NodeConf         `yaml:"node"`
-	ControlZone   string               `yaml:"control_zone"`
-	UseCryptoV2   bool                 `yaml:"use_crypto_v2"`   // Feature flag: use crypto abstraction layer (v2)
+	Database        tnm.KrsDatabaseConf `yaml:"database"`
+	Node            tnm.NodeConf        `yaml:"node"`
+	ControlZone     string              `yaml:"control_zone"`
+	UseCryptoV2     bool                `yaml:"use_crypto_v2"`    // Feature flag: use crypto abstraction layer (v2)
 	SupportedCrypto []string            `yaml:"supported_crypto"` // List of supported crypto backends (e.g., ["hpke", "jose"])
 }
 
@@ -105,6 +105,7 @@ func calculateUseCryptoV2(supportedCrypto []string) bool {
 //   - apiAddress: Optional API server address (default: "127.0.0.1:8990")
 //   - dbPath: Optional database file path (default: "/var/lib/tdns/krs.db")
 //   - logFile: Optional log file path (default: "/var/log/tdns/tdns-krs.log")
+//
 // Returns: error
 func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBackend string, apiAddress string, dbPath string, logFile string) error {
 	// 1. Parse enrollment blob file
@@ -126,7 +127,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 	// Determine which backends to use based on crypto flag
 	useHpke := false
 	useJose := false
-	
+
 	if cryptoBackend == "" {
 		// No restriction: use both if available
 		useHpke = hasHpkeKey
@@ -647,13 +648,13 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 	configFile := filepath.Join(configDir, "tdns-krs.yaml")
 	// Construct baseurl with /api/v1 path (API always uses TLS, no trailing slash)
 	baseURL := fmt.Sprintf("https://%s/api/v1", apiAddress)
-	
+
 	// Generate API key (fail fast on crypto/rand errors)
 	apiKey, err := generateApiKey()
 	if err != nil {
 		return fmt.Errorf("failed to generate API key: %v", err)
 	}
-	
+
 	config := BootstrapConfig{
 		Service: ServiceConfig{
 			Name:    "TDNS-KRS",
@@ -686,8 +687,8 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 				LongTermHpkePrivKey: hpkeKeyFileAbs, // Only set if HPKE key was generated
 				LongTermJosePrivKey: joseKeyFileAbs, // Only set if JOSE key was generated
 				KdcAddress:          blob.KdcEnrollmentAddress,
-				KdcHpkePubKey:      kdcHpkePubKeyFileAbs, // Only set if HPKE key was generated
-				KdcJosePubKey:      kdcJosePubKeyFileAbs, // Only set if JOSE key was generated
+				KdcHpkePubKey:       kdcHpkePubKeyFileAbs, // Only set if HPKE key was generated
+				KdcJosePubKey:       kdcJosePubKeyFileAbs, // Only set if JOSE key was generated
 			},
 			ControlZone:     blob.ControlZone,
 			UseCryptoV2:     calculateUseCryptoV2(supportedCrypto),
@@ -708,7 +709,7 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 	if err := os.WriteFile(configFile, configWithHeader, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %v", err)
 	}
-		log.Printf("KRS: Wrote configuration file to %s", configFile)
+	log.Printf("KRS: Wrote configuration file to %s", configFile)
 
 	// 16. Success message
 	fmt.Printf("\n")
@@ -771,12 +772,12 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 			CommonName:   "localhost",
 			Organization: []string{"TDNS-KRS"},
 		},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour), // 1 year
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
-		DNSNames:     []string{"localhost"},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().Add(365 * 24 * time.Hour), // 1 year
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		DNSNames:    []string{"localhost"},
 	}
 
 	// Create certificate
@@ -818,4 +819,3 @@ func generateApiKey() (string, error) {
 	}
 	return hex.EncodeToString(key), nil
 }
-

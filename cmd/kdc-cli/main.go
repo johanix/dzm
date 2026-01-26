@@ -123,7 +123,7 @@ type ApiDetails struct {
 	ApiKey     string `validate:"required" yaml:"apikey"`
 	AuthMethod string `validate:"required" yaml:"authmethod"`
 	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon
-	Config     string `yaml:"config,omitempty"` // Optional: path to service config file
+	Config     string `yaml:"config,omitempty"`  // Optional: path to service config file
 }
 
 func initApi() {
@@ -159,4 +159,3 @@ func main() {
 	tdns.Globals.App.Date = appDate
 	Execute()
 }
-

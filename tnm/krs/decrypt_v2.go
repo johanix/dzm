@@ -53,12 +53,12 @@ func DecryptAndStoreKeyV2(
 	// The metadata should be populated from the distribution record or parsed from the plaintext before use
 	key := &ReceivedKey{
 		ID:             distributionID,
-		ZoneName:       zoneID, // zoneID parameter is actually zone name
-		KeyID:          0,      // TODO: Extract from distribution record metadata or parse from plaintext
+		ZoneName:       zoneID,    // zoneID parameter is actually zone name
+		KeyID:          0,         // TODO: Extract from distribution record metadata or parse from plaintext
 		KeyType:        "unknown", // TODO: Extract from distribution record metadata or parse from plaintext
-		Algorithm:      0,     // TODO: Extract from distribution record metadata or parse from plaintext
-		Flags:          0,     // TODO: Extract from distribution record metadata or parse from plaintext
-		PublicKey:      "",    // TODO: Extract from distribution record metadata or parse from plaintext
+		Algorithm:      0,         // TODO: Extract from distribution record metadata or parse from plaintext
+		Flags:          0,         // TODO: Extract from distribution record metadata or parse from plaintext
+		PublicKey:      "",        // TODO: Extract from distribution record metadata or parse from plaintext
 		PrivateKey:     plaintext,
 		State:          "received",
 		ReceivedAt:     time.Now(),

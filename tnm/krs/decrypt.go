@@ -33,11 +33,11 @@ func DecryptAndStoreKeyV1(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []
 	key := &ReceivedKey{
 		ID:             distributionID,
 		ZoneName:       zoneID, // zoneID parameter is actually zone name
-		KeyID:          0, // TODO: Extract from metadata
-		KeyType:        "ZSK", // TODO: Extract from metadata
-		Algorithm:      15,    // TODO: Extract from metadata (ED25519)
-		Flags:          256,   // TODO: Extract from metadata (ZSK flags)
-		PublicKey:      "",    // TODO: Extract from metadata
+		KeyID:          0,      // TODO: Extract from metadata
+		KeyType:        "ZSK",  // TODO: Extract from metadata
+		Algorithm:      15,     // TODO: Extract from metadata (ED25519)
+		Flags:          256,    // TODO: Extract from metadata (ZSK flags)
+		PublicKey:      "",     // TODO: Extract from metadata
 		PrivateKey:     plaintext,
 		State:          "received",
 		ReceivedAt:     time.Now(),

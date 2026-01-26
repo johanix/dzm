@@ -46,13 +46,13 @@ var kdcDistribListCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s\n", resp["msg"])
-		
+
 		// Check for verbose flag
 		verbose := false
 		if v, err := cmd.Flags().GetBool("verbose"); err == nil {
 			verbose = v
 		}
-		
+
 		// Try to get summaries (new format)
 		if summariesRaw, ok := resp["summaries"].([]interface{}); ok && len(summariesRaw) > 0 {
 			if verbose {
@@ -62,7 +62,7 @@ var kdcDistribListCmd = &cobra.Command{
 					if s, ok := sRaw.(map[string]interface{}); ok {
 						distID := getString(s, "distribution_id")
 						fmt.Printf("\n  Distribution ID: %s\n", distID)
-						
+
 						// Show operations
 						if operations, ok := s["operations"].([]interface{}); ok && len(operations) > 0 {
 							opStrs := make([]string, len(operations))
@@ -71,7 +71,7 @@ var kdcDistribListCmd = &cobra.Command{
 							}
 							fmt.Printf("    Operation: %s\n", strings.Join(opStrs, ", "))
 						}
-						
+
 						if nodes, ok := s["nodes"].([]interface{}); ok {
 							nodeStrs := make([]string, len(nodes))
 							for i, n := range nodes {
@@ -79,7 +79,7 @@ var kdcDistribListCmd = &cobra.Command{
 							}
 							fmt.Printf("    Nodes: %s\n", strings.Join(nodeStrs, ", "))
 						}
-						
+
 						if zones, ok := s["zones"].([]interface{}); ok {
 							zoneStrs := make([]string, len(zones))
 							for i, z := range zones {
@@ -87,7 +87,7 @@ var kdcDistribListCmd = &cobra.Command{
 							}
 							fmt.Printf("    Zones: %s\n", strings.Join(zoneStrs, ", "))
 						}
-						
+
 						zskCount := 0
 						if z, ok := s["zsk_count"].(float64); ok {
 							zskCount = int(z)
@@ -97,14 +97,14 @@ var kdcDistribListCmd = &cobra.Command{
 							kskCount = int(k)
 						}
 						fmt.Printf("    Keys: %d ZSK, %d KSK\n", zskCount, kskCount)
-						
+
 						if keys, ok := s["keys"].(map[string]interface{}); ok {
 							fmt.Printf("    Key Details:\n")
 							for zone, keyID := range keys {
 								fmt.Printf("      %s: key %v\n", zone, keyID)
 							}
 						}
-						
+
 						if completedAt, ok := s["completed_at"].(string); ok && completedAt != "" {
 							// Parse and format the datetime nicely
 							if t, err := time.Parse(time.RFC3339, completedAt); err == nil {
@@ -133,7 +133,7 @@ var kdcDistribListCmd = &cobra.Command{
 										pendingNodes = append(pendingNodes, fmt.Sprintf("%v", n))
 									}
 								}
-								
+
 								if len(confirmedNodes) > 0 {
 									fmt.Printf("    Confirmed nodes: %s\n", strings.Join(confirmedNodes, ", "))
 								}
@@ -161,17 +161,17 @@ var kdcDistribListCmd = &cobra.Command{
 						}
 					}
 				}
-				
+
 				var rows []string
 				rows = append(rows, "Id | State | Time | Node | Contents | Query")
-				
+
 				for _, sRaw := range summariesRaw {
 					if s, ok := sRaw.(map[string]interface{}); ok {
 						distID := getString(s, "distribution_id")
 						if distID == "" {
 							continue
 						}
-						
+
 						// Get node
 						nodeStr := ""
 						nodeIDForQuery := ""
@@ -186,7 +186,7 @@ var kdcDistribListCmd = &cobra.Command{
 								nodeStr = fmt.Sprintf("%s (+%d)", nodeStr, len(nodeList)-1)
 							}
 						}
-						
+
 						// Build CHUNK QNAME: <nodeid><distributionID>.<controlzone>
 						queryStr := ""
 						if nodeIDForQuery != "" && distID != "" {
@@ -205,7 +205,7 @@ var kdcDistribListCmd = &cobra.Command{
 							controlZoneClean := strings.TrimSuffix(controlZoneFQDN, ".")
 							queryStr = fmt.Sprintf("%s%s.%s. CHUNK", nodeIDFQDN, distID, controlZoneClean)
 						}
-						
+
 						// Get state and time
 						state := "ongoing"
 						timeStr := ""
@@ -226,7 +226,7 @@ var kdcDistribListCmd = &cobra.Command{
 								}
 							}
 						}
-						
+
 						// Build contents string
 						zskCount := 0
 						if z, ok := s["zsk_count"].(float64); ok {
@@ -236,7 +236,7 @@ var kdcDistribListCmd = &cobra.Command{
 						if k, ok := s["ksk_count"].(float64); ok {
 							kskCount = int(k)
 						}
-						
+
 						keyTypeStr := ""
 						if zskCount > 0 && kskCount > 0 {
 							keyTypeStr = fmt.Sprintf("%d ZSK and %d KSK", zskCount, kskCount)
@@ -245,7 +245,7 @@ var kdcDistribListCmd = &cobra.Command{
 						} else if kskCount > 0 {
 							keyTypeStr = fmt.Sprintf("%d KSK", kskCount)
 						}
-						
+
 						zoneStr := ""
 						zoneCount := 0
 						contentType := ""
@@ -279,11 +279,11 @@ var kdcDistribListCmd = &cobra.Command{
 						} else {
 							contents = keyTypeStr + " keys"
 						}
-						
+
 						rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", distID, state, timeStr, nodeStr, contents, queryStr))
 					}
 				}
-				
+
 				if len(rows) > 1 {
 					output := columnize.SimpleFormat(rows)
 					fmt.Println(output)
@@ -309,7 +309,7 @@ var kdcDistribPurgeCmd = &cobra.Command{
 	Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
-		
+
 		api, err := getApiClient(true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -347,7 +347,7 @@ var kdcDistribStateCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":        "state",
+			"command":         "state",
 			"distribution_id": distID,
 		}
 
@@ -361,7 +361,7 @@ var kdcDistribStateCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s\n\n", resp["msg"])
-		
+
 		if stateRaw, ok := resp["state"]; ok {
 			if state, ok := stateRaw.(map[string]interface{}); ok {
 				fmt.Printf("Distribution ID: %s\n", getString(state, "distribution_id", "DistributionID"))
@@ -370,14 +370,14 @@ var kdcDistribStateCmd = &cobra.Command{
 				fmt.Printf("Key State: %s\n", getString(state, "key_state", "KeyState"))
 				fmt.Printf("Created At: %s\n", getString(state, "created_at", "CreatedAt"))
 				fmt.Printf("All Confirmed: %v\n\n", getBool(state, "all_confirmed", "AllConfirmed"))
-				
+
 				if confirmedNodes, ok := state["confirmed_nodes"].([]interface{}); ok {
 					fmt.Printf("Confirmed Nodes (%d):\n", len(confirmedNodes))
 					for _, node := range confirmedNodes {
 						fmt.Printf("  - %s\n", node)
 					}
 				}
-				
+
 				if pendingNodes, ok := state["pending_nodes"].([]interface{}); ok {
 					fmt.Printf("\nPending Nodes (%d):\n", len(pendingNodes))
 					if len(pendingNodes) == 0 {
@@ -406,7 +406,7 @@ var kdcDistribCompletedCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":        "completed",
+			"command":         "completed",
 			"distribution_id": distID,
 		}
 
@@ -440,9 +440,9 @@ var kdcDistribSingleCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command": "distrib-single",
+			"command":   "distrib-single",
 			"zone_name": zoneName,
-			"key_id":  keyid,
+			"key_id":    keyid,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -479,7 +479,7 @@ var kdcDistribMultiCmd = &cobra.Command{
 			"command": "distrib-multi",
 			"zones":   zones,
 		}
-		
+
 		// Add crypto flag if specified
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
 		if cryptoBackend != "" {
@@ -506,18 +506,18 @@ var kdcDistribMultiCmd = &cobra.Command{
 			if results, ok := resultsRaw.([]interface{}); ok {
 				if len(results) > 0 {
 					fmt.Printf("\nDetailed results:\n")
-				for _, result := range results {
-					if resultMap, ok := result.(map[string]interface{}); ok {
-						zoneID := getString(resultMap, "zone_name", "ZoneName")
-						status := getString(resultMap, "status", "Status")
-						msg := getString(resultMap, "msg", "Msg")
-						if status == "success" {
-							fmt.Printf("  ✓ %s: %s\n", zoneID, msg)
-						} else {
-							fmt.Printf("  ✗ %s: %s\n", zoneID, msg)
+					for _, result := range results {
+						if resultMap, ok := result.(map[string]interface{}); ok {
+							zoneID := getString(resultMap, "zone_name", "ZoneName")
+							status := getString(resultMap, "status", "Status")
+							msg := getString(resultMap, "msg", "Msg")
+							if status == "success" {
+								fmt.Printf("  ✓ %s: %s\n", zoneID, msg)
+							} else {
+								fmt.Printf("  ✗ %s: %s\n", zoneID, msg)
+							}
 						}
 					}
-				}
 				}
 			}
 		}
@@ -556,17 +556,17 @@ var kdcDistribMultiCmd = &cobra.Command{
 
 func init() {
 	KdcDistribCmd.AddCommand(kdcDistribListCmd, kdcDistribStateCmd, kdcDistribCompletedCmd, kdcDistribSingleCmd, kdcDistribMultiCmd, kdcDistribPurgeCmd)
-	
+
 	kdcDistribSingleCmd.Flags().StringP("keyid", "k", "", "Key ID (must be a ZSK in standby state)")
 	kdcDistribSingleCmd.MarkFlagRequired("keyid")
-	
+
 	kdcDistribStateCmd.Flags().String("distid", "", "Distribution ID")
 	kdcDistribStateCmd.MarkFlagRequired("distid")
-	
+
 	kdcDistribCompletedCmd.Flags().String("distid", "", "Distribution ID")
 	kdcDistribCompletedCmd.MarkFlagRequired("distid")
-	
+
 	kdcDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
-	
+
 	kdcDistribMultiCmd.Flags().String("crypto", "", "Force crypto backend (hpke or jose). If not specified, uses any backend the node supports.")
 }

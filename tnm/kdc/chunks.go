@@ -34,7 +34,7 @@ type chunkCache struct {
 }
 
 type preparedChunks struct {
-	chunks []*core.CHUNK // CHUNK records (manifest + data chunks)
+	chunks    []*core.CHUNK // CHUNK records (manifest + data chunks)
 	checksum  string
 	timestamp int64
 }
@@ -107,9 +107,9 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 
 	// Determine content type by analyzing all operations in this distribution
 	// Categorize operations into domains and check for conflicts
-	hasNodeOps := false    // update_components
-	hasKeyOps := false     // roll_key, delete_key
-	hasMgmtOps := false    // ping
+	hasNodeOps := false // update_components
+	hasKeyOps := false  // roll_key, delete_key
+	hasMgmtOps := false // ping
 
 	for _, record := range nodeRecords {
 		switch record.Operation {
@@ -123,7 +123,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	}
 
 	// Determine contentType based on operation mix
-	contentType := "key_operations"  // default
+	contentType := "key_operations" // default
 	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
 		contentType = "node_operations"
 	} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
@@ -227,7 +227,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		}
 
 		operationCount = len(entries)
-		keyCount = 0  // For key_operations, count the actual key operations
+		keyCount = 0 // For key_operations, count the actual key operations
 		for _, entry := range entries {
 			if entry.Operation == "roll_key" || entry.Operation == "delete_key" {
 				keyCount++
@@ -327,7 +327,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	// Determine if payload should be included inline
 	payloadSize := len(base64Data)
 	testSize := tnm.EstimateManifestSize(metadata, base64Data)
-	
+
 	// Check if the manifest fits in DNS message (accounting for headers and QNAME)
 	// Estimate: DNS headers (~12) + QNAME (~100) + RR header (~10) + manifest data
 	const estimatedDNSOverhead = 150
@@ -342,7 +342,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest", 
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
@@ -350,7 +350,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
 		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
@@ -400,12 +400,10 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	globalChunkCache.cache[cacheKey] = prepared
 	globalChunkCache.mu.Unlock()
 
-	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s", 
+	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s",
 		len(allChunks), nodeID, distributionID)
 	return prepared, nil
 }
-
-
 
 // GetCHUNKForNode retrieves a CHUNK record for a node's distribution event
 // chunkID 0 returns the manifest CHUNK (Total=0), chunkID > 0 returns data CHUNK (Total>0)
@@ -604,7 +602,7 @@ func (kdc *KdcDB) DeleteDistribution(distributionID string) error {
 func ClearDistributionCache(distributionID string) {
 	globalChunkCache.mu.Lock()
 	defer globalChunkCache.mu.Unlock()
-	
+
 	// Remove all cache entries matching this distribution ID
 	for key := range globalChunkCache.cache {
 		if strings.HasSuffix(key, ":"+distributionID) {
@@ -673,7 +671,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		"text_length":     len(text),
 	}
 	testSize := tnm.EstimateManifestSize(testMetadata, dataToChunk)
-	
+
 	// Check if the manifest fits in DNS message
 	const estimatedDNSOverhead = 150
 	estimatedTotalSize := estimatedDNSOverhead + testSize
@@ -687,7 +685,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// Payload fits inline, include it directly in manifest
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest", 
+		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
 			payloadSize, testSize, estimatedTotalSize)
 	} else {
 		// Payload is too large, split into chunks
@@ -695,7 +693,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		dataChunks = tnm.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
 		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks", 
+		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
@@ -760,16 +758,16 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// We use "test" as zone_id and key_id, but these don't need to exist due to
 		// the way we query (we also check cache)
 		distRecord := &DistributionRecord{
-			ID:             distRecordIDHex,
-			ZoneName:       "test", // Placeholder zone for test distributions
-			KeyID:          "test", // Placeholder key for test distributions
-			NodeID:         nodeID,
-			EncryptedKey:   []byte("test"), // Dummy data
+			ID:              distRecordIDHex,
+			ZoneName:        "test", // Placeholder zone for test distributions
+			KeyID:           "test", // Placeholder key for test distributions
+			NodeID:          nodeID,
+			EncryptedKey:    []byte("test"), // Dummy data
 			EphemeralPubKey: []byte("test"), // Dummy data
-			CreatedAt:      time.Now(),
-			ExpiresAt:      nil,
-			Status:         hpke.DistributionStatusPending,
-			DistributionID: distributionID,
+			CreatedAt:       time.Now(),
+			ExpiresAt:       nil,
+			Status:          hpke.DistributionStatusPending,
+			DistributionID:  distributionID,
 		}
 
 		// Try to insert, but don't fail if it doesn't work (e.g., foreign key constraints)
@@ -788,4 +786,3 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 func (kdc *KdcDB) PrepareTestTextChunks(nodeID, distributionID, testText string, conf *tnm.KdcConf) (*preparedChunks, error) {
 	return kdc.PrepareTextChunks(nodeID, distributionID, testText, "clear_text", conf)
 }
-

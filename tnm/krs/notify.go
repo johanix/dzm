@@ -28,7 +28,7 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 	w := dnr.ResponseWriter
 
 	log.Printf("KRS: Received NOTIFY message for %s from %s", qname, w.RemoteAddr())
-	
+
 	// Extract zone name from question section
 	var notifyZone string
 	if len(msg.Question) > 0 {
@@ -77,13 +77,13 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 		if strings.HasSuffix(prefix, ".") {
 			prefix = prefix[:len(prefix)-1]
 		}
-		
+
 		// Get the last label (distributionID)
 		labels := strings.Split(prefix, ".")
 		distributionID := labels[len(labels)-1]
-		
+
 		log.Printf("KRS: NOTIFY received for distribution event %s (zone: %s)", distributionID, notifyZone)
-		
+
 		// Process distribution asynchronously
 		go func() {
 			if err := ProcessDistribution(krsDB, conf, distributionID, nil); err != nil {
@@ -123,7 +123,7 @@ func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsConf
 			log.Printf("KRS: ERROR: Received nil message")
 			return
 		}
-		log.Printf("KRS: Message ID: %d, Opcode: %s (%d), Question count: %d", 
+		log.Printf("KRS: Message ID: %d, Opcode: %s (%d), Question count: %d",
 			r.MsgHdr.Id, dns.OpcodeToString[r.Opcode], r.Opcode, len(r.Question))
 		if r.Opcode != dns.OpcodeNotify {
 			log.Printf("KRS: Rejecting non-NOTIFY message (opcode=%s)", dns.OpcodeToString[r.Opcode])
@@ -184,13 +184,13 @@ func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsConf
 			if strings.HasSuffix(prefix, ".") {
 				prefix = prefix[:len(prefix)-1]
 			}
-			
+
 			// Get the last label (distributionID)
 			labels := strings.Split(prefix, ".")
 			distributionID := labels[len(labels)-1]
-			
+
 			log.Printf("KRS: NOTIFY received for distribution event %s (zone: %s)", distributionID, notifyZone)
-			
+
 			// Process distribution asynchronously
 			go func() {
 				if err := ProcessDistribution(krsDB, conf, distributionID, nil); err != nil {
@@ -255,4 +255,3 @@ func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsConf
 
 	return nil
 }
-

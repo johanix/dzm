@@ -30,12 +30,12 @@ import (
 
 // EnrollmentBlob represents the enrollment blob structure
 type EnrollmentBlob struct {
-	Token               string `json:"token"`                // Enrollment token value
-	NodeID              string `json:"node_id"`               // Node ID
-	KdcHpkePubKey       string `json:"kdc_hpke_pubkey"`       // KDC HPKE public key (hex encoded)
-	KdcJosePubKey       string `json:"kdc_jose_pubkey"`       // KDC JOSE public key (JWK JSON, base64 encoded for transport)
+	Token                string `json:"token"`                  // Enrollment token value
+	NodeID               string `json:"node_id"`                // Node ID
+	KdcHpkePubKey        string `json:"kdc_hpke_pubkey"`        // KDC HPKE public key (hex encoded)
+	KdcJosePubKey        string `json:"kdc_jose_pubkey"`        // KDC JOSE public key (JWK JSON, base64 encoded for transport)
 	KdcEnrollmentAddress string `json:"kdc_enrollment_address"` // KDC enrollment address (IP:port)
-	ControlZone         string `json:"control_zone"`          // Control zone name
+	ControlZone          string `json:"control_zone"`           // Control zone name
 }
 
 // GenerateEnrollmentBlobContent generates the enrollment blob content (base64-encoded JSON)
@@ -170,11 +170,11 @@ func ParseEnrollmentBlob(filename string) (*EnrollmentBlob, error) {
 		}
 		blobBase64Lines = append(blobBase64Lines, line)
 	}
-	
+
 	if len(blobBase64Lines) == 0 {
 		return nil, fmt.Errorf("no base64 content found in enrollment blob file")
 	}
-	
+
 	// Join all non-comment lines (base64 can span multiple lines)
 	blobBase64 := strings.Join(blobBase64Lines, "")
 
@@ -199,7 +199,7 @@ type EnrollmentRequest struct {
 	JosePubKey    string `json:"jose_pubkey"`    // JOSE public key (JWK JSON)
 	Sig0PubKey    string `json:"sig0_pubkey"`    // SIG(0) public key (DNSKEY RR format)
 	AuthToken     string `json:"auth_token"`     // Enrollment token
-	Timestamp     string `json:"timestamp"`       // ISO 8601 timestamp
+	Timestamp     string `json:"timestamp"`      // ISO 8601 timestamp
 	NotifyAddress string `json:"notify_address"` // Optional: IP:port for NOTIFY
 }
 
@@ -215,13 +215,13 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	// Create response message
 	m := new(dns.Msg)
 	m.SetReply(r)
-	
+
 	// Helper function to return error with CHUNK option containing error details
 	// hpkePubKey can be nil if we don't have it yet (e.g., decryption failed)
 	// nodeID can be empty if we don't know it yet
 	returnError := func(rcode int, errorMsg string, nodeID string, hpkePubKey []byte, kdcKeys *KdcHpkeKeys) error {
 		m.SetRcode(r, rcode)
-		
+
 		// Create error confirmation
 		errorConfirmation := edns0.EnrollmentConfirmation{
 			NodeID:       nodeID,
@@ -229,13 +229,13 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 			ErrorMessage: errorMsg,
 			Timestamp:    time.Now().Format(time.RFC3339),
 		}
-		
+
 		errorJSON, err := json.Marshal(errorConfirmation)
 		if err != nil {
 			log.Printf("KDC: Failed to marshal error confirmation: %v", err)
 			return w.WriteMsg(m)
 		}
-		
+
 		var encryptedError []byte
 		// If we have the node's HPKE pubkey, encrypt the error message
 		// Otherwise, send it unencrypted (error messages aren't sensitive)
@@ -250,18 +250,18 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 			// No node pubkey available, send unencrypted
 			encryptedError = errorJSON
 		}
-		
+
 		chunkOpt, err := edns0.CreateEnrollmentConfirmationOption(encryptedError)
 		if err != nil {
 			log.Printf("KDC: Failed to create error confirmation option: %v", err)
 			return w.WriteMsg(m)
 		}
-		
+
 		if err := edns0.AddChunkOptionToMessage(m, chunkOpt); err != nil {
 			log.Printf("KDC: Failed to add error confirmation option: %v", err)
 			return w.WriteMsg(m)
 		}
-		
+
 		log.Printf("KDC: Returning error response: %s", errorMsg)
 		return w.WriteMsg(m)
 	}
@@ -335,7 +335,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	var decryptedData []byte
 	var encryptionBackend string
 	var hpkeDecryptErr error
-	
+
 	// Try HPKE first if available
 	if kdcHpkeKeys != nil {
 		decryptedData, hpkeDecryptErr = hpke.Decrypt(kdcHpkeKeys.PrivateKey, nil, encryptedData)
@@ -349,7 +349,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		log.Printf("KDC: HPKE keys not available, trying JOSE")
 		hpkeDecryptErr = fmt.Errorf("HPKE keys not configured")
 	}
-	
+
 	// If HPKE failed or unavailable, try JOSE
 	if encryptionBackend == "" {
 		kdcJoseKeys, err2 := GetKdcJoseKeypair(kdcConf.KdcJosePrivKey)
@@ -477,7 +477,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 
 	// 10. Store node with appropriate pubkey(s)
 	nodeID := token.NodeID
-	
+
 	// For JOSE-only nodes, set LongTermPubKey to nil (database allows NULL)
 	// The SupportedCrypto field indicates which crypto backends the node supports
 	var nodeLongTermPubKey []byte
@@ -489,24 +489,24 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		nodeLongTermPubKey = nil
 		log.Printf("KDC: Node only supports JOSE - setting LongTermPubKey to NULL")
 	}
-	
+
 	// Store JOSE public key if provided
 	var nodeLongTermJosePubKey []byte
 	if enrollmentReq.JosePubKey != "" {
 		nodeLongTermJosePubKey = josePubKeyBytes
 		log.Printf("KDC: Storing JOSE public key for node %s (%d bytes)", nodeID, len(nodeLongTermJosePubKey))
 	}
-	
+
 	node := &Node{
-		ID:                  nodeID,
-		Name:                nodeID, // Use node ID as name initially
-		LongTermHpkePubKey:      nodeLongTermPubKey,
-		LongTermJosePubKey:  nodeLongTermJosePubKey,
-		SupportedCrypto:     supportedCrypto,
-		Sig0PubKey:          enrollmentReq.Sig0PubKey,
-		NotifyAddress:       enrollmentReq.NotifyAddress,
-		State:               NodeStateOnline,
-		Comment:             "Enrollment registered",
+		ID:                 nodeID,
+		Name:               nodeID, // Use node ID as name initially
+		LongTermHpkePubKey: nodeLongTermPubKey,
+		LongTermJosePubKey: nodeLongTermJosePubKey,
+		SupportedCrypto:    supportedCrypto,
+		Sig0PubKey:         enrollmentReq.Sig0PubKey,
+		NotifyAddress:      enrollmentReq.NotifyAddress,
+		State:              NodeStateOnline,
+		Comment:            "Enrollment registered",
 	}
 
 	// Add node with both pubkeys
@@ -560,7 +560,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 			confirmationBackend = supportedCrypto[0]
 		}
 	}
-	
+
 	if confirmationBackend == "hpke" {
 		// Encrypt using HPKE Auth mode
 		// KDC's private key (sender authentication), node's HPKE public key (recipient encryption)
@@ -629,4 +629,3 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 	m.SetRcode(r, dns.RcodeSuccess)
 	return w.WriteMsg(m)
 }
-

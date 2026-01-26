@@ -58,4 +58,3 @@ func EnsureDatabaseDirectory(dsn string) error {
 
 	return nil
 }
-

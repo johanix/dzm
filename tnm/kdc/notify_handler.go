@@ -21,7 +21,7 @@ import (
 func HandleKdcNotify(ctx context.Context, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *tnm.KdcConf) error {
 
 	log.Printf("KDC: Received NOTIFY message for %s from %s", qname, w.RemoteAddr())
-	log.Printf("KDC: NOTIFY details - ID: %d, Opcode: %s, Question count: %d", 
+	log.Printf("KDC: NOTIFY details - ID: %d, Opcode: %s, Question count: %d",
 		msg.MsgHdr.Id, dns.OpcodeToString[msg.Opcode], len(msg.Question))
 
 	// Extract QTYPE from question
@@ -65,4 +65,3 @@ func HandleKdcNotify(ctx context.Context, msg *dns.Msg, qname string, w dns.Resp
 
 	return err
 }
-

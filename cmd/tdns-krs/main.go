@@ -177,7 +177,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 
 	// Store node config in database (HPKE keys are optional for JOSE-only nodes)
 	nodeConfig := &krs.NodeConfig{
-		ID:                 krsConf.Node.ID,
+		ID:                  krsConf.Node.ID,
 		LongTermHpkePubKey:  hpkePubKey,  // nil for JOSE-only nodes
 		LongTermHpkePrivKey: hpkePrivKey, // nil for JOSE-only nodes
 		KdcAddress:          krsConf.Node.KdcAddress,
@@ -211,7 +211,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}()
 
 	log.Printf("API dispatcher started")
-	
+
 	// Register debug query handler FIRST (for all queries) - logs all queries before processing
 	// This is optional - only register if debug mode is enabled
 	if tdns.Globals.Debug {
@@ -265,4 +265,3 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	log.Printf("TDNS %s (%s): KRS started successfully", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
 	return nil
 }
-

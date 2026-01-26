@@ -247,4 +247,3 @@ func ensureActiveKSK(kdcDB *KdcDB, conf *tnm.KdcConf) error {
 
 	return nil
 }
-

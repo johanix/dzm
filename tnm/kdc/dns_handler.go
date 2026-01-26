@@ -41,7 +41,7 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 	w := dqr.ResponseWriter
 
 	log.Printf("KDC: Received query for %s %s from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
-	log.Printf("KDC: Message details - ID: %d, Opcode: %s, Question count: %d, Additional count: %d", 
+	log.Printf("KDC: Message details - ID: %d, Opcode: %s, Question count: %d, Additional count: %d",
 		msg.MsgHdr.Id, dns.OpcodeToString[msg.Opcode], len(msg.Question), len(msg.Extra))
 
 	// Check for SIG(0) signature in Additional section (but don't enforce initially)
@@ -124,13 +124,13 @@ func ParseQnameForMANIFEST(qname string, controlZone string) (nodeID, distributi
 	// <nodeid-labels>.<distributionID>.<controlzone>
 	// We need to split by dots and find the distribution ID label
 	prefix := qname[:len(qname)-len(controlZoneClean)-1] // -1 for the dot before control zone
-	
+
 	// Split prefix into labels
 	labels := dns.SplitDomainName(prefix)
 	if len(labels) == 0 {
 		return "", "", fmt.Errorf("invalid MANIFEST QNAME format: %s (no labels found)", qname)
 	}
-	
+
 	// The distribution ID should be the last label (it's hex, from monotonic counter)
 	// Try the last label first, then work backwards if needed
 	found := false
@@ -154,7 +154,7 @@ func ParseQnameForMANIFEST(qname string, controlZone string) (nodeID, distributi
 			}
 		}
 	}
-	
+
 	if !found {
 		return "", "", fmt.Errorf("invalid MANIFEST QNAME format: %s (could not find valid distribution ID in labels: %v)", qname, labels)
 	}
@@ -214,7 +214,7 @@ func ParseQnameForOLDCHUNK(qname string, controlZone string) (chunkID uint16, no
 		return 0, "", "", fmt.Errorf("invalid OLDCHUNK QNAME format: %s (missing node ID and distribution ID)", qname)
 	}
 	prefixLabels := labels[1:controlStartIdx]
-	
+
 	// The distribution ID should be the last label in prefixLabels (it's hex, from monotonic counter)
 	// Try the last label first, then work backwards if needed
 	found := false
@@ -238,7 +238,7 @@ func ParseQnameForOLDCHUNK(qname string, controlZone string) (chunkID uint16, no
 			}
 		}
 	}
-	
+
 	if !found {
 		return 0, "", "", fmt.Errorf("invalid OLDCHUNK QNAME format: %s (could not find valid distribution ID in labels: %v)", qname, prefixLabels)
 	}
@@ -293,23 +293,23 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 	chunk, err := kdcDB.GetCHUNKForNode(nodeID, distributionID, chunkID, conf)
 	if err != nil {
 		log.Printf("KDC: Error getting CHUNK %d for node %s, distribution %s: %v", chunkID, nodeID, distributionID, err)
-		
+
 		errStr := err.Error()
-		
+
 		// Check if this is an "out of range" error (chunk doesn't exist)
 		if strings.Contains(errStr, "out of range") {
 			log.Printf("KDC: CHUNK %d is out of range for distribution %s - returning NXDOMAIN", chunkID, distributionID)
 			m.SetRcode(msg, dns.RcodeNameError)
 			return w.WriteMsg(m)
 		}
-		
+
 		// Check if this is a "node not found" error (invalid node ID)
 		if strings.Contains(errStr, "node not found") {
 			log.Printf("KDC: Node %s not found for distribution %s - returning NXDOMAIN", nodeID, distributionID)
 			m.SetRcode(msg, dns.RcodeNameError)
 			return w.WriteMsg(m)
 		}
-		
+
 		// Check if distribution records exist at all
 		records, checkErr := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
 		if checkErr == nil {
@@ -350,11 +350,11 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 
 	if chunk.Total == 0 {
 		// Manifest chunk
-		log.Printf("KDC: Sending CHUNK manifest response (format=%d, hmac_len=%d, data_len=%d)", 
+		log.Printf("KDC: Sending CHUNK manifest response (format=%d, hmac_len=%d, data_len=%d)",
 			chunk.Format, chunk.HMACLen, len(chunk.Data))
 	} else {
 		// Data chunk
-		log.Printf("KDC: Sending CHUNK data chunk response (sequence=%d, total=%d, data_len=%d)", 
+		log.Printf("KDC: Sending CHUNK data chunk response (sequence=%d, total=%d, data_len=%d)",
 			chunk.Sequence, chunk.Total, len(chunk.Data))
 	}
 	return w.WriteMsg(m)
@@ -385,7 +385,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 	if strings.HasSuffix(prefix, ".") {
 		prefix = strings.TrimSuffix(prefix, ".")
 	}
-	
+
 	// Get the last label (distributionID)
 	labels := strings.Split(prefix, ".")
 	distributionID := labels[len(labels)-1]
@@ -396,7 +396,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 	// For now, we'll need to identify the node by matching the remote address
 	// or by extracting from SIG(0) if present (future)
 	// TODO: Extract node ID from SIG(0) signature or from message metadata
-	
+
 	// Get distribution records to find which zone/key this is for
 	records, err := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
 	if err != nil {
@@ -453,9 +453,9 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 
 	// Determine content type based on operations in the distribution records
 	// This mirrors the logic from prepareChunksForNode()
-	hasNodeOps := false    // update_components operations
-	hasKeyOps := false     // roll_key, delete_key operations
-	hasMgmtOps := false    // ping operations
+	hasNodeOps := false // update_components operations
+	hasKeyOps := false  // roll_key, delete_key operations
+	hasMgmtOps := false // ping operations
 
 	for _, record := range records {
 		switch record.Operation {
@@ -481,9 +481,9 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 	}
 
 	// Extract failed keys/components from CHUNK EDNS(0) option if present
-	failedKeys := make(map[string]bool) // Map of "zone:keyID" -> true
+	failedKeys := make(map[string]bool)       // Map of "zone:keyID" -> true
 	failedComponents := make(map[string]bool) // Map of componentID -> true
-	
+
 	// Check for CHUNK EDNS(0) option in the NOTIFY message
 	opt := msg.IsEdns0()
 	if opt != nil {
@@ -571,7 +571,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		// We need to decrypt it to get the intended list, but we don't have the node's private key
 		// Instead, we'll get the component list from the chunks handler which reads from DB
 		// But wait, that reads from DB which hasn't been updated yet...
-		// 
+		//
 		// Actually, we can't decrypt without the private key. So we need a different approach.
 		// We'll store the intended component list when creating the distribution, or
 		// we can compute it by comparing current DB state with what we know should be there.
@@ -655,7 +655,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 					targetCount++
 				}
 			}
-			log.Printf("KDC: Distribution %s: %d/%d nodes confirmed (need all %d)", 
+			log.Printf("KDC: Distribution %s: %d/%d nodes confirmed (need all %d)",
 				distributionID, len(confirmedNodes), targetCount, targetCount)
 		}
 
@@ -789,7 +789,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 				// Don't fail - the new key was successfully transitioned
 			}
 		}
-		
+
 		// Mark distribution as complete (only once, after all keys are updated)
 		if err := kdcDB.MarkDistributionComplete(distributionID); err != nil {
 			log.Printf("KDC: Warning: Failed to mark distribution %s as complete: %v", distributionID, err)
@@ -807,10 +807,9 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 				targetCount++
 			}
 		}
-		log.Printf("KDC: Distribution %s: %d/%d nodes confirmed (need all %d)", 
+		log.Printf("KDC: Distribution %s: %d/%d nodes confirmed (need all %d)",
 			distributionID, len(confirmedNodes), targetCount, targetCount)
 	}
 
 	return nil
 }
-

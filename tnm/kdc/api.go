@@ -27,7 +27,7 @@ import (
 
 // KdcZonePost represents a request to the KDC zone API
 type KdcZonePost struct {
-	Command       string   `json:"command"`        // "add", "list", "get", "get-keys", "generate-key", "encrypt-key", "update", "delete", "distrib-single", "distrib-multi", "transition", "setstate", "delete-key", "purge-keys", "set-service", "set-component"
+	Command       string   `json:"command"` // "add", "list", "get", "get-keys", "generate-key", "encrypt-key", "update", "delete", "distrib-single", "distrib-multi", "transition", "setstate", "delete-key", "purge-keys", "set-service", "set-component"
 	Zone          *Zone    `json:"zone,omitempty"`
 	ZoneName      string   `json:"zone_name,omitempty"`      // Zone name (replaces zone_id)
 	ServiceID     string   `json:"service_id,omitempty"`     // For set-service command
@@ -40,7 +40,7 @@ type KdcZonePost struct {
 	Algorithm     uint8    `json:"algorithm,omitempty"`      // For generate-key: DNSSEC algorithm
 	Comment       string   `json:"comment,omitempty"`        // For generate-key: optional comment
 	NewState      string   `json:"new_state,omitempty"`      // For setstate: target state
-	Zones         []string `json:"zones,omitempty"`           // For distrib-multi: list of zone names
+	Zones         []string `json:"zones,omitempty"`          // For distrib-multi: list of zone names
 	Force         bool     `json:"force,omitempty"`          // For purge-keys: also delete distributed keys
 	Crypto        string   `json:"crypto,omitempty"`         // For distrib-multi and ping: force crypto backend ("hpke" or "jose")
 }
@@ -55,28 +55,28 @@ type DistributionResult struct {
 
 // ZoneEnrichment contains additional information about a zone for display
 type ZoneEnrichment struct {
-	ServiceName     string   `json:"service_name,omitempty"`
-	ComponentIDs    []string `json:"component_ids,omitempty"`
-	ComponentNames  []string `json:"component_names,omitempty"`
-	SigningComponentID string `json:"signing_component_id,omitempty"` // The sign_* component (for Signing Mode column)
-	NodeIDs         []string `json:"node_ids,omitempty"` // For verbose mode
+	ServiceName        string   `json:"service_name,omitempty"`
+	ComponentIDs       []string `json:"component_ids,omitempty"`
+	ComponentNames     []string `json:"component_names,omitempty"`
+	SigningComponentID string   `json:"signing_component_id,omitempty"` // The sign_* component (for Signing Mode column)
+	NodeIDs            []string `json:"node_ids,omitempty"`             // For verbose mode
 }
 
 // KdcZoneResponse represents a response from the KDC zone API
 type KdcZoneResponse struct {
-	Time      time.Time              `json:"time"`
-	Error     bool                   `json:"error,omitempty"`
-	ErrorMsg  string                 `json:"error_msg,omitempty"`
-	Msg       string                 `json:"msg,omitempty"`
-	Zone      *Zone                  `json:"zone,omitempty"`
-	Zones     []*Zone                `json:"zones,omitempty"`
+	Time            time.Time                  `json:"time"`
+	Error           bool                       `json:"error,omitempty"`
+	ErrorMsg        string                     `json:"error_msg,omitempty"`
+	Msg             string                     `json:"msg,omitempty"`
+	Zone            *Zone                      `json:"zone,omitempty"`
+	Zones           []*Zone                    `json:"zones,omitempty"`
 	ZoneEnrichments map[string]*ZoneEnrichment `json:"zone_enrichments,omitempty"` // Keyed by zone name
-	Key       *DNSSECKey             `json:"key,omitempty"`
-	Keys      []*DNSSECKey           `json:"keys,omitempty"`
-	EncryptedKey     string          `json:"encrypted_key,omitempty"`     // Base64-encoded
-	EphemeralPubKey  string          `json:"ephemeral_pub_key,omitempty"` // Base64-encoded
-	DistributionID   string          `json:"distribution_id,omitempty"`
-	Results   []DistributionResult   `json:"results,omitempty"` // For distrib-multi: results per zone
+	Key             *DNSSECKey                 `json:"key,omitempty"`
+	Keys            []*DNSSECKey               `json:"keys,omitempty"`
+	EncryptedKey    string                     `json:"encrypted_key,omitempty"`     // Base64-encoded
+	EphemeralPubKey string                     `json:"ephemeral_pub_key,omitempty"` // Base64-encoded
+	DistributionID  string                     `json:"distribution_id,omitempty"`
+	Results         []DistributionResult       `json:"results,omitempty"` // For distrib-multi: results per zone
 }
 
 // KdcNodePost represents a request to the KDC node API
@@ -89,113 +89,113 @@ type KdcNodePost struct {
 
 // KdcNodeResponse represents a response from the KDC node API
 type KdcNodeResponse struct {
-	Time     time.Time   `json:"time"`
-	Error    bool        `json:"error,omitempty"`
-	ErrorMsg string      `json:"error_msg,omitempty"`
-	Msg      string      `json:"msg,omitempty"`
-	Node     *Node       `json:"node,omitempty"`
-	Nodes    []*Node     `json:"nodes,omitempty"`
+	Time     time.Time `json:"time"`
+	Error    bool      `json:"error,omitempty"`
+	ErrorMsg string    `json:"error_msg,omitempty"`
+	Msg      string    `json:"msg,omitempty"`
+	Node     *Node     `json:"node,omitempty"`
+	Nodes    []*Node   `json:"nodes,omitempty"`
 }
 
 // KdcServicePost represents a request to the KDC service API
 type KdcServicePost struct {
-	Command string   `json:"command"` // "add", "list", "get", "update", "delete"
-	Service *Service `json:"service,omitempty"`
-	ServiceID string `json:"service_id,omitempty"`
-	ServiceName string `json:"service_name,omitempty"` // For CLI convenience
+	Command     string   `json:"command"` // "add", "list", "get", "update", "delete"
+	Service     *Service `json:"service,omitempty"`
+	ServiceID   string   `json:"service_id,omitempty"`
+	ServiceName string   `json:"service_name,omitempty"` // For CLI convenience
 }
 
 // KdcServiceResponse represents a response from the KDC service API
 type KdcServiceResponse struct {
-	Time     time.Time   `json:"time"`
-	Error    bool        `json:"error,omitempty"`
-	ErrorMsg string      `json:"error_msg,omitempty"`
-	Msg      string      `json:"msg,omitempty"`
-	Service  *Service    `json:"service,omitempty"`
-	Services []*Service   `json:"services,omitempty"`
+	Time     time.Time  `json:"time"`
+	Error    bool       `json:"error,omitempty"`
+	ErrorMsg string     `json:"error_msg,omitempty"`
+	Msg      string     `json:"msg,omitempty"`
+	Service  *Service   `json:"service,omitempty"`
+	Services []*Service `json:"services,omitempty"`
 }
 
 // KdcComponentPost represents a request to the KDC component API
 type KdcComponentPost struct {
-	Command string     `json:"command"` // "add", "list", "get", "update", "delete"
-	Component *Component `json:"component,omitempty"`
-	ComponentID string   `json:"component_id,omitempty"`
-	ComponentName string `json:"component_name,omitempty"` // For CLI convenience
+	Command       string     `json:"command"` // "add", "list", "get", "update", "delete"
+	Component     *Component `json:"component,omitempty"`
+	ComponentID   string     `json:"component_id,omitempty"`
+	ComponentName string     `json:"component_name,omitempty"` // For CLI convenience
 }
 
 // KdcComponentResponse represents a response from the KDC component API
 type KdcComponentResponse struct {
-	Time      time.Time    `json:"time"`
-	Error     bool         `json:"error,omitempty"`
-	ErrorMsg  string       `json:"error_msg,omitempty"`
-	Msg       string       `json:"msg,omitempty"`
-	Component *Component   `json:"component,omitempty"`
+	Time       time.Time    `json:"time"`
+	Error      bool         `json:"error,omitempty"`
+	ErrorMsg   string       `json:"error_msg,omitempty"`
+	Msg        string       `json:"msg,omitempty"`
+	Component  *Component   `json:"component,omitempty"`
 	Components []*Component `json:"components,omitempty"`
 }
 
 // KdcServiceComponentPost represents a request for service-component assignment
 type KdcServiceComponentPost struct {
-	Command        string `json:"command"` // "add", "delete", "list", "replace"
-	ServiceID      string `json:"service_id,omitempty"`
-	ServiceName    string `json:"service_name,omitempty"` // For CLI convenience
-	ComponentID    string `json:"component_id,omitempty"`
-	ComponentName  string `json:"component_name,omitempty"` // For CLI convenience
-	OldComponentID string `json:"old_component_id,omitempty"` // For replace command
+	Command          string `json:"command"` // "add", "delete", "list", "replace"
+	ServiceID        string `json:"service_id,omitempty"`
+	ServiceName      string `json:"service_name,omitempty"` // For CLI convenience
+	ComponentID      string `json:"component_id,omitempty"`
+	ComponentName    string `json:"component_name,omitempty"`     // For CLI convenience
+	OldComponentID   string `json:"old_component_id,omitempty"`   // For replace command
 	OldComponentName string `json:"old_component_name,omitempty"` // For replace command
-	NewComponentID string `json:"new_component_id,omitempty"` // For replace command
+	NewComponentID   string `json:"new_component_id,omitempty"`   // For replace command
 	NewComponentName string `json:"new_component_name,omitempty"` // For replace command
 }
 
 // KdcServiceComponentResponse represents a response for service-component assignment
 type KdcServiceComponentResponse struct {
-	Time      time.Time   `json:"time"`
-	Error     bool        `json:"error,omitempty"`
-	ErrorMsg  string      `json:"error_msg,omitempty"`
-	Msg       string      `json:"msg,omitempty"`
+	Time        time.Time                     `json:"time"`
+	Error       bool                          `json:"error,omitempty"`
+	ErrorMsg    string                        `json:"error_msg,omitempty"`
+	Msg         string                        `json:"msg,omitempty"`
 	Assignments []*ServiceComponentAssignment `json:"assignments,omitempty"`
 }
 
 // KdcServiceTransactionPost represents a request to the KDC service transaction API
 type KdcServiceTransactionPost struct {
-	Command     string `json:"command"`      // "start", "add-component", "remove-component", "view", "commit", "rollback", "list", "get", "status", "cleanup"
-	ServiceID   string `json:"service_id,omitempty"`
-	ServiceName string `json:"service_name,omitempty"` // For CLI convenience
-	TxID        string `json:"tx_id,omitempty"`       // Transaction ID
-	ComponentID string `json:"component_id,omitempty"`
+	Command       string `json:"command"` // "start", "add-component", "remove-component", "view", "commit", "rollback", "list", "get", "status", "cleanup"
+	ServiceID     string `json:"service_id,omitempty"`
+	ServiceName   string `json:"service_name,omitempty"` // For CLI convenience
+	TxID          string `json:"tx_id,omitempty"`        // Transaction ID
+	ComponentID   string `json:"component_id,omitempty"`
 	ComponentName string `json:"component_name,omitempty"` // For CLI convenience
-	CreatedBy   string `json:"created_by,omitempty"`
-	Comment     string `json:"comment,omitempty"`
-	DryRun      bool   `json:"dry_run,omitempty"`     // For commit command: if true, don't apply changes
-	StateFilter string `json:"state_filter,omitempty"` // For list command: filter by state
+	CreatedBy     string `json:"created_by,omitempty"`
+	Comment       string `json:"comment,omitempty"`
+	DryRun        bool   `json:"dry_run,omitempty"`      // For commit command: if true, don't apply changes
+	StateFilter   string `json:"state_filter,omitempty"` // For list command: filter by state
 }
 
 // KdcServiceTransactionResponse represents a response from the KDC service transaction API
 type KdcServiceTransactionResponse struct {
-	Time        time.Time              `json:"time"`
-	Error       bool                   `json:"error,omitempty"`
-	ErrorMsg    string                 `json:"error_msg,omitempty"`
-	Msg         string                 `json:"msg,omitempty"`
-	TxID        string                 `json:"tx_id,omitempty"`
-	Transaction *ServiceTransaction    `json:"transaction,omitempty"`
-	Transactions []*ServiceTransaction  `json:"transactions,omitempty"`
-	DeltaReport *DeltaReport           `json:"delta_report,omitempty"`
+	Time         time.Time             `json:"time"`
+	Error        bool                  `json:"error,omitempty"`
+	ErrorMsg     string                `json:"error_msg,omitempty"`
+	Msg          string                `json:"msg,omitempty"`
+	TxID         string                `json:"tx_id,omitempty"`
+	Transaction  *ServiceTransaction   `json:"transaction,omitempty"`
+	Transactions []*ServiceTransaction `json:"transactions,omitempty"`
+	DeltaReport  *DeltaReport          `json:"delta_report,omitempty"`
 }
 
 // KdcNodeComponentPost represents a request for node-component assignment
 type KdcNodeComponentPost struct {
-	Command        string `json:"command"` // "add", "delete", "list"
-	NodeID         string `json:"node_id,omitempty"`
-	NodeName       string `json:"node_name,omitempty"` // For CLI convenience
-	ComponentID    string `json:"component_id,omitempty"`
-	ComponentName  string `json:"component_name,omitempty"` // For CLI convenience
+	Command       string `json:"command"` // "add", "delete", "list"
+	NodeID        string `json:"node_id,omitempty"`
+	NodeName      string `json:"node_name,omitempty"` // For CLI convenience
+	ComponentID   string `json:"component_id,omitempty"`
+	ComponentName string `json:"component_name,omitempty"` // For CLI convenience
 }
 
 // KdcNodeComponentResponse represents a response for node-component assignment
 type KdcNodeComponentResponse struct {
-	Time      time.Time   `json:"time"`
-	Error     bool        `json:"error,omitempty"`
-	ErrorMsg  string      `json:"error_msg,omitempty"`
-	Msg       string      `json:"msg,omitempty"`
+	Time        time.Time                  `json:"time"`
+	Error       bool                       `json:"error,omitempty"`
+	ErrorMsg    string                     `json:"error_msg,omitempty"`
+	Msg         string                     `json:"msg,omitempty"`
 	Assignments []*NodeComponentAssignment `json:"assignments,omitempty"`
 }
 
@@ -256,7 +256,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				resp.ZoneEnrichments = make(map[string]*ZoneEnrichment)
 				for _, zone := range zones {
 					enrichment := &ZoneEnrichment{}
-					
+
 					// Get service name
 					if zone.ServiceID != "" {
 						service, err := kdcDB.GetService(zone.ServiceID)
@@ -266,7 +266,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 							enrichment.ServiceName = zone.ServiceID // Fallback to ID
 						}
 					}
-					
+
 					// Get components for this zone via its service (not direct assignments)
 					// Zones are related to services, and components are derived from the service
 					if zone.ServiceID != "" {
@@ -275,7 +275,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 							// Separate signing components (sign_*) from non-signing components
 							var signingComponentID string
 							var nonSigningComponents []string
-							
+
 							// First pass: find sign_kdc if it exists
 							for _, compID := range componentIDs {
 								if compID == "sign_kdc" {
@@ -283,7 +283,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 									break
 								}
 							}
-							
+
 							// Second pass: if no sign_kdc, find first sign_* component
 							if signingComponentID == "" {
 								for _, compID := range componentIDs {
@@ -293,23 +293,23 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 									}
 								}
 							}
-							
+
 							// Third pass: collect all non-signing components
 							for _, compID := range componentIDs {
 								if !strings.HasPrefix(compID, "sign_") {
 									nonSigningComponents = append(nonSigningComponents, compID)
 								}
 							}
-							
+
 							// If no sign_* component found, default to sign_kdc
 							if signingComponentID == "" {
 								signingComponentID = "sign_kdc"
 							}
-							
+
 							enrichment.SigningComponentID = signingComponentID
 							enrichment.ComponentIDs = nonSigningComponents
 							enrichment.ComponentNames = nonSigningComponents
-							
+
 							// Get nodes for components (for verbose mode - we'll include them always)
 							nodeSet := make(map[string]bool)
 							for _, compID := range componentIDs {
@@ -325,7 +325,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 							}
 						}
 					}
-					
+
 					resp.ZoneEnrichments[zone.Name] = enrichment
 				}
 			}
@@ -502,13 +502,13 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						log.Printf("KDC: Warning: Failed to get signing mode for zone %s: %v", req.ZoneName, err)
 						newSigningMode = ZoneSigningModeCentral // Default
 					}
-					
+
 					// Get components from the service for display
 					serviceComponents, err := kdcDB.GetComponentsForService(serviceID)
 					if err != nil {
 						log.Printf("KDC: Warning: Failed to get components for service %s: %v", serviceID, err)
 					}
-					
+
 					componentNames := make([]string, 0, len(serviceComponents))
 					for _, compID := range serviceComponents {
 						comp, err := kdcDB.GetComponent(compID)
@@ -518,12 +518,12 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 							componentNames = append(componentNames, compID)
 						}
 					}
-					
+
 					componentsStr := strings.Join(componentNames, ", ")
 					if componentsStr == "" {
 						componentsStr = "(none)"
 					}
-					
+
 					resp.Msg = fmt.Sprintf("Zone %s assigned to service %s (signing mode: %s, components: %s)", req.ZoneName, serviceID, newSigningMode, componentsStr)
 					resp.Zone = zone
 				}
@@ -662,7 +662,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 							} else {
 								log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY")
 							}
-							
+
 							resp.Msg = fmt.Sprintf("Key %s transitioned to distributed state. Distribution ID: %s. NOTIFYs sent to nodes.", req.KeyID, distributionID)
 							// Reload key to get updated state
 							key, _ = kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
@@ -681,7 +681,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "key_id is required for transition command")
 				return
 			}
-			
+
 			// Get key and determine next state based on current state
 			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
 			if err != nil {
@@ -701,7 +701,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					json.NewEncoder(w).Encode(resp)
 					return
 				}
-				
+
 				if err := kdcDB.UpdateKeyState(req.ZoneName, req.KeyID, toState); err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
@@ -769,7 +769,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			var deletedCount int64
 			var err error
 			var states []KeyState
-			
+
 			if req.Force {
 				// Delete both removed and distributed keys
 				states = []KeyState{KeyStateRemoved, KeyStateDistributed}
@@ -777,7 +777,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				// Only delete removed keys
 				states = []KeyState{KeyStateRemoved}
 			}
-			
+
 			totalDeleted := int64(0)
 			for _, state := range states {
 				deletedCount, err = kdcDB.DeleteKeysByState(state, req.ZoneName)
@@ -788,7 +788,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				}
 				totalDeleted += deletedCount
 			}
-			
+
 			if !resp.Error {
 				var stateDesc string
 				if req.Force {
@@ -816,7 +816,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "new_state is required for setstate command")
 				return
 			}
-			
+
 			newState := KeyState(req.NewState)
 			// Validate state
 			validStates := []KeyState{
@@ -872,11 +872,11 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "zones list is required for distrib-multi command")
 				return
 			}
-			
+
 			var results []DistributionResult
 			successCount := 0
 			errorCount := 0
-			
+
 			// Collect all keys from all zones first
 			type ZoneKeyInfo struct {
 				ZoneName   string
@@ -885,11 +885,11 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				Nodes      []*Node
 				Result     *DistributionResult
 			}
-			
+
 			zoneInfos := make([]*ZoneKeyInfo, 0, len(req.Zones))
 			allKeyIDs := make([]string, 0)
 			allKeys := make([]*DNSSECKey, 0)
-			
+
 			// First pass: collect keys and validate zones
 			for _, zoneName := range req.Zones {
 				zoneInfo := &ZoneKeyInfo{
@@ -899,7 +899,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						Status:   "error",
 					},
 				}
-				
+
 				// Find a standby ZSK for this zone
 				keys, err := kdcDB.GetDNSSECKeysForZone(zoneName)
 				if err != nil {
@@ -908,7 +908,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					errorCount++
 					continue
 				}
-				
+
 				// Get nodes for this zone
 				nodes, err := kdcDB.GetActiveNodesForZone(zoneName)
 				if err != nil {
@@ -918,7 +918,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					continue
 				}
 				zoneInfo.Nodes = nodes
-				
+
 				// Check zone signing mode
 				_, err = kdcDB.GetZone(zoneName)
 				if err != nil {
@@ -940,7 +940,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					errorCount++
 					continue
 				}
-				
+
 				// Find ZSK to distribute
 				var standbyZSK *DNSSECKey
 				for _, key := range keys {
@@ -949,7 +949,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						break
 					}
 				}
-				
+
 				// Find KSK for edgesign_full zones
 				var activeKSK *DNSSECKey
 				if signingMode == ZoneSigningModeEdgesignFull {
@@ -960,21 +960,21 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						}
 					}
 				}
-				
+
 				if standbyZSK == nil && activeKSK == nil {
 					zoneInfo.Result.Msg = "No standby ZSK or active KSK found for zone"
 					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
-				
+
 				if len(nodes) == 0 {
 					zoneInfo.Result.Msg = fmt.Sprintf("No active nodes serve zone %s", zoneName)
 					results = append(results, *zoneInfo.Result)
 					errorCount++
 					continue
 				}
-				
+
 				// Check if any nodes have notify_address configured
 				nodesWithNotify := 0
 				for _, node := range nodes {
@@ -988,11 +988,11 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					errorCount++
 					continue
 				}
-				
+
 				zoneInfo.StandbyZSK = standbyZSK
 				zoneInfo.ActiveKSK = activeKSK
 				zoneInfos = append(zoneInfos, zoneInfo)
-				
+
 				// Collect key IDs for shared distribution ID
 				if standbyZSK != nil {
 					allKeyIDs = append(allKeyIDs, standbyZSK.ID)
@@ -1003,7 +1003,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					allKeys = append(allKeys, activeKSK)
 				}
 			}
-			
+
 			// If no valid zones, return early
 			if len(zoneInfos) == 0 {
 				resp.Results = results
@@ -1015,7 +1015,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				json.NewEncoder(w).Encode(resp)
 				return
 			}
-			
+
 			// Create a single distribution ID for all keys across all zones
 			// Use a hash of all zone names + all key IDs
 			allZoneNames := make([]string, len(zoneInfos))
@@ -1023,7 +1023,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				allZoneNames[i] = zi.ZoneName
 			}
 			sort.Strings(allZoneNames)
-			
+
 			// Create distribution ID from sorted zone names and sorted key IDs
 			// Use 4 bytes (8 hex chars) for shorter, more convenient IDs
 			hash := sha256.New()
@@ -1035,9 +1035,9 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			}
 			hashBytes := hash.Sum(nil)
 			sharedDistributionID := hex.EncodeToString(hashBytes[:4])
-			
+
 			log.Printf("KDC: Created shared distribution ID %s for %d key(s) across %d zone(s)", sharedDistributionID, len(allKeys), len(zoneInfos))
-			
+
 			// Collect all unique nodes across all zones
 			nodeMap := make(map[string]*Node)
 			for _, zoneInfo := range zoneInfos {
@@ -1051,21 +1051,21 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			for _, node := range nodeMap {
 				allNodes = append(allNodes, node)
 			}
-			
+
 			log.Printf("KDC: Will distribute %d key(s) to %d unique node(s) using shared distribution ID %s", len(allKeys), len(allNodes), sharedDistributionID)
-			
+
 			// Validate crypto backend before any state changes
 			forcedCrypto := req.Crypto
 			if forcedCrypto != "" && forcedCrypto != "hpke" && forcedCrypto != "jose" {
 				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", forcedCrypto))
 				return
 			}
-			
+
 			// Second pass: encrypt all keys for all nodes using the shared distribution ID
 			totalEncryptedCount := 0
 			for _, zoneInfo := range zoneInfos {
 				encryptedCount := 0
-				
+
 				// Update key states
 				if zoneInfo.StandbyZSK != nil && zoneInfo.StandbyZSK.State == KeyStateStandby {
 					if err := kdcDB.UpdateKeyState(zoneInfo.ZoneName, zoneInfo.StandbyZSK.ID, KeyStateDistributed); err != nil {
@@ -1075,7 +1075,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						continue
 					}
 				}
-				
+
 				if zoneInfo.ActiveKSK != nil && zoneInfo.ActiveKSK.State == KeyStateActive {
 					if err := kdcDB.UpdateKeyState(zoneInfo.ZoneName, zoneInfo.ActiveKSK.ID, KeyStateActiveDist); err != nil {
 						zoneInfo.Result.Msg = fmt.Sprintf("Failed to update KSK state: %v", err)
@@ -1084,7 +1084,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						continue
 					}
 				}
-				
+
 				// Encrypt keys for all nodes (each node gets all keys from all zones in this distribution)
 				for _, node := range allNodes {
 					if zoneInfo.StandbyZSK != nil {
@@ -1095,7 +1095,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						}
 						encryptedCount++
 					}
-					
+
 					if zoneInfo.ActiveKSK != nil {
 						_, _, _, err := kdcDB.EncryptKeyForNodeWithCrypto(zoneInfo.ActiveKSK, node, kdcConf, forcedCrypto, sharedDistributionID)
 						if err != nil {
@@ -1105,9 +1105,9 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						encryptedCount++
 					}
 				}
-				
+
 				totalEncryptedCount += encryptedCount
-				
+
 				zoneInfo.Result.Status = "success"
 				keyCount := 0
 				if zoneInfo.StandbyZSK != nil {
@@ -1120,12 +1120,12 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						zoneInfo.Result.KeyID = zoneInfo.ActiveKSK.ID
 					}
 				}
-				
+
 				zoneInfo.Result.Msg = fmt.Sprintf("%d key distributed (distribution ID: %s) to %d node(s)", keyCount, sharedDistributionID, len(allNodes))
 				results = append(results, *zoneInfo.Result)
 				successCount++
 			}
-			
+
 			// Send a single NOTIFY for the shared distribution
 			if kdcConf != nil && kdcConf.ControlZone != "" && sharedDistributionID != "" && totalEncryptedCount > 0 {
 				if err := kdcDB.SendNotifyWithDistributionID(sharedDistributionID, kdcConf.ControlZone); err != nil {
@@ -1134,7 +1134,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					log.Printf("KDC: Successfully sent NOTIFY for shared distribution %s", sharedDistributionID)
 				}
 			}
-			
+
 			resp.Results = results
 			if errorCount == 0 {
 				resp.Msg = fmt.Sprintf("Successfully distributed keys for %d zone(s)", successCount)
@@ -1294,27 +1294,27 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 
 // KdcEnrollmentPost represents a request to the KDC enrollment API
 type KdcEnrollmentPost struct {
-	Command          string        `json:"command"`           // "generate", "activate", "list", "status", "purge", "mark-used"
-	NodeID           string        `json:"node_id,omitempty"` // For generate, activate, status commands
-	TokenValue       string        `json:"token_value,omitempty"` // For mark-used command
-	ExpirationWindow string        `json:"expiration_window,omitempty"` // For activate command (e.g., "5m", "1h")
-	Comment          string        `json:"comment,omitempty"` // For generate command
-	Crypto           string        `json:"crypto,omitempty"` // For generate command: "hpke" or "jose" to include only that backend's public key
-	DeleteFiles      bool          `json:"delete_files,omitempty"` // For purge command
+	Command          string `json:"command"`                     // "generate", "activate", "list", "status", "purge", "mark-used"
+	NodeID           string `json:"node_id,omitempty"`           // For generate, activate, status commands
+	TokenValue       string `json:"token_value,omitempty"`       // For mark-used command
+	ExpirationWindow string `json:"expiration_window,omitempty"` // For activate command (e.g., "5m", "1h")
+	Comment          string `json:"comment,omitempty"`           // For generate command
+	Crypto           string `json:"crypto,omitempty"`            // For generate command: "hpke" or "jose" to include only that backend's public key
+	DeleteFiles      bool   `json:"delete_files,omitempty"`      // For purge command
 }
 
 // KdcEnrollmentResponse represents a response from the KDC enrollment API
 type KdcEnrollmentResponse struct {
-	Time        time.Time        `json:"time"`
-	Error       bool             `json:"error,omitempty"`
-	ErrorMsg    string           `json:"error_msg,omitempty"`
-	Msg         string           `json:"msg,omitempty"`
-	Token       *EnrollmentToken  `json:"token,omitempty"`
-	Tokens      []*EnrollmentToken `json:"tokens,omitempty"`
-	Status      string           `json:"status,omitempty"`
+	Time     time.Time          `json:"time"`
+	Error    bool               `json:"error,omitempty"`
+	ErrorMsg string             `json:"error_msg,omitempty"`
+	Msg      string             `json:"msg,omitempty"`
+	Token    *EnrollmentToken   `json:"token,omitempty"`
+	Tokens   []*EnrollmentToken `json:"tokens,omitempty"`
+	Status   string             `json:"status,omitempty"`
 	// BlobPath    string           `json:"blob_path,omitempty"`    // For generate command (deprecated - use blob_content)
-	BlobContent string           `json:"blob_content,omitempty"` // For generate command: base64-encoded blob content
-	Count       int              `json:"count,omitempty"`        // For purge command
+	BlobContent string `json:"blob_content,omitempty"` // For generate command: base64-encoded blob content
+	Count       int    `json:"count,omitempty"`        // For purge command
 }
 
 // KdcConfigPost represents a request to the KDC config API
@@ -1353,7 +1353,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "node_id is required for generate command")
 				return
 			}
-			
+
 			// Check if node already exists and is active
 			existingNode, err := kdcDB.GetNode(req.NodeID)
 			if err == nil {
@@ -1367,7 +1367,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				// This is intentional - nodes in these states may need to re-enroll
 			}
 			// If node doesn't exist (err != nil), that's fine - it's a new node
-			
+
 			// Check if token already exists
 			status, err := kdcDB.GetEnrollmentTokenStatus(req.NodeID)
 			if err != nil {
@@ -1388,7 +1388,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						resp.ErrorMsg = fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", cryptoBackend)
 					}
 				}
-				
+
 				// Only proceed if validation passed
 				if !resp.Error {
 					// Generate token
@@ -1426,7 +1426,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "node_id is required for activate command")
 				return
 			}
-			
+
 			expirationWindow := kdcConf.GetEnrollmentExpirationWindow()
 			if req.ExpirationWindow != "" {
 				var err error
@@ -1437,7 +1437,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 					break
 				}
 			}
-			
+
 			// Check token status
 			status, err := kdcDB.GetEnrollmentTokenStatus(req.NodeID)
 			if err != nil {
@@ -1477,7 +1477,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "node_id is required for status command")
 				return
 			}
-			
+
 			status, err := kdcDB.GetEnrollmentTokenStatus(req.NodeID)
 			if err != nil {
 				resp.Error = true
@@ -1506,7 +1506,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			} else {
 				resp.Count = count
 				resp.Msg = fmt.Sprintf("Purged %d enrollment token(s)", count)
-				
+
 				// Optionally delete blob files
 				if req.DeleteFiles && count > 0 {
 					tokens, _ := kdcDB.ListEnrollmentTokens()
@@ -1531,7 +1531,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "token_value is required for mark-used command")
 				return
 			}
-			
+
 			err := kdcDB.MarkEnrollmentTokenUsed(req.TokenValue)
 			if err != nil {
 				resp.Error = true
@@ -1588,13 +1588,13 @@ func APIKdcConfig(kdcConf *tnm.KdcConf, tdnsConf interface{}) http.HandlerFunc {
 			}
 
 			configResp := map[string]interface{}{
-				"control_zone":        kdcConf.ControlZone,
-				"default_algorithm":   kdcConf.DefaultAlgorithm,
+				"control_zone":          kdcConf.ControlZone,
+				"default_algorithm":     kdcConf.DefaultAlgorithm,
 				"key_rotation_interval": kdcConf.KeyRotationInterval.String(),
-				"standby_key_count":   kdcConf.StandbyKeyCount,
-				"chunk_max_size":  kdcConf.GetChunkMaxSize(),
-				"dns_addresses":       dnsAddresses,
-				"api_addresses":        apiAddresses,
+				"standby_key_count":     kdcConf.StandbyKeyCount,
+				"chunk_max_size":        kdcConf.GetChunkMaxSize(),
+				"dns_addresses":         dnsAddresses,
+				"api_addresses":         apiAddresses,
 			}
 			resp.Config = configResp
 
@@ -1610,9 +1610,9 @@ func APIKdcConfig(kdcConf *tnm.KdcConf, tdnsConf interface{}) http.HandlerFunc {
 
 // KdcDistribPost represents a request to the KDC distrib API
 type KdcDistribPost struct {
-	Command        string `json:"command"`         // "list", "state", "completed", "purge", "purge-force"
+	Command        string `json:"command"`                   // "list", "state", "completed", "purge", "purge-force"
 	DistributionID string `json:"distribution_id,omitempty"` // For state and completed commands
-	Force          bool   `json:"force,omitempty"` // For purge command: if true, delete all distributions
+	Force          bool   `json:"force,omitempty"`           // For purge command: if true, delete all distributions
 }
 
 // DistributionStateInfo represents detailed information about a distribution
@@ -1622,23 +1622,22 @@ type DistributionStateInfo struct {
 	KeyID          string   `json:"key_id"`
 	KeyState       string   `json:"key_state"`
 	CreatedAt      string   `json:"created_at"`
-	TargetNodes   []string `json:"target_nodes"`   // All nodes that should receive this distribution
+	TargetNodes    []string `json:"target_nodes"`    // All nodes that should receive this distribution
 	ConfirmedNodes []string `json:"confirmed_nodes"` // Nodes that have confirmed
 	PendingNodes   []string `json:"pending_nodes"`   // Nodes that haven't confirmed yet
 	AllConfirmed   bool     `json:"all_confirmed"`
 	CompletedAt    *string  `json:"completed_at,omitempty"` // When distribution was completed
 }
 
-
 // KdcDistribResponse represents a response from the KDC distrib API
 type KdcDistribResponse struct {
-	Time          time.Time                `json:"time"`
-	Error         bool                     `json:"error,omitempty"`
-	ErrorMsg      string                   `json:"error_msg,omitempty"`
-	Msg           string                   `json:"msg,omitempty"`
-	Distributions []string                 `json:"distributions,omitempty"` // For list command (simple format)
+	Time          time.Time                 `json:"time"`
+	Error         bool                      `json:"error,omitempty"`
+	ErrorMsg      string                    `json:"error_msg,omitempty"`
+	Msg           string                    `json:"msg,omitempty"`
+	Distributions []string                  `json:"distributions,omitempty"` // For list command (simple format)
 	Summaries     []DistributionSummaryInfo `json:"summaries,omitempty"`     // For list command (detailed format)
-	State         *DistributionStateInfo    `json:"state,omitempty"`          // For state command
+	State         *DistributionStateInfo    `json:"state,omitempty"`         // For state command
 }
 
 // APIKdcDistrib handles distribution management endpoints
@@ -1703,7 +1702,7 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "distribution_id is required for state command")
 				return
 			}
-			
+
 			// Get distribution records
 			records, err := kdcDB.GetDistributionRecordsForDistributionID(req.DistributionID)
 			if err != nil {
@@ -1715,14 +1714,14 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			} else {
 				// Use first record to get zone/key info
 				record := records[0]
-				
+
 				// Get key state
 				key, err := kdcDB.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
 				keyState := "unknown"
 				if err == nil {
 					keyState = string(key.State)
 				}
-				
+
 				// Get target nodes (nodes that serve this zone via components)
 				zoneNodes, _ := kdcDB.GetActiveNodesForZone(record.ZoneName)
 				var targetNodes []string
@@ -1731,10 +1730,10 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						targetNodes = append(targetNodes, node.ID)
 					}
 				}
-				
+
 				// Get confirmed nodes
 				confirmedNodes, _ := kdcDB.GetDistributionConfirmations(req.DistributionID)
-				
+
 				// Calculate pending nodes
 				confirmedMap := make(map[string]bool)
 				for _, nodeID := range confirmedNodes {
@@ -1746,9 +1745,9 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						pendingNodes = append(pendingNodes, nodeID)
 					}
 				}
-				
+
 				allConfirmed := len(pendingNodes) == 0 && len(targetNodes) > 0
-				
+
 				resp.State = &DistributionStateInfo{
 					DistributionID: req.DistributionID,
 					ZoneName:       record.ZoneName,
@@ -1768,7 +1767,7 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "distribution_id is required for completed command")
 				return
 			}
-			
+
 			// Get distribution records to find zone/key
 			records, err := kdcDB.GetDistributionRecordsForDistributionID(req.DistributionID)
 			if err != nil {
@@ -1779,7 +1778,7 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				resp.ErrorMsg = fmt.Sprintf("Distribution %s not found", req.DistributionID)
 			} else {
 				record := records[0]
-				
+
 				// Force transition key state from 'distributed' to 'edgesigner'
 				if err := kdcDB.UpdateKeyState(record.ZoneName, record.KeyID, KeyStateEdgeSigner); err != nil {
 					resp.Error = true
@@ -1873,7 +1872,7 @@ func APIKdcOperations(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				}
 				forcedCrypto = crypto
 			}
-			
+
 			// Create ping operations for each node
 			var distributionIDs []string
 			for _, nodeID := range nodeIDs {
@@ -2616,7 +2615,7 @@ func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("KDC: APIKdcNodeComponent: Received %s command (node_id=%s, node_name=%s, component_id=%s, component_name=%s)", 
+		log.Printf("KDC: APIKdcNodeComponent: Received %s command (node_id=%s, node_name=%s, component_id=%s, component_name=%s)",
 			req.Command, req.NodeID, req.NodeName, req.ComponentID, req.ComponentName)
 
 		resp := KdcNodeComponentResponse{
@@ -3045,11 +3044,11 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 	} else {
 		log.Printf("SetupKdcAPIRoutes: WARNING: conf is not a map[string]interface{} (got %T)", conf)
 	}
-	
+
 	if kdcConf == nil {
 		log.Printf("SetupKdcAPIRoutes: WARNING: kdcConf is nil, /kdc/config, /kdc/debug, and /kdc/service-transaction routes will NOT be registered")
 	}
-	
+
 	// Register routes directly on the main router with full paths
 	// The router passed in already has /api/v1 routes set up via SetupAPIRouter.
 	// We register KDC-specific routes with the full path /api/v1/kdc/* directly on the router.
@@ -3095,7 +3094,6 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 			router.Path("/api/v1/kdc/catalog").HandlerFunc(APIKdcCatalog(kdcDB, kdcConf)).Methods("POST")
 		}
 	}
-	
+
 	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/node-component, /api/v1/kdc/enroll, /api/v1/kdc/service-transaction, /api/v1/kdc/config, /api/v1/kdc/debug, /api/v1/kdc/catalog, /api/v1/kdc/operations")
 }
-

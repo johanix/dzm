@@ -137,7 +137,7 @@ To fix this:
 Note: If you generate a NEW keypair, you must regenerate all enrollment blobs that were
 created with the old public key, as they will no longer be decryptable.`, kdcConf.KdcHpkePrivKey, err, kdcConf.KdcHpkePrivKey)
 	}
-	
+
 	// Log successful key loading (public key for verification)
 	pubKeyHex := fmt.Sprintf("%x", hpkeKeys.PublicKey)
 	log.Printf("KDC: Loaded HPKE keypair from %s (public key: %s...)", kdcConf.KdcHpkePrivKey, pubKeyHex[:16])
@@ -290,4 +290,3 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	log.Printf("TDNS %s (%s): KDC started successfully", tdns.Globals.App.Name, tdns.AppTypeToString[tdns.Globals.App.Type])
 	return nil
 }
-

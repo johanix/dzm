@@ -302,28 +302,28 @@ that were created with the old public keys, as they will no longer be decryptabl
 
 		// Print next steps
 		fmt.Printf("Next steps:\n")
-		
+
 		// Build list of steps conditionally
 		steps := []string{}
-		
+
 		// Always include review step
 		steps = append(steps, "Review the generated key files")
-		
+
 		// Conditionally add HPKE config step
 		if genHpke {
 			absPath, _ := filepath.Abs(hpkeOutfile)
 			steps = append(steps, fmt.Sprintf("Add to your KDC config: kdc_hpke_priv_key: %s", absPath))
 		}
-		
+
 		// Conditionally add JOSE config step
 		if genJose {
 			absPath, _ := filepath.Abs(joseOutfile)
 			steps = append(steps, fmt.Sprintf("Add to your KDC config: kdc_jose_priv_key: %s", absPath))
 		}
-		
+
 		// Always include restart and enrollment blob steps
 		steps = append(steps, "Restart the KDC")
-		
+
 		// Determine enrollment blob message based on which keys were generated
 		if genHpke && genJose {
 			steps = append(steps, "Generate enrollment blobs (which will include both public keys)")
@@ -332,7 +332,7 @@ that were created with the old public keys, as they will no longer be decryptabl
 		} else {
 			steps = append(steps, "Generate enrollment blobs (which will include the JOSE public key)")
 		}
-		
+
 		// Print steps with sequential numbering
 		for i, step := range steps {
 			fmt.Printf("  %d. %s\n", i+1, step)

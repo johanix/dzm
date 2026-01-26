@@ -13,20 +13,20 @@ import (
 
 // BlastZoneResult represents the result of calculating the blast zone for a compromised node
 type BlastZoneResult struct {
-	NodeID           string   `json:"node_id"`
-	AffectedZones    []string `json:"affected_zones"`    // All zones in components served by this node
-	EdgesignedZones []string `json:"edgesigned_zones"`  // Zones that need immediate ZSK rollover
-	Components       []string `json:"components"`        // Components served by this node
+	NodeID          string   `json:"node_id"`
+	AffectedZones   []string `json:"affected_zones"`   // All zones in components served by this node
+	EdgesignedZones []string `json:"edgesigned_zones"` // Zones that need immediate ZSK rollover
+	Components      []string `json:"components"`       // Components served by this node
 }
 
 // CalculateBlastZone calculates which zones are affected when a node is compromised
 // Returns zones that need immediate ZSK rollover (only edgesigned zones)
 func (kdc *KdcDB) CalculateBlastZone(nodeID string) (*BlastZoneResult, error) {
 	result := &BlastZoneResult{
-		NodeID:           nodeID,
-		AffectedZones:    []string{},
+		NodeID:          nodeID,
+		AffectedZones:   []string{},
 		EdgesignedZones: []string{},
-		Components:       []string{},
+		Components:      []string{},
 	}
 
 	// Step 1: Find all components served by this node
@@ -45,7 +45,7 @@ func (kdc *KdcDB) CalculateBlastZone(nodeID string) (*BlastZoneResult, error) {
 	// Zones are assigned to services, and components belong to services
 	// So we need to find all services that have these components, then all zones in those services
 	zoneSet := make(map[string]bool)
-	
+
 	// Get all services that have any of these components
 	serviceSet := make(map[string]bool)
 	for _, componentID := range components {
@@ -66,7 +66,7 @@ func (kdc *KdcDB) CalculateBlastZone(nodeID string) (*BlastZoneResult, error) {
 		}
 		rows.Close()
 	}
-	
+
 	// Get all zones from these services
 	for serviceID := range serviceSet {
 		rows, err := kdc.DB.Query(
@@ -197,23 +197,23 @@ func (kdc *KdcDB) GetNodesForZone(zoneName string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get zone: %v", err)
 	}
-	
+
 	if zone.ServiceID == "" {
 		// Zone has no service assignment, return empty list
 		return []string{}, nil
 	}
-	
+
 	// Step 2: Get all components for the service
 	componentIDs, err := kdc.GetComponentsForService(zone.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get components for service: %v", err)
 	}
-	
+
 	if len(componentIDs) == 0 {
 		// Service has no components, return empty list
 		return []string{}, nil
 	}
-	
+
 	// Step 3: For each component, find all nodes that serve it
 	nodeSet := make(map[string]bool)
 	for _, componentID := range componentIDs {
@@ -226,13 +226,13 @@ func (kdc *KdcDB) GetNodesForZone(zoneName string) ([]string, error) {
 			nodeSet[nodeID] = true
 		}
 	}
-	
+
 	// Convert set to slice
 	var nodes []string
 	for nodeID := range nodeSet {
 		nodes = append(nodes, nodeID)
 	}
-	
+
 	return nodes, nil
 }
 
@@ -265,4 +265,3 @@ func (kdc *KdcDB) GetActiveNodesForZone(zoneName string) ([]*Node, error) {
 
 	return nodes, nil
 }
-

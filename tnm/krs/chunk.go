@@ -59,7 +59,7 @@ func QueryCHUNK(krsDB *KrsDB, conf *tnm.KrsConf, nodeID, distributionID string, 
 	if !strings.HasSuffix(nodeIDFQDN, ".") {
 		nodeIDFQDN = dns.Fqdn(nodeID)
 	}
-	
+
 	var qname string
 	if sequence == 0 {
 		// Manifest chunk
@@ -186,7 +186,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 	// created using either key depending on which backend was used for encryption
 	var hmacKeys [][]byte
 	var hmacKeyNames []string
-	
+
 	// Try HPKE key if available
 	if conf.Node.LongTermHpkePrivKey != "" {
 		// Load node's HPKE private key
@@ -205,7 +205,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 			}
 		}
 	}
-	
+
 	// Try JOSE key if available
 	if conf.Node.LongTermJosePrivKey != "" {
 		// Load JOSE private key using loadPrivateKeyForBackend
@@ -229,7 +229,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 					} else {
 						// Extract x-coordinate from the ECDSA private key's public key (32 bytes for P-256)
 						xBytes := ecdsaKey.PublicKey.X.Bytes()
-						
+
 						// Validate x-coordinate length (defensive check - should be <= 32 for P-256)
 						if len(xBytes) > 32 {
 							log.Printf("KRS: Warning: JOSE private key x-coordinate length %d exceeds 32 bytes (curve: %s)", len(xBytes), ecdsaKey.Curve.Params().Name)
@@ -245,7 +245,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 			}
 		}
 	}
-	
+
 	// Verify HMAC with all available keys
 	if len(hmacKeys) == 0 {
 		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
@@ -267,7 +267,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 			// HMAC didn't match, try next key
 			log.Printf("KRS: CHUNK manifest HMAC verification failed with %s key, trying next key", hmacKeyNames[i])
 		}
-		
+
 		if !verified {
 			if lastErr != nil {
 				return fmt.Errorf("CHUNK manifest HMAC verification failed with all available keys (%s) - last error: %v", strings.Join(hmacKeyNames, ", "), lastErr)
@@ -488,7 +488,7 @@ func ProcessEncryptedText(krsDB *KrsDB, conf *tnm.KrsConf, data []byte) (string,
 	}
 	log.Printf("KRS: Private key loaded: %d bytes", len(privateKey))
 	log.Printf("KRS: Private key (first 8 bytes): %x", privateKey[:8])
-	
+
 	// Verify we can derive public key from private key (sanity check)
 	derivedPubKey, err := hpke.DerivePublicKey(privateKey)
 	if err != nil {
@@ -546,12 +546,12 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 	if cryptoBackend == "" {
 		cryptoBackend = "hpke"
 	}
-	
+
 	// Fail fast if JOSE backend is requested but crypto V2 is disabled
 	if cryptoBackend == "jose" && !conf.ShouldUseCryptoV2() {
 		return nil, fmt.Errorf("jose backend requires crypto V2; enable feature flag or choose a different backend")
 	}
-	
+
 	privateKey, err := loadPrivateKeyForBackend(conf, cryptoBackend)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load private key for %s backend: %v", cryptoBackend, err)
@@ -591,7 +591,7 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 		}
 		log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
 	}
-	
+
 	return plaintextJSON, nil
 }
 
@@ -605,7 +605,7 @@ func ProcessEncryptedOperations(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, di
 	distID := distributionID
 	// Step 1: Load node's private key and decrypt payload
 	log.Printf("KRS: Processing operation-based distribution (key_operations, mgmt_operations, or mixed) (%d bytes base64)", len(data))
-	
+
 	plaintextJSON, err := decryptPayload(conf, data, cryptoBackend)
 	if err != nil {
 		return err
@@ -761,7 +761,7 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distrib
 	distID := distributionID
 	// Step 1: Load node's private key and decrypt payload
 	log.Printf("KRS: Processing node_operations content (update_components) (%d bytes base64)", len(data))
-	
+
 	plaintextJSON, err := decryptPayload(conf, data, cryptoBackend)
 	if err != nil {
 		return err
@@ -792,14 +792,14 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distrib
 	// Store components in the database
 	var successfulComponents []edns0.ComponentStatusEntry
 	var failedComponents []edns0.ComponentStatusEntry
-	
+
 	for _, componentID := range componentIDs {
 		// For now, assume all components succeed (we could add error handling later)
 		successfulComponents = append(successfulComponents, edns0.ComponentStatusEntry{
 			ComponentID: componentID,
 		})
 	}
-	
+
 	if err := krsDB.StoreNodeComponents(componentIDs, distID); err != nil {
 		log.Printf("KRS: Warning: Failed to store components in database: %v", err)
 		// Mark all components as failed if storage fails
@@ -861,13 +861,13 @@ func loadPrivateKeyForBackend(conf *tnm.KrsConf, cryptoBackend string) ([]byte, 
 		if conf.Node.LongTermJosePrivKey == "" {
 			return nil, fmt.Errorf("node long-term JOSE private key not configured (required for JOSE backend)")
 		}
-		
+
 		// Read JOSE key file
 		keyData, err := os.ReadFile(conf.Node.LongTermJosePrivKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read JOSE private key file %s: %v", conf.Node.LongTermJosePrivKey, err)
 		}
-		
+
 		// Parse key (skip comments, extract JSON)
 		// Preserve line breaks for multi-line pretty-printed JWK JSON
 		keyLines := strings.Split(string(keyData), "\n")
@@ -879,14 +879,14 @@ func loadPrivateKeyForBackend(conf *tnm.KrsConf, cryptoBackend string) ([]byte, 
 				jsonLines = append(jsonLines, line)
 			}
 		}
-		
+
 		if len(jsonLines) == 0 {
 			return nil, fmt.Errorf("could not find JOSE private key JSON in file %s", conf.Node.LongTermJosePrivKey)
 		}
-		
+
 		// Join lines with newlines to preserve formatting
 		jwkJSON := strings.Join(jsonLines, "\n")
-		
+
 		log.Printf("KRS: Loaded JOSE private key from %s (%d bytes JSON)", conf.Node.LongTermJosePrivKey, len(jwkJSON))
 		return []byte(jwkJSON), nil
 	} else {
@@ -894,12 +894,12 @@ func loadPrivateKeyForBackend(conf *tnm.KrsConf, cryptoBackend string) ([]byte, 
 		if conf.Node.LongTermHpkePrivKey == "" {
 			return nil, fmt.Errorf("node long-term HPKE private key not configured (required for HPKE backend)")
 		}
-		
+
 		privateKey, err := tnm.LoadPrivateKey(conf.Node.LongTermHpkePrivKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load HPKE private key: %v", err)
 		}
-		
+
 		log.Printf("KRS: Loaded HPKE private key from %s (%d bytes)", conf.Node.LongTermHpkePrivKey, len(privateKey))
 		return privateKey, nil
 	}
@@ -1051,4 +1051,3 @@ func handleDeleteKeyOperation(krsDB *KrsDB, entry tnm.DistributionEntry, index i
 
 	return nil
 }
-

@@ -81,7 +81,7 @@ var kdcNodeAddCmd = &cobra.Command{
 
 		// Decode hex or base64 (try hex first, then base64)
 		var pubkey []byte
-		
+
 		// Try hex decoding first (64 hex chars = 32 bytes)
 		if len(pubkeyStr) == 64 {
 			pubkey, err = hex.DecodeString(pubkeyStr)
@@ -106,11 +106,11 @@ var kdcNodeAddCmd = &cobra.Command{
 		req := map[string]interface{}{
 			"command": "add",
 			"node": map[string]interface{}{
-				"id":               nodeIDFQDN,
-				"name":             nodename,
+				"id":                     nodeIDFQDN,
+				"name":                   nodename,
 				"long_term_hpke_pub_key": pubkey,
-				"state":            "online",
-				"comment":          "",
+				"state":                  "online",
+				"comment":                "",
 			},
 		}
 
@@ -154,7 +154,7 @@ var kdcNodeListCmd = &cobra.Command{
 				fmt.Println("No nodes configured")
 				return
 			}
-			
+
 			// Build table rows for columnize
 			lines := []string{"ID | Name | Notify Address | State | Crypto | Last Contact | Comment"}
 			for _, n := range nodes {
@@ -196,7 +196,7 @@ var kdcNodeListCmd = &cobra.Command{
 					lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s", id, name, notifyAddr, state, supportedCrypto, lastContact, comment))
 				}
 			}
-			
+
 			fmt.Println(columnize.SimpleFormat(lines))
 		} else {
 			fmt.Printf("Response: %+v\n", resp)
@@ -404,7 +404,7 @@ var kdcNodeComponentAddCmd = &cobra.Command{
 	Short: "Assign a component to a node",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs(cmd, "nodeid", "cid")
-		
+
 		api, err := getApiClient(true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -438,7 +438,7 @@ var kdcNodeComponentDeleteCmd = &cobra.Command{
 	Short: "Remove a component from a node",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs(cmd, "nodeid", "cid")
-		
+
 		api, err := getApiClient(true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -540,11 +540,11 @@ var kdcNodeComponentListCmd = &cobra.Command{
 			// Single node: show detailed component list
 			nodeID := nodeIDFlag.Value.String()
 			fmt.Printf("Components for node %s:\n", nodeID)
-			
+
 			// Build table rows for columnize
 			var rows []string
 			rows = append(rows, "Component ID | Active")
-			
+
 			for _, a := range assignments {
 				assignment, ok := a.(map[string]interface{})
 				if !ok {
@@ -558,7 +558,7 @@ var kdcNodeComponentListCmd = &cobra.Command{
 				}
 				rows = append(rows, fmt.Sprintf("%s | %s", componentID, activeStr))
 			}
-			
+
 			if len(rows) > 1 {
 				fmt.Println(columnize.SimpleFormat(rows))
 			}
@@ -567,14 +567,14 @@ var kdcNodeComponentListCmd = &cobra.Command{
 			// Build table rows for columnize
 			var rows []string
 			rows = append(rows, "Node ID | Components")
-			
+
 			// Sort nodes for consistent output
 			var nodeIDs []string
 			for nodeID := range nodeAssignments {
 				nodeIDs = append(nodeIDs, nodeID)
 			}
 			sort.Strings(nodeIDs)
-			
+
 			for _, nodeID := range nodeIDs {
 				components := nodeAssignments[nodeID]
 				componentsStr := strings.Join(components, ", ")
@@ -583,7 +583,7 @@ var kdcNodeComponentListCmd = &cobra.Command{
 				}
 				rows = append(rows, fmt.Sprintf("%s | %s", nodeID, componentsStr))
 			}
-			
+
 			if len(rows) > 1 {
 				fmt.Println(columnize.SimpleFormat(rows))
 			}
@@ -605,12 +605,12 @@ The output directory must exist.`,
 		}
 		// Ensure node ID is FQDN
 		nodeID = dns.Fqdn(nodeID)
-		
+
 		outDir, _ := cmd.Flags().GetString("outdir")
 		if outDir == "" {
 			log.Fatalf("Error: --outdir is required")
 		}
-		
+
 		// Verify output directory exists
 		info, err := os.Stat(outDir)
 		if err != nil {
@@ -619,16 +619,16 @@ The output directory must exist.`,
 		if !info.IsDir() {
 			log.Fatalf("Error: Output path is not a directory: %s", outDir)
 		}
-		
+
 		comment, _ := cmd.Flags().GetString("comment")
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
-		
+
 		// Validate crypto backend if provided (normalized to lowercase)
 		cryptoBackend, err = validateCryptoBackend(cryptoBackend)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		
+
 		// Call API (with fallback to DB)
 		// Note: outdir is not sent to API - CLI writes the file locally
 		req := map[string]interface{}{
@@ -641,29 +641,29 @@ The output directory must exist.`,
 		if cryptoBackend != "" {
 			req["crypto"] = cryptoBackend
 		}
-		
+
 		resp, err := callEnrollAPI("generate", req)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		
+
 		if getBool(resp, "error") {
 			log.Fatalf("Error: %v", getString(resp, "error_msg"))
 		}
-		
+
 		// Extract token from response
 		tokenRaw, ok := resp["token"]
 		if !ok {
 			log.Fatalf("Error: No token in response")
 		}
-		
+
 		// Convert token to EnrollmentToken struct
 		tokenJSON, _ := json.Marshal(tokenRaw)
 		var token kdc.EnrollmentToken
 		if err := json.Unmarshal(tokenJSON, &token); err != nil {
 			log.Fatalf("Error parsing token: %v", err)
 		}
-		
+
 		// Extract blob content and write to file
 		blobContent := getString(resp, "blob_content")
 		if blobContent == "" {
@@ -677,7 +677,7 @@ The output directory must exist.`,
 			}
 			log.Fatalf("Error: No blob content in response")
 		}
-		
+
 		// Write blob file to specified directory with comment header
 		// Remove trailing dot from FQDN for filename
 		nodeIDForFile := strings.TrimSuffix(nodeID, ".")
@@ -693,13 +693,13 @@ The output directory must exist.`,
 		if err := os.WriteFile(filename, fileContent, 0644); err != nil {
 			log.Fatalf("Error writing enrollment blob file: %v", err)
 		}
-		
+
 		// Get absolute path for display
 		absPath, err := filepath.Abs(filename)
 		if err != nil {
 			absPath = filename
 		}
-		
+
 		fmt.Printf("Enrollment token generated for node: %s\n", nodeID)
 		fmt.Printf("Token ID: %s\n", token.TokenID)
 		fmt.Printf("Enrollment blob written to: %s\n", absPath)
@@ -718,28 +718,28 @@ The expiration window defaults to 5 minutes if not specified.`,
 		}
 		// Ensure node ID is FQDN
 		nodeID = dns.Fqdn(nodeID)
-		
+
 		expirationStr, _ := cmd.Flags().GetString("expiration")
 		if expirationStr == "" {
 			expirationStr = "5m" // Default
 		}
-		
+
 		// Call API (with fallback to DB)
 		req := map[string]interface{}{
 			"command":           "activate",
 			"node_id":           nodeID,
 			"expiration_window": expirationStr,
 		}
-		
+
 		resp, err := callEnrollAPI("activate", req)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		
+
 		if getBool(resp, "error") {
 			log.Fatalf("Error: %v", getString(resp, "error_msg"))
 		}
-		
+
 		fmt.Printf("Enrollment token activated for node: %s\n", nodeID)
 		fmt.Printf("Expiration window: %s\n", expirationStr)
 	},
@@ -754,33 +754,33 @@ var kdcNodeEnrollListCmd = &cobra.Command{
 		req := map[string]interface{}{
 			"command": "list",
 		}
-		
+
 		resp, err := callEnrollAPI("list", req)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		
+
 		if getBool(resp, "error") {
 			log.Fatalf("Error: %v", getString(resp, "error_msg"))
 		}
-		
+
 		// Extract tokens from response
 		tokensRaw, ok := resp["tokens"]
 		if !ok {
 			fmt.Println("No enrollment tokens found")
 			return
 		}
-		
+
 		tokensArray, ok := tokensRaw.([]interface{})
 		if !ok {
 			log.Fatalf("Error: Invalid tokens format in response")
 		}
-		
+
 		if len(tokensArray) == 0 {
 			fmt.Println("No enrollment tokens found")
 			return
 		}
-		
+
 		// Convert to EnrollmentToken structs
 		var tokens []*kdc.EnrollmentToken
 		for _, tokenRaw := range tokensArray {
@@ -790,11 +790,11 @@ var kdcNodeEnrollListCmd = &cobra.Command{
 				tokens = append(tokens, &token)
 			}
 		}
-		
+
 		// Display tokens in a table (similar to dnssec key listing)
 		var lines []string
 		lines = append(lines, "Node ID | Token ID | Status | Timestamp | Event")
-		
+
 		for _, token := range tokens {
 			// Calculate status from token fields
 			var status string
@@ -807,7 +807,7 @@ var kdcNodeEnrollListCmd = &cobra.Command{
 			} else {
 				status = "active"
 			}
-			
+
 			// Determine timestamp and event based on current state
 			var timestamp, event string
 			if token.Used && token.UsedAt != nil {
@@ -832,17 +832,17 @@ var kdcNodeEnrollListCmd = &cobra.Command{
 				timestamp = token.CreatedAt.Format("2006-01-02 15:04:05")
 				event = "generated enrollment package"
 			}
-			
+
 			tokenIDDisplay := token.TokenID
 			if len(tokenIDDisplay) > 8 {
 				tokenIDDisplay = tokenIDDisplay[:8] + "..."
 			}
-			
+
 			line := fmt.Sprintf("%s | %s | %s | %s | %s",
 				token.NodeID, tokenIDDisplay, status, timestamp, event)
 			lines = append(lines, line)
 		}
-		
+
 		fmt.Println(columnize.SimpleFormat(lines))
 	},
 }
@@ -854,22 +854,22 @@ var kdcNodeEnrollPurgeCmd = &cobra.Command{
 Use --files to also delete associated enrollment blob files.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		deleteFiles, _ := cmd.Flags().GetBool("files")
-		
+
 		// Call API (with fallback to DB)
 		req := map[string]interface{}{
 			"command":      "purge",
 			"delete_files": deleteFiles,
 		}
-		
+
 		resp, err := callEnrollAPI("purge", req)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		
+
 		if getBool(resp, "error") {
 			log.Fatalf("Error: %v", getString(resp, "error_msg"))
 		}
-		
+
 		msg := getString(resp, "msg")
 		if msg != "" {
 			fmt.Printf("%s\n", msg)
@@ -891,28 +891,28 @@ var kdcNodeEnrollStatusCmd = &cobra.Command{
 		}
 		// Ensure node ID is FQDN
 		nodeID = dns.Fqdn(nodeID)
-		
+
 		// Call API (with fallback to DB)
 		req := map[string]interface{}{
 			"command": "status",
 			"node_id": nodeID,
 		}
-		
+
 		resp, err := callEnrollAPI("status", req)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		
+
 		if getBool(resp, "error") {
 			log.Fatalf("Error: %v", getString(resp, "error_msg"))
 		}
-		
+
 		status := getString(resp, "status")
 		if status == "not_found" {
 			fmt.Printf("No enrollment token found for node: %s\n", nodeID)
 			return
 		}
-		
+
 		// Extract token from response
 		tokenRaw, ok := resp["token"]
 		if !ok {
@@ -920,14 +920,14 @@ var kdcNodeEnrollStatusCmd = &cobra.Command{
 			fmt.Printf("  Status: %s\n", status)
 			return
 		}
-		
+
 		// Convert token to EnrollmentToken struct
 		tokenJSON, _ := json.Marshal(tokenRaw)
 		var token kdc.EnrollmentToken
 		if err := json.Unmarshal(tokenJSON, &token); err != nil {
 			log.Fatalf("Error parsing token: %v", err)
 		}
-		
+
 		// Display detailed status
 		fmt.Printf("Enrollment Token Status for Node: %s\n", nodeID)
 		fmt.Printf("  Status: %s\n", status)
@@ -988,7 +988,7 @@ Either --nodeid or --all must be specified.`,
 			nodeID := dns.Fqdn(nodeIDFlag)
 			req["node_id"] = nodeID
 		}
-		
+
 		// Add crypto flag if specified (normalized to lowercase)
 		cryptoBackend, _ := cmd.Flags().GetString("crypto")
 		if cryptoBackend != "" {
@@ -1029,7 +1029,7 @@ func init() {
 	KdcNodeComponentCmd.AddCommand(kdcNodeComponentAddCmd, kdcNodeComponentDeleteCmd, kdcNodeComponentListCmd)
 	KdcNodeEnrollCmd.AddCommand(kdcNodeEnrollGenerateCmd, kdcNodeEnrollActivateCmd, kdcNodeEnrollListCmd, kdcNodeEnrollPurgeCmd, kdcNodeEnrollStatusCmd)
 	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd, kdcNodePingCmd, KdcNodeComponentCmd, KdcNodeEnrollCmd)
-	
+
 	// Node-component command flags
 	kdcNodeComponentAddCmd.Flags().StringP("cid", "c", "", "Component ID")
 	kdcNodeComponentAddCmd.MarkFlagRequired("cid")
@@ -1040,7 +1040,7 @@ func init() {
 	KdcNodeCmd.PersistentFlags().StringVarP(&nodeid, "nodeid", "n", "", "node id")
 	KdcNodeCmd.PersistentFlags().StringVarP(&nodename, "nodename", "N", "", "node name")
 	KdcNodeCmd.PersistentFlags().StringVarP(&pubkeyfile, "pubkeyfile", "p", "", "public key file")
-	
+
 	kdcNodeUpdateCmd.Flags().StringP("nodeid", "n", "", "Node ID (required)")
 	kdcNodeUpdateCmd.MarkFlagRequired("nodeid")
 	kdcNodeUpdateCmd.Flags().StringP("name", "", "", "Node name")
@@ -1053,13 +1053,13 @@ func init() {
 	kdcNodeEnrollGenerateCmd.MarkFlagRequired("outdir")
 	kdcNodeEnrollGenerateCmd.Flags().String("comment", "", "Optional comment")
 	kdcNodeEnrollGenerateCmd.Flags().String("crypto", "", "Crypto backend to use (hpke or jose). If not specified, both are included.")
-	
+
 	kdcNodeEnrollActivateCmd.Flags().String("nodeid", "", "Node ID")
 	kdcNodeEnrollActivateCmd.MarkFlagRequired("nodeid")
 	kdcNodeEnrollActivateCmd.Flags().String("expiration", "", "Expiration window (e.g., 5m, 1h)")
-	
+
 	kdcNodeEnrollPurgeCmd.Flags().Bool("files", false, "Also delete enrollment blob files")
-	
+
 	kdcNodeEnrollStatusCmd.Flags().String("nodeid", "", "Node ID")
 	kdcNodeEnrollStatusCmd.MarkFlagRequired("nodeid")
 

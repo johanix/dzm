@@ -191,7 +191,7 @@ This command does not require a config file and will skip config initialization.
 		apiAddress, _ := cmd.Flags().GetString("api-address")
 		dbPath, _ := cmd.Flags().GetString("db-path")
 		logFile, _ := cmd.Flags().GetString("log-file")
-		
+
 		// Validate API address format if provided
 		if apiAddress != "" {
 			if _, _, err := net.SplitHostPort(apiAddress); err != nil {
@@ -263,15 +263,15 @@ var krsKeysListCmd = &cobra.Command{
 			if !okI || !okJ {
 				return false
 			}
-			
+
 			zoneI := getString(keyI, "zone_name", "ZoneName")
 			zoneJ := getString(keyJ, "zone_name", "ZoneName")
-			
+
 			// First sort by zone name
 			if zoneI != zoneJ {
 				return zoneI < zoneJ
 			}
-			
+
 			// If same zone, sort by key ID
 			keyIDI := getString(keyI, "key_id", "KeyID")
 			keyIDJ := getString(keyJ, "key_id", "KeyID")
@@ -328,7 +328,7 @@ var krsKeysHashCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		keyID := cmd.Flag("keyid").Value.String()
 		zoneID := cmd.Flag("zone").Value.String()
-		
+
 		if keyID == "" {
 			log.Fatalf("Error: --keyid is required")
 		}
@@ -644,9 +644,9 @@ var krsQueryKmreqCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":        "query-kmreq",
+			"command":         "query-kmreq",
 			"distribution_id": distributionID,
-			"zone_id":        tdns.Globals.Zonename,
+			"zone_id":         tdns.Globals.Zonename,
 		}
 
 		resp, err := sendKrsRequest(api, "/krs/query", req)
@@ -680,7 +680,7 @@ var krsDebugDistribFetchCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command":        "fetch-distribution",
+			"command":         "fetch-distribution",
 			"distribution_id": distributionID,
 		}
 
@@ -694,7 +694,7 @@ var krsDebugDistribFetchCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s\n", getString(resp, "msg"))
-		
+
 		// If content is present (clear_text or encrypted_text), display it
 		if content := getString(resp, "content"); content != "" {
 			fmt.Printf("\n%s\n", content)
@@ -717,7 +717,7 @@ var krsDebugHpkeGenerateCmd = &cobra.Command{
 		prefix := args[0]
 		pubKeyFile := prefix + ".publickey"
 		privKeyFile := prefix + ".privatekey"
-		
+
 		// Generate HPKE keypair
 		pubKey, privKey, err := hpke.GenerateKeyPair()
 		if err != nil {
@@ -967,7 +967,7 @@ func formatDateTime(isoStr string) string {
 	if isoStr == "" {
 		return ""
 	}
-	
+
 	// Try parsing as RFC3339 (ISO 8601)
 	t, err := time.Parse(time.RFC3339, isoStr)
 	if err != nil {
@@ -982,8 +982,7 @@ func formatDateTime(isoStr string) string {
 			}
 		}
 	}
-	
+
 	// Format as "year-mo-dy hr:min:sec"
 	return t.Format("2006-01-02 15:04:05")
 }
-

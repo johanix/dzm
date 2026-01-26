@@ -50,6 +50,7 @@ func selectBackendForNode(node *Node, forcedCrypto string) string {
 //   - determineContentType() - analyzes operations to determine content type
 //   - buildManifestMetadata() - creates manifest metadata with extra fields
 //   - splitIntoChunks() - handles CHUNK splitting logic
+//
 // This would separate concerns: cache lookup, backend selection, content type determination,
 // payload construction, encryption, manifest creation, and CHUNK splitting.
 func (kdc *KdcDB) prepareChunksForNodeV2(
@@ -151,9 +152,9 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Determine content type by analyzing all operations in this distribution
-	hasNodeOps := false    // update_components
-	hasKeyOps := false     // roll_key, delete_key
-	hasMgmtOps := false    // ping
+	hasNodeOps := false // update_components
+	hasKeyOps := false  // roll_key, delete_key
+	hasMgmtOps := false // ping
 
 	for _, record := range nodeRecords {
 		switch record.Operation {
@@ -167,7 +168,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Determine contentType based on operation mix
-	contentType := "key_operations"  // default
+	contentType := "key_operations" // default
 	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
 		contentType = "node_operations"
 	} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
