@@ -660,8 +660,8 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	// Defensive check: refuse HPKE operations for JOSE-only nodes
-	if err := validateHPKEForNode(node, nodeID, "operations"); err != nil {
+	// Validate HPKE eligibility once at the start (covers encryption and HMAC operations)
+	if err := validateHPKEForNode(node, nodeID, "HPKE operations"); err != nil {
 		return nil, err
 	}
 
@@ -669,10 +669,6 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	// var err error
 
 	if contentType == "encrypted_text" {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if err := validateHPKEForNode(node, nodeID, "encryption"); err != nil {
-			return nil, err
-		}
 		// Encrypt the text using HPKE and encode for transport
 		dataToChunk, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, []byte(text))
 		if err != nil {
@@ -759,10 +755,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
-	// Defensive check: refuse HPKE operations for JOSE-only nodes
-	if err := validateHPKEForNode(node, nodeID, "HMAC"); err != nil {
-		return nil, err
-	}
+	// (HPKE eligibility already validated at function start)
 	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}

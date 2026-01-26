@@ -37,42 +37,17 @@ func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*core.CHUNK,
 		return nil, fmt.Errorf("manifest JSON must be a JSON object (starts with '{'), got: %q", string(manifestJSON[:min(50, len(manifestJSON))]))
 	}
 
-	// Debug: Log first few bytes to verify it's JSON, not base64
-	if len(manifestJSON) > 0 {
-		firstChar := manifestJSON[0]
-		if firstChar != '{' && firstChar != '[' {
-			// This shouldn't happen due to check above, but log if it does
-			return nil, fmt.Errorf("manifest JSON does not start with '{' or '[', first byte: 0x%02x (%c)", firstChar, firstChar)
-		}
-	}
-
 	chunk := &core.CHUNK{
 		Format:     format,
 		HMACLen:    0, // Will be set after HMAC calculation
 		HMAC:       nil,
-		Sequence:   0, // Sequence=0 indicates manifest chunk
+		Sequence:   0,                       // Sequence=0 indicates manifest chunk
 		Total:      manifestData.ChunkCount, // Total contains the number of data chunks
 		DataLength: uint16(len(manifestJSON)),
 		Data:       manifestJSON, // Store raw JSON bytes (not base64-encoded)
 	}
 
-	// Verify Data field contains JSON (for debugging)
-	if len(chunk.Data) > 0 && chunk.Data[0] != '{' && chunk.Data[0] != '[' {
-		// This is unexpected - Data should contain raw JSON, not base64
-		// This indicates the manifest JSON was base64-encoded before being stored
-		// The String() method will handle decoding, but this shouldn't happen
-		return nil, fmt.Errorf("CreateCHUNKManifest: Data field does not contain JSON (first byte: 0x%02x '%c'), expected '{' or '['. This suggests the manifest JSON was base64-encoded before storage, which should not happen", chunk.Data[0], chunk.Data[0])
-	}
-
 	return chunk, nil
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // ExtractManifestData extracts ManifestData from a CHUNK manifest record

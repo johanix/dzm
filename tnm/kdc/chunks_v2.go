@@ -278,35 +278,35 @@ func splitIntoChunks(
 		chunkSize = 0
 		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
 			payloadSize, testSize, estimatedTotalSize)
+	} else {
+		// Use default chunk size if conf is nil
+		const defaultChunkSize = 60000
+		var chunkSizeInt int
+		if conf != nil {
+			chunkSizeInt = conf.GetChunkMaxSize()
 		} else {
-			// Use default chunk size if conf is nil
-			const defaultChunkSize = 60000
-			var chunkSizeInt int
-			if conf != nil {
-				chunkSizeInt = conf.GetChunkMaxSize()
-			} else {
-				chunkSizeInt = defaultChunkSize
-			}
-			dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
-			// Check if SplitIntoCHUNKs returned nil (overflow condition)
-			if dataChunks == nil {
-				return 0, 0, nil, fmt.Errorf("failed to split data into chunks (overflow or invalid chunk size)")
-			}
-			// Check for integer overflow before converting to uint16
-			if len(dataChunks) > math.MaxUint16 {
-				return 0, 0, nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
-			}
-			if chunkSizeInt > math.MaxUint16 {
-				return 0, 0, nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
-			}
-			if len(dataChunks) == 0 {
-				return 0, 0, nil, fmt.Errorf("no chunks created from data (data may be empty)")
-			}
-			chunkCount = uint16(len(dataChunks))
-			chunkSize = uint16(chunkSizeInt)
-			log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
-				payloadSize, testSize, estimatedTotalSize, chunkCount)
+			chunkSizeInt = defaultChunkSize
 		}
+		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		// Check if SplitIntoCHUNKs returned nil (overflow condition)
+		if dataChunks == nil {
+			return 0, 0, nil, fmt.Errorf("failed to split data into chunks (overflow or invalid chunk size)")
+		}
+		// Check for integer overflow before converting to uint16
+		if len(dataChunks) > math.MaxUint16 {
+			return 0, 0, nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
+		}
+		if chunkSizeInt > math.MaxUint16 {
+			return 0, 0, nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		}
+		if len(dataChunks) == 0 {
+			return 0, 0, nil, fmt.Errorf("no chunks created from data (data may be empty)")
+		}
+		chunkCount = uint16(len(dataChunks))
+		chunkSize = uint16(chunkSizeInt)
+		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
+			payloadSize, testSize, estimatedTotalSize, chunkCount)
+	}
 
 	return chunkCount, chunkSize, dataChunks, nil
 }

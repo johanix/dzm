@@ -611,9 +611,20 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 		sig0KeyFileAbs = sig0KeyFile
 	}
 
+	// Set defaults for optional parameters (before generating API certs)
+	if apiAddress == "" {
+		apiAddress = "127.0.0.1:8990"
+	}
+	if dbPath == "" {
+		dbPath = "/var/lib/tdns/krs.db"
+	}
+	if logFile == "" {
+		logFile = "/var/log/tdns/tdns-krs.log"
+	}
+
 	// 13. Generate API certs (if needed)
-	// For now, we'll generate a self-signed certificate for localhost
-	certFile, keyFile, err := generateAPICerts(configDir, blob.NodeID)
+	// Parse apiAddress to extract host for certificate SANs
+	certFile, keyFile, err := generateAPICerts(configDir, blob.NodeID, apiAddress)
 	if err != nil {
 		return fmt.Errorf("failed to generate API certificates: %v", err)
 	}
@@ -632,16 +643,6 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 	}
 
 	// 14. Ensure database directory exists (before generating config)
-	// Set defaults for optional parameters
-	if apiAddress == "" {
-		apiAddress = "127.0.0.1:8990"
-	}
-	if dbPath == "" {
-		dbPath = "/var/lib/tdns/krs.db"
-	}
-	if logFile == "" {
-		logFile = "/var/log/tdns/tdns-krs.log"
-	}
 
 	// The database DSN is configurable, so we check it here
 	if err := tnm.EnsureDatabaseDirectory(dbPath); err != nil {
@@ -752,11 +753,36 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 }
 
 // generateAPICerts generates a self-signed certificate for API server
-func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile string, err error) {
+func generateAPICerts(configDir string, nodeID string, apiAddress string) (certFile string, keyFile string, err error) {
 	// Create certs subdirectory
 	certsDir := filepath.Join(configDir, "certs")
 	if err := os.MkdirAll(certsDir, 0755); err != nil {
 		return "", "", fmt.Errorf("failed to create certs directory: %v", err)
+	}
+
+	// Parse apiAddress to extract host for certificate SANs
+	host, _, err := net.SplitHostPort(apiAddress)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to parse apiAddress %q: %v", apiAddress, err)
+	}
+
+	// Determine certificate SANs based on host
+	var ipAddresses []net.IP
+	var dnsNames []string
+	var commonName string
+
+	// Try to parse as IP address
+	if ip := net.ParseIP(host); ip != nil {
+		// It's an IP address
+		ipAddresses = []net.IP{ip}
+		commonName = host
+	} else {
+		// It's a hostname
+		dnsNames = []string{host}
+		commonName = host
+		// Also include localhost variants for compatibility
+		ipAddresses = []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}
+		dnsNames = append(dnsNames, "localhost")
 	}
 
 	// Generate private key
@@ -774,15 +800,15 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName:   "localhost",
+			CommonName:   commonName,
 			Organization: []string{"TDNS-KRS"},
 		},
 		NotBefore:   time.Now(),
 		NotAfter:    time.Now().Add(365 * 24 * time.Hour), // 1 year
 		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
-		DNSNames:    []string{"localhost"},
+		IPAddresses: ipAddresses,
+		DNSNames:    dnsNames,
 	}
 
 	// Create certificate
@@ -791,8 +817,15 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 		return "", "", fmt.Errorf("failed to create certificate: %v", err)
 	}
 
+	// Sanitize host for use in filename (replace colons and other special chars)
+	sanitizedHost := strings.ReplaceAll(host, ":", "_")
+	sanitizedHost = strings.ReplaceAll(sanitizedHost, ".", "_")
+	if sanitizedHost == "" {
+		sanitizedHost = "localhost" // Fallback if host is empty
+	}
+
 	// Write certificate (PEM format)
-	certFile = filepath.Join(certsDir, "localhost.crt")
+	certFile = filepath.Join(certsDir, sanitizedHost+".crt")
 	certPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
 		Bytes: certDER,
@@ -802,7 +835,7 @@ func generateAPICerts(configDir string, nodeID string) (certFile string, keyFile
 	}
 
 	// Write private key (PEM format)
-	keyFile = filepath.Join(certsDir, "localhost.key")
+	keyFile = filepath.Join(certsDir, sanitizedHost+".key")
 	keyPEM, err := tdns.PrivateKeyToPEM(privKey)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to convert key to PEM: %v", err)
