@@ -17,6 +17,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"net"
 	"os"
@@ -276,6 +277,10 @@ func RunEnroll(blobFile string, configDir string, notifyAddress string, cryptoBa
 	log.Printf("KRS: Encrypted enrollment request using %s backend (length: %d)", encryptionBackend, len(encryptedReq))
 
 	// 6. Create CHUNK record with encrypted enrollment request
+	// Check for integer overflow before converting to uint16
+	if len(encryptedReq) > math.MaxUint16 {
+		return fmt.Errorf("encrypted enrollment request too large: %d bytes (max: %d)", len(encryptedReq), math.MaxUint16)
+	}
 	chunk := &core.CHUNK{
 		Format:     core.FormatJSON,
 		HMACLen:    0, // No HMAC for enrollment

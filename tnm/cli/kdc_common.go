@@ -75,7 +75,7 @@ func sendKdcRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 			fmt.Fprintf(os.Stderr, "DEBUG: JSON decode error: %v\n", err)
 			fmt.Fprintf(os.Stderr, "DEBUG: Response body: %s\n", string(buf))
 		}
-		fmt.Printf("Request: URL: %s, Body: %s\n", endpoint, string(bytebuf.Bytes()))
+		fmt.Printf("Request: URL: %s, Body: %s\n", endpoint, bytebuf.String())
 		fmt.Printf("Response causing error: %s\n", string(buf))
 		return nil, fmt.Errorf("error unmarshaling response: %v", err)
 	}
@@ -210,30 +210,6 @@ func loadKdcConfigFromFile(configPath string) (*tnm.KdcConf, error) {
 	}
 
 	return &kdcConf, nil
-}
-
-// Helper function to get KDC database connection from config (fallback only)
-// This is used when API is unavailable. Normal operations should use the API.
-func getKdcDB() (*kdc.KdcDB, error) {
-	// Get config file path
-	configPath, err := getKdcConfigPath()
-	if err != nil {
-		return nil, err
-	}
-
-	// Load KDC config from file
-	kdcConf, err := loadKdcConfigFromFile(configPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create database connection
-	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to KDC database: %v", err)
-	}
-
-	return kdcDB, nil
 }
 
 // Helper function to get KDC config from file

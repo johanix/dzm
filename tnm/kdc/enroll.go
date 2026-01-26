@@ -239,7 +239,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 		var encryptedError []byte
 		// If we have the node's HPKE pubkey, encrypt the error message
 		// Otherwise, send it unencrypted (error messages aren't sensitive)
-		if hpkePubKey != nil && len(hpkePubKey) == 32 && kdcKeys != nil {
+		if len(hpkePubKey) == 32 && kdcKeys != nil {
 			// Encrypt using HPKE Auth mode (same as success case)
 			encryptedError, err = hpke.EncryptAuth(kdcKeys.PrivateKey, hpkePubKey, errorJSON)
 			if err != nil {
@@ -569,7 +569,7 @@ func HandleEnrollmentUpdate(ctx context.Context, dur *tdns.DnsUpdateRequest, kdc
 			m.SetRcode(r, dns.RcodeServerFailure)
 			return w.WriteMsg(m)
 		}
-		if hpkePubKey == nil || len(hpkePubKey) == 0 {
+		if len(hpkePubKey) == 0 {
 			log.Printf("KDC: Error: Node does not have HPKE public key but HPKE backend was selected")
 			m.SetRcode(r, dns.RcodeServerFailure)
 			return w.WriteMsg(m)

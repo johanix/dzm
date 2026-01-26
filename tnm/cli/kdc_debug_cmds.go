@@ -347,14 +347,14 @@ var kdcDebugHpkeEncryptCmd = &cobra.Command{
 
 		if outputFile != "" {
 			// Write encrypted key to file
-			output := fmt.Sprintf("# HPKE-encrypted DNSSEC key\n")
+			output := "# HPKE-encrypted DNSSEC key\n"
 			output += fmt.Sprintf("# Distribution ID: %s\n", distributionID)
 			output += fmt.Sprintf("# Zone: %s\n", tdns.Globals.Zonename)
 			output += fmt.Sprintf("# Key ID: %s\n", keyID)
 			output += fmt.Sprintf("# Node ID: %s\n", nodeID)
 			output += fmt.Sprintf("# Encrypted at: %s\n", time.Now().Format(time.RFC3339))
 			output += fmt.Sprintf("# Ephemeral public key (hex): %x\n", ephemeralPubKey)
-			output += fmt.Sprintf("# Encrypted key (base64):\n")
+			output += "# Encrypted key (base64):\n"
 			output += base64.StdEncoding.EncodeToString(encryptedKey) + "\n"
 
 			if err := os.WriteFile(outputFile, []byte(output), 0600); err != nil {

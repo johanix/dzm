@@ -154,7 +154,7 @@ var kdcZoneListCmd = &cobra.Command{
 		}
 
 		// Get zone enrichments from response
-		enrichmentsRaw, _ := resp["zone_enrichments"]
+		enrichmentsRaw := resp["zone_enrichments"]
 		enrichments := make(map[string]map[string]interface{})
 		if enrichmentsMap, ok := enrichmentsRaw.(map[string]interface{}); ok {
 			for k, v := range enrichmentsMap {

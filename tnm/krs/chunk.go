@@ -971,7 +971,7 @@ func handleRollKeyOperation(krsDB *KrsDB, entry tnm.DistributionEntry, distID, r
 		ReceivedAt:     time.Now(),
 		DistributionID: distID,
 		RetireTime:     retireTime,
-		Comment:        fmt.Sprintf("Received via roll_key operation"),
+		Comment:        "Received via roll_key operation",
 	}
 
 	// Store in database atomically

@@ -74,9 +74,7 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 		// Extract distributionID
 		suffixLen := len(controlZoneFQDN)
 		prefix := notifyZone[:len(notifyZone)-suffixLen]
-		if strings.HasSuffix(prefix, ".") {
-			prefix = prefix[:len(prefix)-1]
-		}
+		prefix = strings.TrimSuffix(prefix, ".")
 
 		// Get the last label (distributionID)
 		labels := strings.Split(prefix, ".")
@@ -106,7 +104,10 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 // StartNotifyReceiver starts a minimal DNS server that only handles NOTIFYs
 // DEPRECATED: Use HandleKrsNotify with RegisterNotifyHandler instead
 // Similar to tdns.NotifyReporter but adapted for KRS
-func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsConf) error {
+// This function is intentionally unused but kept for future use.
+//
+//lint:ignore U1000 This function is kept for future use
+func _xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsConf) error {
 	addr := conf.DnsEngine.Addresses[0]
 	if addr == "" {
 		addr = ":53"
@@ -181,9 +182,7 @@ func xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsConf
 			// Extract distributionID
 			suffixLen := len(controlZoneFQDN)
 			prefix := notifyZone[:len(notifyZone)-suffixLen]
-			if strings.HasSuffix(prefix, ".") {
-				prefix = prefix[:len(prefix)-1]
-			}
+			prefix = strings.TrimSuffix(prefix, ".")
 
 			// Get the last label (distributionID)
 			labels := strings.Split(prefix, ".")

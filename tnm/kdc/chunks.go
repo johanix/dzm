@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -46,7 +47,7 @@ var globalChunkCache = &chunkCache{
 // validateHPKEForNode validates that a node can use HPKE operations
 // Checks that the node is not JOSE-only and has a valid HPKE public key
 func validateHPKEForNode(node *Node, nodeID, purpose string) error {
-	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+	if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 		return fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for %s", nodeID, purpose)
 	}
 	if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
@@ -348,6 +349,13 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
 		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		// Check for integer overflow before converting to uint16
+		if len(dataChunks) > math.MaxUint16 {
+			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
+		}
+		if chunkSizeInt > math.MaxUint16 {
+			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		}
 		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
 		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
@@ -691,6 +699,13 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
 		dataChunks = tnm.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
+		// Check for integer overflow before converting to uint16
+		if len(dataChunks) > math.MaxUint16 {
+			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
+		}
+		if chunkSizeInt > math.MaxUint16 {
+			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		}
 		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
 		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",

@@ -1455,7 +1455,7 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 	var supportedCryptoJSON sql.NullString
 	var josePubKey []byte
 	// Only query by LongTermPubKey if it's not nil (JOSE-only nodes have NULL)
-	if pubKey == nil || len(pubKey) == 0 {
+	if len(pubKey) == 0 {
 		return nil, nil // Cannot query by nil/empty key
 	}
 	err := kdc.DB.QueryRow(
@@ -1486,7 +1486,7 @@ func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
 // AddNode adds a new node
 func (kdc *KdcDB) AddNode(node *Node) error {
 	// Check if a node with this public key already exists (only if HPKE key is present)
-	if node.LongTermHpkePubKey != nil && len(node.LongTermHpkePubKey) > 0 {
+	if len(node.LongTermHpkePubKey) > 0 {
 		existingNode, err := kdc.GetNodeByPublicKey(node.LongTermHpkePubKey)
 		if err != nil {
 			return fmt.Errorf("failed to check for existing node: %v", err)
@@ -1790,7 +1790,7 @@ func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 
 	// Convert nil/empty ephemeral_pub_key to NULL (for JOSE backend)
 	var ephemeralPub interface{}
-	if record.EphemeralPubKey == nil || len(record.EphemeralPubKey) == 0 {
+	if len(record.EphemeralPubKey) == 0 {
 		ephemeralPub = nil
 	} else {
 		ephemeralPub = record.EphemeralPubKey
@@ -1798,7 +1798,7 @@ func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 
 	// Serialize payload to JSON if present
 	var payloadJSON interface{}
-	if record.Payload != nil && len(record.Payload) > 0 {
+	if len(record.Payload) > 0 {
 		payloadBytes, err := json.Marshal(record.Payload)
 		if err != nil {
 			return fmt.Errorf("failed to marshal payload: %v", err)
@@ -1845,7 +1845,7 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 
 	// Convert nil/empty ephemeral_pub_key to NULL (for JOSE backend)
 	var ephemeralPub interface{}
-	if record.EphemeralPubKey == nil || len(record.EphemeralPubKey) == 0 {
+	if len(record.EphemeralPubKey) == 0 {
 		ephemeralPub = nil
 	} else {
 		ephemeralPub = record.EphemeralPubKey
@@ -1853,7 +1853,7 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 
 	// Serialize payload to JSON if present
 	var payloadJSON interface{}
-	if record.Payload != nil && len(record.Payload) > 0 {
+	if len(record.Payload) > 0 {
 		payloadBytes, err := json.Marshal(record.Payload)
 		if err != nil {
 			return fmt.Errorf("failed to marshal payload: %v", err)

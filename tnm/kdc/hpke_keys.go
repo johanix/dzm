@@ -93,7 +93,10 @@ func loadKdcHpkeKeypair(privKeyPath string) (*KdcHpkeKeys, error) {
 }
 
 // saveKdcHpkeKeypair saves HPKE keypair to file
-func saveKdcHpkeKeypair(keys *KdcHpkeKeys, privKeyPath string) error {
+// This function is intentionally unused but kept for future use.
+//
+//lint:ignore U1000 This function is kept for future use
+func _saveKdcHpkeKeypair(keys *KdcHpkeKeys, privKeyPath string) error {
 	// Format private key as hex with comments
 	privKeyHex := hex.EncodeToString(keys.PrivateKey)
 	pubKeyHex := hex.EncodeToString(keys.PublicKey)

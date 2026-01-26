@@ -30,7 +30,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV1(key *DNSSECKey, node *Node, kdcConf *tnm.K
 		return nil, nil, "", fmt.Errorf("node is nil")
 	}
 	// Defensive check: refuse HPKE operations for JOSE-only nodes
-	if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+	if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 		return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", node.ID)
 	}
 	if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {

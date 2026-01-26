@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 
 	"github.com/go-jose/go-jose/v4"
@@ -113,7 +114,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	var nodePubKey crypto.PublicKey
 	if backendName == "hpke" {
 		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 			return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
 		}
 		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
@@ -375,6 +376,13 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	} else {
 		chunkSizeInt := conf.GetChunkMaxSize()
 		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		// Check for integer overflow before converting to uint16
+		if len(dataChunks) > math.MaxUint16 {
+			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
+		}
+		if chunkSizeInt > math.MaxUint16 {
+			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		}
 		chunkCount = uint16(len(dataChunks))
 		chunkSize = uint16(chunkSizeInt)
 		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",

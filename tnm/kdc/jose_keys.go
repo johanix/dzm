@@ -121,7 +121,10 @@ func loadKdcJoseKeypair(privKeyPath string) (*KdcJoseKeys, error) {
 }
 
 // saveKdcJoseKeypair saves JOSE keypair to file
-func saveKdcJoseKeypair(keys *KdcJoseKeys, privKeyPath string) error {
+// This function is intentionally unused but kept for future use.
+//
+//lint:ignore U1000 This function is kept for future use
+func _saveKdcJoseKeypair(keys *KdcJoseKeys, privKeyPath string) error {
 	// Serialize private key to JWK
 	backend, err := crypto.GetBackend("jose")
 	if err != nil {

@@ -1,6 +1,6 @@
 module github.com/johanix/tdns-nm/tnm
 
-go 1.25.4
+go 1.25.2
 
 replace (
 	github.com/johanix/tdns/v2 => ../../tdns/v2

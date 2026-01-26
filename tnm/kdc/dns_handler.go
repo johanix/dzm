@@ -262,10 +262,9 @@ func handleCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 	labels := dns.SplitDomainName(qname)
 	if len(labels) > 0 {
 		// Try to parse first label as chunk ID
-		if parsedChunkID, parseErr := strconv.ParseUint(labels[0], 10, 16); parseErr == nil {
+		if _, parseErr := strconv.ParseUint(labels[0], 10, 16); parseErr == nil {
 			// First label is a number - this is a data chunk query
-			chunkID = uint16(parsedChunkID)
-			chunkID, nodeID, distributionID, err = ParseQnameForOLDCHUNK(qname, conf.ControlZone)
+			_, nodeID, distributionID, err = ParseQnameForOLDCHUNK(qname, conf.ControlZone)
 			if err != nil {
 				log.Printf("KDC: Error parsing CHUNK data chunk QNAME %s: %v", qname, err)
 				m.SetRcode(msg, dns.RcodeFormatError)
@@ -382,9 +381,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 
 	// Extract distributionID (everything before the control zone)
 	prefix := strings.TrimSuffix(qname, controlZoneFQDN)
-	if strings.HasSuffix(prefix, ".") {
-		prefix = strings.TrimSuffix(prefix, ".")
-	}
+	prefix = strings.TrimSuffix(prefix, ".")
 
 	// Get the last label (distributionID)
 	labels := strings.Split(prefix, ".")

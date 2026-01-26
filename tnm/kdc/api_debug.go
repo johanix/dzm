@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"time"
 
@@ -100,11 +101,27 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 								resp.ChunkCount = manifestData.ChunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, manifestData.ChunkCount)
 							} else {
-								resp.ChunkCount = uint16(len(prepared.chunks) - 1) // -1 for manifest
+								chunkCount := len(prepared.chunks) - 1 // -1 for manifest
+								if chunkCount < 0 {
+									chunkCount = 0
+								}
+								if chunkCount > math.MaxUint16 {
+									sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("too many chunks: %d (max: %d)", chunkCount, math.MaxUint16))
+									return
+								}
+								resp.ChunkCount = uint16(chunkCount)
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
 							}
 						} else {
-							resp.ChunkCount = uint16(len(prepared.chunks) - 1) // -1 for manifest
+							chunkCount := len(prepared.chunks) - 1 // -1 for manifest
+							if chunkCount < 0 {
+								chunkCount = 0
+							}
+							if chunkCount > math.MaxUint16 {
+								sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("too many chunks: %d (max: %d)", chunkCount, math.MaxUint16))
+								return
+							}
+							resp.ChunkCount = uint16(chunkCount)
 							log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, resp.ChunkCount)
 						}
 					}

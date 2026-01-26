@@ -82,7 +82,7 @@ func EncryptPayload(plaintext []byte, publicKeyData []byte, backendName string, 
 	if plaintext == nil {
 		return nil, nil, fmt.Errorf("plaintext is nil")
 	}
-	if publicKeyData == nil || len(publicKeyData) == 0 {
+	if len(publicKeyData) == 0 {
 		return nil, nil, fmt.Errorf("public key data is nil or empty")
 	}
 	if backendName == "" {
@@ -90,7 +90,7 @@ func EncryptPayload(plaintext []byte, publicKeyData []byte, backendName string, 
 	}
 
 	// Validate backend is supported if supportedCrypto list is provided
-	if supportedCrypto != nil && len(supportedCrypto) > 0 {
+	if len(supportedCrypto) > 0 {
 		found := false
 		for _, supported := range supportedCrypto {
 			if supported == backendName {

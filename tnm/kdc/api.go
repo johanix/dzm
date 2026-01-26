@@ -394,7 +394,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 					} else {
-						resp.Msg = fmt.Sprintf("Key encrypted successfully")
+						resp.Msg = "Key encrypted successfully"
 						// Base64 encode binary data for JSON
 						resp.EncryptedKey = base64.StdEncoding.EncodeToString(encryptedKey)
 						resp.EphemeralPubKey = base64.StdEncoding.EncodeToString(ephemeralPubKey)
@@ -1196,12 +1196,12 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 				return
 			}
 			// Allow nil LongTermPubKey for JOSE-only nodes
-			if req.Node.LongTermHpkePubKey != nil && len(req.Node.LongTermHpkePubKey) != 32 {
+			if len(req.Node.LongTermHpkePubKey) != 0 && len(req.Node.LongTermHpkePubKey) != 32 {
 				sendJSONError(w, http.StatusBadRequest, "node.long_term_hpke_pub_key must be 32 bytes (X25519) or nil for JOSE-only nodes")
 				return
 			}
 			// Require at least one public key (HPKE or JOSE)
-			if (req.Node.LongTermHpkePubKey == nil || len(req.Node.LongTermHpkePubKey) == 0) && (req.Node.LongTermJosePubKey == nil || len(req.Node.LongTermJosePubKey) == 0) {
+			if len(req.Node.LongTermHpkePubKey) == 0 && len(req.Node.LongTermJosePubKey) == 0 {
 				sendJSONError(w, http.StatusBadRequest, "node must include either a 32-byte long_term_hpke_pub_key or a JOSE public key")
 				return
 			}
@@ -1537,7 +1537,7 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
-				resp.Msg = fmt.Sprintf("Enrollment token marked as used")
+				resp.Msg = "Enrollment token marked as used"
 			}
 
 		default:

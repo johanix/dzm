@@ -45,10 +45,10 @@ func EncryptPayloadForNode(node *Node, plaintext []byte, forcedCrypto string) (c
 		nodePubKeyData = node.LongTermJosePubKey
 	} else {
 		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if node.SupportedCrypto != nil && len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
+		if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
 			return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use %s", node.ID, backendName)
 		}
-		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) == 0 {
+		if len(node.LongTermHpkePubKey) == 0 {
 			return nil, nil, "", fmt.Errorf("node %s does not have a public key stored (required for %s backend)", node.ID, backendName)
 		}
 		nodePubKeyData = node.LongTermHpkePubKey
