@@ -32,8 +32,17 @@ krs:
       # Node ID must be a Fully Qualified Domain Name (FQDN) with trailing dot
       # This ID must match exactly the node ID registered in the KDC
       # Example: "cpt.axfr.net." or "node1.example.com."
-      id:			cpt.axfr.net.  # Must match node ID in KDC (FQDN with trailing dot)
-      long_term_priv_key:	/etc/tdns/krs/cpt.axfr.net.privatekey  # Path to HPKE long-term private key file
+      id:				cpt.axfr.net.  # Must match node ID in KDC (FQDN with trailing dot)
+
+      # Long-term private keys for decryption (at least one required)
+      long_term_hpke_priv_key:	/etc/tdns/krs/cpt.axfr.net.hpke.privatekey  # HPKE (X25519) private key
+      long_term_jose_priv_key:	/etc/tdns/krs/cpt.axfr.net.jose.privatekey  # JOSE (P-256) private key
+
+      # KDC public keys for signature verification (optional, enables JWS signature verification)
+      kdc_hpke_pubkey:		~/.config/tdns/kdc.hpke.pubkey          # KDC HPKE encryption public key (hex)
+      kdc_hpke_signing_pubkey:	~/.config/tdns/kdc.hpke.signing.pubkey  # KDC HPKE signing public key (JWK)
+      kdc_jose_pubkey:		~/.config/tdns/kdc.jose.pubkey          # KDC JOSE public key (JWK)
+
       kdc_address:		127.0.0.1:5354  # KDC server address (IP:port)
    
    control_zone:		kdc.example.com.  # Control zone for KMCTRL records
@@ -46,4 +55,15 @@ krs:
    # Default: false (uses MANIFEST+OLDCHUNK format)
    # Set to true to use the new CHUNK format
    use_chunk:		false  # Set to true to use CHUNK format
+
+   # use_crypto_v2: Enable crypto abstraction layer (v2) for multi-backend support
+   # When true: Supports both HPKE and JOSE backends via unified crypto interface
+   # When false: Uses direct HPKE implementation (v1, backward compatible)
+   # Default: false (uses v1 for backward compatibility)
+   use_crypto_v2:	true
+
+   # supported_crypto: List of crypto backends this node supports (for crypto v2)
+   # Options: "hpke" (X25519 + AES-256-GCM), "jose" (P-256 + ECDH-ES)
+   # The KDC will use the first supported backend that matches the node's capabilities
+   supported_crypto:	[ "hpke", "jose" ]
 

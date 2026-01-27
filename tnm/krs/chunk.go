@@ -558,6 +558,39 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 	}
 	log.Printf("KRS: Loaded node private key for %s backend (%d bytes)", cryptoBackend, len(privateKey))
 
+	// Try to load KDC verification key for signature verification (JOSE and HPKE backends)
+	var kdcVerificationKey crypto.PublicKey
+	shouldLoadVerificationKey := false
+	if cryptoBackend == "jose" && conf.Node.KdcJosePubKey != "" {
+		shouldLoadVerificationKey = true
+	} else if cryptoBackend == "hpke" && conf.Node.KdcHpkeSigningPubKey != "" {
+		shouldLoadVerificationKey = true
+	}
+
+	if shouldLoadVerificationKey {
+		verificationKeyData, err := loadKdcVerificationKey(conf, cryptoBackend)
+		if err != nil {
+			log.Printf("KRS: Warning: Failed to load KDC %s verification key: %v (using unsigned decryption)", cryptoBackend, err)
+			kdcVerificationKey = nil
+		} else {
+			log.Printf("KRS: Loaded KDC %s verification key for signature verification (%d bytes)", cryptoBackend, len(verificationKeyData))
+			// Parse verification key using backend
+			backend, err := crypto.GetBackend(cryptoBackend)
+			if err != nil {
+				log.Printf("KRS: Warning: Failed to get backend for verification key parsing: %v", err)
+				kdcVerificationKey = nil
+			} else {
+				kdcVerificationKey, err = backend.ParsePublicKey(verificationKeyData)
+				if err != nil {
+					log.Printf("KRS: Warning: Failed to parse KDC verification key: %v (using unsigned decryption)", err)
+					kdcVerificationKey = nil
+				} else {
+					log.Printf("KRS: Parsed KDC %s verification key successfully", cryptoBackend)
+				}
+			}
+		}
+	}
+
 	// Decrypt the entire payload using V1 or V2 based on feature flag
 	var plaintextJSON []byte
 	if conf.ShouldUseCryptoV2() {
@@ -576,12 +609,24 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 			return nil, fmt.Errorf("failed to parse private key with %s backend: %v", backend.Name(), err)
 		}
 
-		// Decrypt using V2
-		plaintextJSON, err = tnm.DecodeAndDecryptV2(privKey, data, backend)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
+		// Decrypt using V2 - with signature verification if verification key is available
+		if kdcVerificationKey != nil {
+			// Use signed decryption (JWS(JWE))
+			log.Printf("KRS: Using signed decryption (verifying JWS signature before decrypting JWE)")
+			plaintextJSON, err = tnm.DecodeDecryptAndVerifyV2(privKey, kdcVerificationKey, data, backend)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt and verify distribution payload with %s backend: %v", backend.Name(), err)
+			}
+			log.Printf("KRS: Successfully verified signature and decrypted distribution payload using %s backend: %d bytes", backend.Name(), len(plaintextJSON))
+		} else {
+			// Use unsigned decryption (backward compatibility)
+			log.Printf("KRS: Using unsigned decryption (no signature verification)")
+			plaintextJSON, err = tnm.DecodeAndDecryptV2(privKey, data, backend)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
+			}
+			log.Printf("KRS: Successfully decrypted distribution payload using %s backend: %d bytes", backend.Name(), len(plaintextJSON))
 		}
-		log.Printf("KRS: Successfully decrypted distribution payload using %s backend: %d bytes", backend.Name(), len(plaintextJSON))
 	} else {
 		// V1: Use direct HPKE implementation
 		log.Printf("KRS: Using crypto V1 (direct HPKE) for decryption")
@@ -902,6 +947,79 @@ func loadPrivateKeyForBackend(conf *tnm.KrsConf, cryptoBackend string) ([]byte, 
 
 		log.Printf("KRS: Loaded HPKE private key from %s (%d bytes)", conf.Node.LongTermHpkePrivKey, len(privateKey))
 		return privateKey, nil
+	}
+}
+
+// loadKdcVerificationKey loads the KDC's public key for signature verification
+// This is used to verify JWS signatures on distributions
+func loadKdcVerificationKey(conf *tnm.KrsConf, cryptoBackend string) ([]byte, error) {
+	if cryptoBackend == "jose" {
+		// Load KDC JOSE public key (JWK JSON format)
+		if conf.Node.KdcJosePubKey == "" {
+			return nil, fmt.Errorf("KDC JOSE public key not configured (kdc_jose_pubkey)")
+		}
+
+		// Read KDC JOSE public key file
+		keyData, err := os.ReadFile(conf.Node.KdcJosePubKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read KDC JOSE public key file %s: %v", conf.Node.KdcJosePubKey, err)
+		}
+
+		// Parse key (skip comments, extract JSON)
+		keyLines := strings.Split(string(keyData), "\n")
+		var jsonLines []string
+		for _, line := range keyLines {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine != "" && !strings.HasPrefix(trimmedLine, "#") {
+				// Preserve original line for pretty-printed JSON
+				jsonLines = append(jsonLines, line)
+			}
+		}
+
+		if len(jsonLines) == 0 {
+			return nil, fmt.Errorf("could not find KDC JOSE public key JSON in file %s", conf.Node.KdcJosePubKey)
+		}
+
+		// Join lines with newlines to preserve formatting
+		jwkJSON := strings.Join(jsonLines, "\n")
+
+		log.Printf("KRS: Loaded KDC JOSE verification key from %s (%d bytes JSON)", conf.Node.KdcJosePubKey, len(jwkJSON))
+		return []byte(jwkJSON), nil
+	} else if cryptoBackend == "hpke" {
+		// Load KDC HPKE signing public key (P-256 JWK format) for signature verification
+		// HPKE uses X25519 for encryption, but P-256 ECDSA for signing
+		if conf.Node.KdcHpkeSigningPubKey == "" {
+			return nil, fmt.Errorf("KDC HPKE signing public key not configured (kdc_hpke_signing_pubkey)")
+		}
+
+		// Read KDC HPKE signing public key file
+		keyData, err := os.ReadFile(conf.Node.KdcHpkeSigningPubKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read KDC HPKE signing public key file %s: %v", conf.Node.KdcHpkeSigningPubKey, err)
+		}
+
+		// Parse key (skip comments, extract JSON)
+		keyLines := strings.Split(string(keyData), "\n")
+		var jsonLines []string
+		for _, line := range keyLines {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine != "" && !strings.HasPrefix(trimmedLine, "#") {
+				// Preserve original line for pretty-printed JSON
+				jsonLines = append(jsonLines, line)
+			}
+		}
+
+		if len(jsonLines) == 0 {
+			return nil, fmt.Errorf("could not find KDC HPKE signing public key JSON in file %s", conf.Node.KdcHpkeSigningPubKey)
+		}
+
+		// Join lines with newlines to preserve formatting
+		jwkJSON := strings.Join(jsonLines, "\n")
+
+		log.Printf("KRS: Loaded KDC HPKE signing verification key from %s (%d bytes JSON)", conf.Node.KdcHpkeSigningPubKey, len(jwkJSON))
+		return []byte(jwkJSON), nil
+	} else {
+		return nil, fmt.Errorf("unsupported crypto backend for verification key: %s", cryptoBackend)
 	}
 }
 

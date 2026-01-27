@@ -96,15 +96,28 @@ kdc:
    # manifest_json_format: true   # JSON format (default)
 
    # KDC HPKE private key (X25519, 32 bytes)
-   # Required for enrollment and key distribution. HPKE-only deployments are supported.
+   # Required for encryption of HPKE-based enrollments and key distributions.
    # Generate with: kdc-cli keys generate --hpke --hpke-outfile <path>
    kdc_hpke_priv_key: /etc/tdns/kdc/kdc.hpke.privatekey
 
+   # KDC HPKE signing key (P-256 ECDSA)
+   # Optional: Required only for signed HPKE distributions (JWS(JWE)).
+   # HPKE uses X25519 for encryption, but P-256 ECDSA for signing.
+   # Without this key, HPKE distributions will be unsigned (encryption only, no signature).
+   # Generate with: kdc-cli keys generate --hpke-signing --hpke-signing-outfile <path>
+   kdc_hpke_signing_key: /etc/tdns/kdc/kdc.hpke.signing.privatekey
+
    # KDC JOSE private key (P-256 ECDSA)
    # Optional: Only required if you need JOSE-capable enrollments or clients.
-   # HPKE is required for core enrollment; JOSE is optional and only needed for JOSE-capable enrollments.
+   # JOSE uses P-256 for both encryption (ECDH-ES) and signing (ECDSA).
    # Generate with: kdc-cli keys generate --jose --jose-outfile <path>
    kdc_jose_priv_key: /etc/tdns/kdc/kdc.jose.privatekey
+
+   # use_crypto_v2: Enable crypto abstraction layer (v2) for multi-backend support
+   # When true: Supports both HPKE and JOSE backends via unified crypto interface
+   # When false: Uses direct HPKE implementation (v1, backward compatible)
+   # Default: false (uses v1 for backward compatibility)
+   use_crypto_v2: true
 
 log:
    file:                /var/log/tdns/tdns-kdc.log

@@ -18,6 +18,7 @@ import (
 	"log"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	tdns "github.com/johanix/tdns/v2"
@@ -78,6 +79,9 @@ func determineContentType(records []*DistributionRecord) string {
 func (kdc *KdcDB) buildNodeOperationsPayload(
 	nodeRecords []*DistributionRecord,
 	distributionID string,
+	backend crypto.Backend,
+	backendName string,
+	signingKey crypto.PrivateKey,
 ) ([]byte, int, int, error) {
 	if len(nodeRecords) != 1 {
 		return nil, 0, 0, fmt.Errorf("node_operations distribution should have exactly one record, got %d", len(nodeRecords))
@@ -88,29 +92,50 @@ func (kdc *KdcDB) buildNodeOperationsPayload(
 		return nil, 0, 0, fmt.Errorf("node_operations distribution has non-update_components operation: %s", record.Operation)
 	}
 
-	// The distribution record contains encrypted component list
-	// For v2, this should already be encrypted with the correct backend
-	// DecodeAndDecrypt expects format: <ephemeral_pub_key(32)>+ciphertext
-	// Combine ephemeral pub key (if present) with encrypted key before encoding
-	var encryptedData []byte
-	if record.EphemeralPubKey != nil && len(record.EphemeralPubKey) > 0 {
-		encryptedData = make([]byte, 0, len(record.EphemeralPubKey)+len(record.EncryptedKey))
-		encryptedData = append(encryptedData, record.EphemeralPubKey...)
-		encryptedData = append(encryptedData, record.EncryptedKey...)
-	} else {
-		// No ephemeral pub key (JOSE backend doesn't use it)
-		encryptedData = record.EncryptedKey
-	}
-	base64Data := []byte(base64.StdEncoding.EncodeToString(encryptedData))
+	// The distribution record contains encrypted component list (JWE format)
+	// For V2, this is already encrypted as JWE compact serialization
+	jweData := record.EncryptedKey
 
-	log.Printf("KDC: Using encrypted component list from distribution record: %d bytes (ephemeral: %d + ciphertext: %d) -> base64 %d bytes",
-		len(encryptedData), len(record.EphemeralPubKey), len(record.EncryptedKey), len(base64Data))
+	log.Printf("KDC: Using encrypted component list from distribution record: %d bytes (JWE format)",
+		len(jweData))
+
+	var base64Data []byte
+
+	// If signing key is available, sign the JWE to create JWS(JWE)
+	if signingKey != nil {
+		log.Printf("KDC: Using signed encryption (JWS(JWE)) for node_operations with %s backend", backendName)
+
+		// Sign the JWE to create JWS(JWE)
+		jwsData, err := backend.Sign(signingKey, jweData)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("failed to sign node_operations JWE: %v", err)
+		}
+
+		log.Printf("KDC: Signed node_operations JWE: JWE %d bytes -> JWS(JWE) %d bytes",
+			len(jweData), len(jwsData))
+
+		// Base64 encode JWS(JWE) for transport
+		base64Data = []byte(base64.StdEncoding.EncodeToString(jwsData))
+
+		log.Printf("KDC: Signed and encoded node_operations distribution: JWS(JWE) %d bytes -> base64 %d bytes",
+			len(jwsData), len(base64Data))
+	} else {
+		// No signing key - use unsigned distribution (JWE only, backward compatibility)
+		log.Printf("KDC: Using unsigned encryption (JWE only) for node_operations with %s backend (no signing key)", backendName)
+
+		// Base64 encode JWE for transport
+		base64Data = []byte(base64.StdEncoding.EncodeToString(jweData))
+
+		log.Printf("KDC: Unsigned node_operations distribution: JWE %d bytes -> base64 %d bytes",
+			len(jweData), len(base64Data))
+	}
 
 	return base64Data, 0, 0, nil
 }
 
 // buildKeyOperationsPayload prepares the payload for key_operations, mgmt_operations, or mixed_operations.
 // It builds the JSON structure, encrypts it, and returns the base64-encoded ciphertext with metadata counts.
+// If signingKey is provided, creates JWS(JWE(...)) for authenticated distribution.
 func (kdc *KdcDB) buildKeyOperationsPayload(
 	nodeRecords []*DistributionRecord,
 	distributionID string,
@@ -118,6 +143,8 @@ func (kdc *KdcDB) buildKeyOperationsPayload(
 	backend crypto.Backend,
 	backendName string,
 	nodePubKey crypto.PublicKey,
+	signingKey crypto.PrivateKey,
+	encryptMetadata map[string]interface{},
 ) ([]byte, int, int, int, error) {
 	// Prepare JSON structure with operation-based distribution entries
 	entries := make([]tnm.DistributionEntry, 0, len(nodeRecords))
@@ -215,16 +242,30 @@ func (kdc *KdcDB) buildKeyOperationsPayload(
 	log.Printf("KDC: Prepared %d operations (%d key ops) for %d zones, JSON size: %d bytes",
 		operationCount, keyCount, zoneCount, len(entriesJSON))
 
-	// Encrypt the entire JSON payload using the selected backend
-	ciphertext, err := backend.Encrypt(nodePubKey, entriesJSON)
-	if err != nil {
-		return nil, 0, 0, 0, fmt.Errorf("failed to encrypt distribution payload with %s backend: %v", backendName, err)
+	// Encrypt the payload - use signed encryption (JWS(JWE)) if signing key is provided
+	var base64Data []byte
+	if signingKey != nil {
+		// Use signed encryption: JWS(JWE(payload))
+		// This provides both confidentiality (JWE) and authenticity (JWS)
+		log.Printf("KDC: Using signed encryption (JWS(JWE)) with %s backend", backendName)
+		base64Data, err = tnm.EncryptSignAndEncodeV2(nodePubKey, entriesJSON, signingKey, backend, encryptMetadata)
+		if err != nil {
+			return nil, 0, 0, 0, fmt.Errorf("failed to encrypt and sign distribution payload with %s backend: %v", backendName, err)
+		}
+		log.Printf("KDC: Encrypted and signed distribution payload with %s: cleartext %d bytes -> JWS(JWE) %d bytes (base64)",
+			backendName, len(entriesJSON), len(base64Data))
+	} else {
+		// Use traditional encryption (backward compatibility)
+		log.Printf("KDC: Using traditional encryption (no signature) with %s backend", backendName)
+		ciphertext, err := backend.Encrypt(nodePubKey, entriesJSON)
+		if err != nil {
+			return nil, 0, 0, 0, fmt.Errorf("failed to encrypt distribution payload with %s backend: %v", backendName, err)
+		}
+		// Base64 encode for transport
+		base64Data = []byte(base64.StdEncoding.EncodeToString(ciphertext))
+		log.Printf("KDC: Encrypted distribution payload with %s: cleartext %d bytes -> ciphertext %d bytes -> base64 %d bytes",
+			backendName, len(entriesJSON), len(ciphertext), len(base64Data))
 	}
-
-	// Base64 encode for transport
-	base64Data := []byte(base64.StdEncoding.EncodeToString(ciphertext))
-	log.Printf("KDC: Encrypted distribution payload with %s: cleartext %d bytes -> ciphertext %d bytes -> base64 %d bytes",
-		backendName, len(entriesJSON), len(ciphertext), len(base64Data))
 
 	return base64Data, zoneCount, keyCount, operationCount, nil
 }
@@ -453,6 +494,37 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	contentType := determineContentType(nodeRecords)
 	log.Printf("KDC: Distribution %s -> contentType=%s", distributionID, contentType)
 
+	// Load KDC's signing key for JWS(JWE) authenticated distributions
+	var kdcSigningKey crypto.PrivateKey
+	if backendName == "jose" {
+		// For JOSE, we can reuse the same P-256 key for both encryption and signing
+		joseKeys, err := GetKdcJoseKeypair(conf.KdcJosePrivKey)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to load KDC JOSE signing key: %v (using unsigned distributions)", err)
+			kdcSigningKey = nil
+		} else {
+			kdcSigningKey = joseKeys.PrivateKey
+			log.Printf("KDC: Loaded KDC JOSE signing key for authenticated distributions")
+		}
+	} else if backendName == "hpke" {
+		// For HPKE, we need a separate P-256 ECDSA signing key (X25519 can't sign)
+		hpkeSigningKeys, err := GetKdcHpkeSigningKeypair(conf.KdcHpkeSigningKey)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to load KDC HPKE signing key: %v (using unsigned distributions)", err)
+			kdcSigningKey = nil
+		} else {
+			kdcSigningKey = hpkeSigningKeys.PrivateKey
+			log.Printf("KDC: Loaded KDC HPKE signing key for authenticated distributions")
+		}
+	}
+
+	// Prepare encryption metadata for JWE protected headers
+	encryptMetadata := make(map[string]interface{})
+	encryptMetadata["distribution_id"] = distributionID
+	encryptMetadata["timestamp"] = time.Now().Format(time.RFC3339)
+	encryptMetadata["sender"] = "kdc"
+	encryptMetadata["content_type"] = contentType
+
 	var base64Data []byte
 	var zoneCount int
 	var keyCount int
@@ -460,7 +532,8 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 
 	if contentType == "node_operations" {
 		var err error
-		base64Data, zoneCount, keyCount, err = kdc.buildNodeOperationsPayload(nodeRecords, distributionID)
+		base64Data, zoneCount, keyCount, err = kdc.buildNodeOperationsPayload(
+			nodeRecords, distributionID, backend, backendName, kdcSigningKey)
 		if err != nil {
 			return nil, err
 		}
@@ -468,7 +541,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	} else if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
 		var err error
 		base64Data, zoneCount, keyCount, operationCount, err = kdc.buildKeyOperationsPayload(
-			nodeRecords, distributionID, nodeID, backend, backendName, nodePubKey)
+			nodeRecords, distributionID, nodeID, backend, backendName, nodePubKey, kdcSigningKey, encryptMetadata)
 		if err != nil {
 			return nil, err
 		}

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/crypto"
-	_ "github.com/johanix/tdns/v2/crypto/hpke"
+	hpkebackend "github.com/johanix/tdns/v2/crypto/hpke"
 	_ "github.com/johanix/tdns/v2/crypto/jose"
 	"github.com/johanix/tdns/v2/hpke"
 	"github.com/ryanuber/columnize"
@@ -118,15 +118,19 @@ You can optionally specify key file paths directly:
 }
 
 var kdcKeysGenerateCmd = &cobra.Command{
-	Use:   "generate [--hpke] [--hpke-outfile <path>] [--jose] [--jose-outfile <path>]",
-	Short: "Generate KDC keypairs (HPKE and/or JOSE)",
-	Long: `Generate one or both KDC long-term keypairs.
+	Use:   "generate [--hpke] [--hpke-outfile <path>] [--hpke-signing] [--hpke-signing-outfile <path>] [--jose] [--jose-outfile <path>]",
+	Short: "Generate KDC keypairs (HPKE, HPKE signing, and/or JOSE)",
+	Long: `Generate KDC long-term keypairs.
 
-Must specify at least one of --hpke or --jose flags.
+Must specify at least one of --hpke, --hpke-signing, or --jose flags.
 
-HPKE keypair (X25519):
-  --hpke              Generate new HPKE keypair
+HPKE encryption keypair (X25519):
+  --hpke              Generate new HPKE encryption keypair
   --hpke-outfile      Path for HPKE private key file (default: ./kdc.hpke.privatekey)
+
+HPKE signing keypair (P-256 ECDSA):
+  --hpke-signing      Generate new HPKE signing keypair (for JWS signatures)
+  --hpke-signing-outfile  Path for HPKE signing private key file (default: ./kdc.hpke.signing.privatekey)
 
 JOSE keypair (P-256):
   --jose              Generate new JOSE keypair
@@ -134,26 +138,39 @@ JOSE keypair (P-256):
 
 Examples:
   kdc-cli keys generate --hpke --hpke-outfile /etc/tdns/kdc/kdc.hpke.privatekey
+  kdc-cli keys generate --hpke-signing --hpke-signing-outfile /etc/tdns/kdc/kdc.hpke.signing.privatekey
   kdc-cli keys generate --jose --jose-outfile /etc/tdns/kdc/kdc.jose.privatekey
   kdc-cli keys generate --hpke --hpke-outfile /etc/tdns/kdc/kdc.hpke.privatekey \
+                        --hpke-signing --hpke-signing-outfile /etc/tdns/kdc/kdc.hpke.signing.privatekey \
                         --jose --jose-outfile /etc/tdns/kdc/kdc.jose.privatekey
+
+Note: HPKE backends require TWO keys:
+  - X25519 key for encryption (--hpke)
+  - P-256 ECDSA key for signing (--hpke-signing)
+
+JOSE backends can use a single P-256 key for both encryption and signing.
 
 WARNING: If you generate NEW keypairs, you must regenerate all enrollment blobs
 that were created with the old public keys, as they will no longer be decryptable.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		genHpke, _ := cmd.Flags().GetBool("hpke")
+		genHpkeSigning, _ := cmd.Flags().GetBool("hpke-signing")
 		genJose, _ := cmd.Flags().GetBool("jose")
 		hpkeOutfile, _ := cmd.Flags().GetString("hpke-outfile")
+		hpkeSigningOutfile, _ := cmd.Flags().GetString("hpke-signing-outfile")
 		joseOutfile, _ := cmd.Flags().GetString("jose-outfile")
 
 		// Require at least one key type
-		if !genHpke && !genJose {
-			log.Fatalf("Error: Must specify at least one of --hpke or --jose")
+		if !genHpke && !genHpkeSigning && !genJose {
+			log.Fatalf("Error: Must specify at least one of --hpke, --hpke-signing, or --jose")
 		}
 
 		// Set defaults if not specified
 		if genHpke && hpkeOutfile == "" {
 			hpkeOutfile = "./kdc.hpke.privatekey"
+		}
+		if genHpkeSigning && hpkeSigningOutfile == "" {
+			hpkeSigningOutfile = "./kdc.hpke.signing.privatekey"
 		}
 		if genJose && joseOutfile == "" {
 			joseOutfile = "./kdc.jose.privatekey"
@@ -213,10 +230,102 @@ that were created with the old public keys, as they will no longer be decryptabl
 				absPath = hpkeOutfile
 			}
 
-			fmt.Printf("✓ HPKE keypair generated successfully!\n")
+			fmt.Printf("✓ HPKE encryption keypair generated successfully!\n")
 			fmt.Printf("  KeyID:     %s\n", keyID)
 			fmt.Printf("  File:      %s\n", absPath)
 			fmt.Printf("  Public key: %s\n\n", pubKeyHex)
+		}
+
+		// Generate HPKE signing key if requested
+		if genHpkeSigning {
+			if _, err := os.Stat(hpkeSigningOutfile); err == nil {
+				log.Fatalf("Error: HPKE signing key file already exists: %s\nUse a different path or remove the existing file first.", hpkeSigningOutfile)
+			}
+
+			// Generate HPKE signing keypair (P-256 ECDSA)
+			backend, err := crypto.GetBackend("hpke")
+			if err != nil {
+				log.Fatalf("Error getting HPKE backend: %v", err)
+			}
+
+			// Cast to HPKE backend to access signing key methods
+			hpkeBackend, ok := backend.(*hpkebackend.Backend)
+			if !ok {
+				log.Fatalf("Error: backend is not HPKE backend")
+			}
+
+			// Generate P-256 ECDSA signing keypair
+			privKey, pubKey, err := hpkeBackend.GenerateSigningKeypair()
+			if err != nil {
+				log.Fatalf("Error generating HPKE signing keypair: %v", err)
+			}
+
+			// Serialize keys
+			privKeyBytes, err := hpkeBackend.SerializeSigningKey(privKey)
+			if err != nil {
+				log.Fatalf("Error serializing HPKE signing private key: %v", err)
+			}
+			pubKeyBytes, err := hpkeBackend.SerializeVerifyKey(pubKey)
+			if err != nil {
+				log.Fatalf("Error serializing HPKE signing public key: %v", err)
+			}
+
+			// Parse JSON to pretty-print it
+			var prettyJSON interface{}
+			err = json.Unmarshal(privKeyBytes, &prettyJSON)
+			if err != nil {
+				log.Fatalf("Error parsing HPKE signing private key JSON: %v", err)
+			}
+
+			prettyJSONBytes, err := json.MarshalIndent(prettyJSON, "", "  ")
+			if err != nil {
+				log.Fatalf("Error formatting HPKE signing private key JSON: %v", err)
+			}
+
+			generatedAt := time.Now().Format(time.RFC3339)
+			keyID := kdc.GenerateKeyID("hpke_sign", pubKeyBytes)
+
+			keyContent := fmt.Sprintf(`# KDC HPKE Signing Private Key (P-256 ECDSA)
+# Generated: %s
+# KeyID: %s
+# Algorithm: P-256 ECDSA (for signing HPKE distributions)
+# Key Size: 256 bits (P-256 curve)
+# Format: JWK (JSON Web Key)
+#
+# WARNING: This is a PRIVATE KEY. Keep it secret and secure!
+# Do not share this key with anyone. Anyone with access to this key can forge
+# signatures on HPKE distributions.
+# This key is used by KDC to sign HPKE distributions (JWS signatures).
+#
+# Note: HPKE backends require TWO keys:
+#   - X25519 key for encryption (kdc_hpke_priv_key)
+#   - P-256 ECDSA key for signing (kdc_hpke_signing_key) - THIS FILE
+#
+# To use this keypair:
+# 1. Add the following to your KDC config file (under 'kdc:' section):
+#    kdc_hpke_signing_key: %s
+# 2. Restart the KDC
+#
+# WARNING: If you generate a NEW signing key, distributions will have different signatures.
+# Nodes will need the updated public key to verify signatures.
+#
+%s
+`, generatedAt, keyID, hpkeSigningOutfile, prettyJSONBytes)
+
+			// Write key file with secure permissions
+			if err := os.WriteFile(hpkeSigningOutfile, []byte(keyContent), 0600); err != nil {
+				log.Fatalf("Error writing HPKE signing key file: %v", err)
+			}
+
+			// Get absolute path for display
+			absPath, err := filepath.Abs(hpkeSigningOutfile)
+			if err != nil {
+				absPath = hpkeSigningOutfile
+			}
+
+			fmt.Printf("✓ HPKE signing keypair generated successfully!\n")
+			fmt.Printf("  KeyID:     %s\n", keyID)
+			fmt.Printf("  File:      %s\n\n", absPath)
 		}
 
 		// Generate JOSE key if requested
@@ -325,20 +434,17 @@ that were created with the old public keys, as they will no longer be decryptabl
 		steps = append(steps, "Restart the KDC")
 
 		// Determine enrollment blob message based on which keys were generated
-		if genHpke && genJose {
-			steps = append(steps, "Generate enrollment blobs (which will include both public keys)")
-		} else if genHpke {
-			steps = append(steps, "Generate enrollment blobs (which will include the HPKE public key)")
-		} else {
-			steps = append(steps, "Generate enrollment blobs (which will include the JOSE public key)")
-		}
+		steps = append(steps, "Generate enrollment blobs (which will include the generated public keys)")
 
 		// Print steps with sequential numbering
 		for i, step := range steps {
 			fmt.Printf("  %d. %s\n", i+1, step)
 		}
 
-		fmt.Printf("\nBoth HPKE and JOSE keys are required for enrollment packages to work correctly.\n")
+		// Print reminder about key requirements
+		fmt.Printf("\nNote: For full JWS(JWE) authenticated distributions:\n")
+		fmt.Printf("  - JOSE: Single P-256 key for both encryption and signing\n")
+		fmt.Printf("  - HPKE: TWO keys required (X25519 for encryption + P-256 ECDSA for signing)\n")
 	},
 }
 
@@ -350,8 +456,10 @@ func init() {
 	kdcKeysListCmd.Flags().String("jose-file", "", "Path to JOSE private key file")
 
 	// Keys generate command flags
-	kdcKeysGenerateCmd.Flags().Bool("hpke", false, "Generate new HPKE keypair")
+	kdcKeysGenerateCmd.Flags().Bool("hpke", false, "Generate new HPKE encryption keypair")
 	kdcKeysGenerateCmd.Flags().String("hpke-outfile", "", "Output file path for HPKE private key (default: ./kdc.hpke.privatekey)")
+	kdcKeysGenerateCmd.Flags().Bool("hpke-signing", false, "Generate new HPKE signing keypair")
+	kdcKeysGenerateCmd.Flags().String("hpke-signing-outfile", "", "Output file path for HPKE signing private key (default: ./kdc.hpke.signing.privatekey)")
 	kdcKeysGenerateCmd.Flags().Bool("jose", false, "Generate new JOSE keypair")
 	kdcKeysGenerateCmd.Flags().String("jose-outfile", "", "Output file path for JOSE private key (default: ./kdc.jose.privatekey)")
 }
