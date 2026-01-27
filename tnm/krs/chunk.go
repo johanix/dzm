@@ -22,6 +22,7 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns/v2/distrib"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
@@ -146,15 +147,15 @@ func QueryCHUNK(krsDB *KrsDB, conf *tnm.KrsConf, nodeID, distributionID string, 
 }
 
 // ExtractManifestFromCHUNK extracts manifest data from a CHUNK manifest chunk
-// This is a wrapper around tnm.ExtractManifestData for backward compatibility
-func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*tnm.ManifestData, error) {
-	return tnm.ExtractManifestData(chunk)
+// This is a wrapper around distrib.ExtractManifestData for backward compatibility
+func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*distrib.ManifestData, error) {
+	return distrib.ExtractManifestData(chunk)
 }
 
 // ReassembleCHUNKChunks reassembles CHUNK chunks into complete data
-// This is a wrapper around tnm.ReassembleCHUNKChunks for backward compatibility
+// This is a wrapper around distrib.ReassembleCHUNKs for backward compatibility
 func ReassembleCHUNKChunks(chunks []*core.CHUNK) ([]byte, error) {
-	return tnm.ReassembleCHUNKChunks(chunks)
+	return distrib.ReassembleCHUNKs(chunks)
 }
 
 // ProcessDistribution processes a distribution using CHUNK format
@@ -253,7 +254,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 		verified := false
 		var lastErr error
 		for i, hmacKey := range hmacKeys {
-			valid, err := tnm.VerifyCHUNKHMAC(manifestChunk, hmacKey)
+			valid, err := distrib.VerifyCHUNKHMAC(manifestChunk, hmacKey)
 			if err != nil {
 				log.Printf("KRS: Warning: Failed to verify CHUNK manifest HMAC with %s key: %v", hmacKeyNames[i], err)
 				lastErr = err
@@ -613,7 +614,7 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 		if kdcVerificationKey != nil {
 			// Use signed decryption (JWS(JWE))
 			log.Printf("KRS: Using signed decryption (verifying JWS signature before decrypting JWE)")
-			plaintextJSON, err = tnm.DecodeDecryptAndVerifyV2(privKey, kdcVerificationKey, data, backend)
+			plaintextJSON, err = distrib.DecodeDecryptAndVerify(privKey, kdcVerificationKey, data, backend)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt and verify distribution payload with %s backend: %v", backend.Name(), err)
 			}
@@ -621,7 +622,7 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 		} else {
 			// Use unsigned decryption (backward compatibility)
 			log.Printf("KRS: Using unsigned decryption (no signature verification)")
-			plaintextJSON, err = tnm.DecodeAndDecryptV2(privKey, data, backend)
+			plaintextJSON, err = distrib.DecodeAndDecrypt(privKey, data, backend)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
 			}

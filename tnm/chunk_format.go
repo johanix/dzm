@@ -1,39 +1,41 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * CHUNK format functions - now using generic utilities from tdns/v2/core
- * This file re-exports core functions for backward compatibility within tnm package
+ * CHUNK format functions
+ * DEPRECATED: Use github.com/johanix/tdns/v2/distrib instead
  */
 
 package tnm
 
 import (
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/distrib"
 )
 
-// ManifestData is re-exported from core for backward compatibility within tnm
-type ManifestData = core.ManifestData
+// ManifestData is re-exported from distrib for backward compatibility
+// DEPRECATED: Use distrib.ManifestData instead
+type ManifestData = distrib.ManifestData
 
 // CreateCHUNKManifest creates a CHUNK manifest record from manifest data.
-// Re-exported from core.CreateCHUNKManifest for backward compatibility.
+// DEPRECATED: Use distrib.CreateCHUNKManifest instead
 func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*core.CHUNK, error) {
-	return core.CreateCHUNKManifest(manifestData, format)
+	return distrib.CreateCHUNKManifest(manifestData, format)
 }
 
 // ExtractManifestData extracts ManifestData from a CHUNK manifest record.
-// Re-exported from core.ExtractManifestData for backward compatibility.
+// DEPRECATED: Use distrib.ExtractManifestData instead
 func ExtractManifestData(chunk *core.CHUNK) (*ManifestData, error) {
-	return core.ExtractManifestData(chunk)
+	return distrib.ExtractManifestData(chunk)
 }
 
 // CalculateCHUNKHMAC calculates HMAC-SHA256 for a CHUNK manifest record.
-// Re-exported from core.CalculateCHUNKHMAC for backward compatibility.
+// DEPRECATED: Use distrib.CalculateCHUNKHMAC instead
 func CalculateCHUNKHMAC(chunk *core.CHUNK, hmacKey []byte) error {
-	return core.CalculateCHUNKHMAC(chunk, hmacKey)
+	return distrib.CalculateCHUNKHMAC(chunk, hmacKey)
 }
 
 // VerifyCHUNKHMAC verifies the HMAC-SHA256 for a CHUNK manifest record.
-// Re-exported from core.VerifyCHUNKHMAC for backward compatibility.
+// DEPRECATED: Use distrib.VerifyCHUNKHMAC instead
 func VerifyCHUNKHMAC(chunk *core.CHUNK, hmacKey []byte) (bool, error) {
-	return core.VerifyCHUNKHMAC(chunk, hmacKey)
+	return distrib.VerifyCHUNKHMAC(chunk, hmacKey)
 }

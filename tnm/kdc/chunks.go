@@ -23,6 +23,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/distrib"
 	"github.com/johanix/tdns/v2/hpke"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -323,13 +324,13 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 
 	// Determine if payload should be included inline
 	payloadSize := len(base64Data)
-	testSize := tnm.EstimateManifestSize(metadata, base64Data)
+	testSize := distrib.EstimateManifestSize(metadata, base64Data)
 
 	// Check if the manifest fits in DNS message (accounting for headers and QNAME)
 	// Estimate: DNS headers (~12) + QNAME (~100) + RR header (~10) + manifest data
 	const estimatedDNSOverhead = 150
 	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
+	includeInline := distrib.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
 
 	var dataChunks []*core.CHUNK
 	var chunkCount uint16
@@ -344,7 +345,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
-		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		dataChunks = distrib.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
 		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
 		if dataChunks == nil && len(base64Data) > 0 {
 			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(base64Data), chunkSizeInt)
@@ -363,7 +364,7 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	}
 
 	// Create manifest data
-	manifestData := &tnm.ManifestData{
+	manifestData := &distrib.ManifestData{
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
 		Metadata:   metadata,
@@ -376,14 +377,14 @@ func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tn
 	}
 
 	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
+	manifestCHUNK, err := distrib.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
 	}
 
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
+	if err := distrib.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
 	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
@@ -692,12 +693,12 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		"node_id":         nodeID,
 		"text_length":     len(text),
 	}
-	testSize := tnm.EstimateManifestSize(testMetadata, dataToChunk)
+	testSize := distrib.EstimateManifestSize(testMetadata, dataToChunk)
 
 	// Check if the manifest fits in DNS message
 	const estimatedDNSOverhead = 150
 	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
+	includeInline := distrib.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
 
 	var dataChunks []*core.CHUNK
 	var chunkCount uint16
@@ -712,7 +713,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	} else {
 		// Payload is too large, split into chunks
 		chunkSizeInt := conf.GetChunkMaxSize()
-		dataChunks = tnm.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
+		dataChunks = distrib.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
 		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
 		if dataChunks == nil && len(dataToChunk) > 0 {
 			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(dataToChunk), chunkSizeInt)
@@ -735,7 +736,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		"text_length": len(text),
 	}
 	metadata := tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
-	manifestData := &tnm.ManifestData{
+	manifestData := &distrib.ManifestData{
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
 		Metadata:   metadata,
@@ -748,7 +749,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	}
 
 	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
+	manifestCHUNK, err := distrib.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
 	}
@@ -756,7 +757,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	// Calculate HMAC using the recipient node's long-term public key
 	// This ensures each distribution is authenticated for the specific recipient node
 	// (HPKE eligibility already validated at function start)
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
+	if err := distrib.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
 	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))

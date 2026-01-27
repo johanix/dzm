@@ -24,6 +24,7 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns/v2/distrib"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
 )
@@ -248,7 +249,7 @@ func (kdc *KdcDB) buildKeyOperationsPayload(
 		// Use signed encryption: JWS(JWE(payload))
 		// This provides both confidentiality (JWE) and authenticity (JWS)
 		log.Printf("KDC: Using signed encryption (JWS(JWE)) with %s backend", backendName)
-		base64Data, err = tnm.EncryptSignAndEncodeV2(nodePubKey, entriesJSON, signingKey, backend, encryptMetadata)
+		base64Data, err = distrib.EncryptSignAndEncode(nodePubKey, entriesJSON, signingKey, backend, encryptMetadata)
 		if err != nil {
 			return nil, 0, 0, 0, fmt.Errorf("failed to encrypt and sign distribution payload with %s backend: %v", backendName, err)
 		}
@@ -301,7 +302,7 @@ func buildManifestMetadata(
 	// Add crypto backend to metadata
 	extraFields["crypto"] = backendName
 
-	return tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
+	return distrib.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
 }
 
 // splitIntoChunks determines if payload should be included inline or split into chunks,
@@ -313,12 +314,12 @@ func splitIntoChunks(
 ) (uint16, uint16, []*core.CHUNK, error) {
 	// Determine if payload should be included inline
 	payloadSize := len(base64Data)
-	testSize := tnm.EstimateManifestSize(metadata, base64Data)
+	testSize := distrib.EstimateManifestSize(metadata, base64Data)
 
 	// Check if the manifest fits in DNS message
 	const estimatedDNSOverhead = 150
 	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
+	includeInline := distrib.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
 
 	var dataChunks []*core.CHUNK
 	var chunkCount uint16
@@ -338,7 +339,7 @@ func splitIntoChunks(
 		} else {
 			chunkSizeInt = defaultChunkSize
 		}
-		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		dataChunks = distrib.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
 		// Check if SplitIntoCHUNKs returned nil (overflow condition)
 		if dataChunks == nil {
 			return 0, 0, nil, fmt.Errorf("failed to split data into chunks (overflow or invalid chunk size)")
@@ -579,7 +580,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Create manifest data
-	manifestData := &tnm.ManifestData{
+	manifestData := &distrib.ManifestData{
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
 		Metadata:   metadata,
@@ -592,7 +593,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
+	manifestCHUNK, err := distrib.CreateCHUNKManifest(manifestData, core.FormatJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
 	}
@@ -637,7 +638,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	} else {
 		return nil, fmt.Errorf("unsupported crypto backend for HMAC: %s", backendName)
 	}
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
+	if err := distrib.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
 		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
 	}
 	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s %s public key (%d bytes)", nodeID, backendName, len(hmacKey))
