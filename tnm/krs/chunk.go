@@ -614,7 +614,7 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 		if kdcVerificationKey != nil {
 			// Use signed decryption (JWS(JWE))
 			log.Printf("KRS: Using signed decryption (verifying JWS signature before decrypting JWE)")
-			plaintextJSON, err = distrib.DecodeDecryptAndVerify(privKey, kdcVerificationKey, data, backend)
+			plaintextJSON, err = distrib.DecodeDecryptAndVerify(backend, privKey, kdcVerificationKey, data)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt and verify distribution payload with %s backend: %v", backend.Name(), err)
 			}
@@ -622,7 +622,7 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 		} else {
 			// Use unsigned decryption (backward compatibility)
 			log.Printf("KRS: Using unsigned decryption (no signature verification)")
-			plaintextJSON, err = distrib.DecodeAndDecrypt(privKey, data, backend)
+			plaintextJSON, err = distrib.DecodeAndDecrypt(backend, privKey, data)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
 			}

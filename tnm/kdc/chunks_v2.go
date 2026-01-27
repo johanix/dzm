@@ -249,7 +249,7 @@ func (kdc *KdcDB) buildKeyOperationsPayload(
 		// Use signed encryption: JWS(JWE(payload))
 		// This provides both confidentiality (JWE) and authenticity (JWS)
 		log.Printf("KDC: Using signed encryption (JWS(JWE)) with %s backend", backendName)
-		base64Data, err = distrib.EncryptSignAndEncode(nodePubKey, entriesJSON, signingKey, backend, encryptMetadata)
+		base64Data, err = distrib.EncryptSignAndEncode(backend, nodePubKey, entriesJSON, signingKey, encryptMetadata)
 		if err != nil {
 			return nil, 0, 0, 0, fmt.Errorf("failed to encrypt and sign distribution payload with %s backend: %v", backendName, err)
 		}
