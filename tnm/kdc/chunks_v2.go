@@ -307,19 +307,48 @@ func buildManifestMetadata(
 
 // splitIntoChunks determines if payload should be included inline or split into chunks,
 // and returns the chunk count, chunk size, and data chunks.
+//
+// Parameters:
+//   - base64Data: The payload data (already base64-encoded)
+//   - metadata: Manifest metadata (used for JSON format size estimation)
+//   - jwtClaims: JWT claims template (used for JWT format size estimation, nil for JSON format)
+//   - conf: KDC configuration (provides max chunk size)
+//
+// The function uses the appropriate size estimator based on whether jwtClaims is provided:
+//   - If jwtClaims != nil: Uses JWT format estimation (larger due to JWS overhead)
+//   - If jwtClaims == nil: Uses JSON format estimation
 func splitIntoChunks(
 	base64Data []byte,
 	metadata map[string]interface{},
+	jwtClaims *distrib.JWTManifestClaims,
 	conf *tnm.KdcConf,
 ) (uint16, uint16, []*core.CHUNK, error) {
-	// Determine if payload should be included inline
-	payloadSize := len(base64Data)
-	testSize := distrib.EstimateManifestSize(metadata, base64Data)
+	// Get max chunk size from config (this is the inline threshold for TCP transport)
+	const defaultChunkSize = 60000
+	var maxSize int
+	if conf != nil {
+		maxSize = conf.GetChunkMaxSize()
+	} else {
+		maxSize = defaultChunkSize
+	}
 
-	// Check if the manifest fits in DNS message
-	const estimatedDNSOverhead = 150
-	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := distrib.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
+	// Estimate manifest size based on format
+	var estimatedSize int
+	var formatName string
+	if jwtClaims != nil {
+		// JWT format - use JWT estimator
+		testClaims := *jwtClaims
+		testClaims.Payload = base64.StdEncoding.EncodeToString(base64Data)
+		estimatedSize = distrib.EstimateJWTManifestSize(&testClaims)
+		formatName = "JWT"
+	} else {
+		// JSON format - use JSON estimator
+		estimatedSize = distrib.EstimateManifestSize(metadata, base64Data)
+		formatName = "JSON"
+	}
+
+	// Determine if payload should be included inline
+	includeInline := distrib.ShouldIncludePayloadInlineWithLimit(estimatedSize, maxSize)
 
 	var dataChunks []*core.CHUNK
 	var chunkCount uint16
@@ -328,18 +357,10 @@ func splitIntoChunks(
 	if includeInline {
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
-			payloadSize, testSize, estimatedTotalSize)
+		log.Printf("KDC: Payload %d bytes, estimated %s manifest %d bytes (max %d) - including inline",
+			len(base64Data), formatName, estimatedSize, maxSize)
 	} else {
-		// Use default chunk size if conf is nil
-		const defaultChunkSize = 60000
-		var chunkSizeInt int
-		if conf != nil {
-			chunkSizeInt = conf.GetChunkMaxSize()
-		} else {
-			chunkSizeInt = defaultChunkSize
-		}
-		dataChunks = distrib.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		dataChunks = distrib.SplitIntoCHUNKs(base64Data, maxSize, core.FormatJSON)
 		// Check if SplitIntoCHUNKs returned nil (overflow condition)
 		if dataChunks == nil {
 			return 0, 0, nil, fmt.Errorf("failed to split data into chunks (overflow or invalid chunk size)")
@@ -348,16 +369,16 @@ func splitIntoChunks(
 		if len(dataChunks) > math.MaxUint16 {
 			return 0, 0, nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
 		}
-		if chunkSizeInt > math.MaxUint16 {
-			return 0, 0, nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		if maxSize > math.MaxUint16 {
+			return 0, 0, nil, fmt.Errorf("chunk size too large: %d (max: %d)", maxSize, math.MaxUint16)
 		}
 		if len(dataChunks) == 0 {
 			return 0, 0, nil, fmt.Errorf("no chunks created from data (data may be empty)")
 		}
 		chunkCount = uint16(len(dataChunks))
-		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
-			payloadSize, testSize, estimatedTotalSize, chunkCount)
+		chunkSize = uint16(maxSize)
+		log.Printf("KDC: Payload %d bytes, estimated %s manifest %d bytes (max %d) - splitting into %d chunks",
+			len(base64Data), formatName, estimatedSize, maxSize, chunkCount)
 	}
 
 	return chunkCount, chunkSize, dataChunks, nil
@@ -568,80 +589,131 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		}
 	}
 
-	// Create manifest metadata
+	// Create manifest metadata (used for JSON format)
 	metadata := buildManifestMetadata(
 		contentType, distributionID, nodeID, backendName,
 		zoneCount, keyCount, operationCount, componentCount, conf)
 
+	// Determine if JWT format will be used (signing key available)
+	// and create a template for size estimation if so
+	var jwtClaimsTemplate *distrib.JWTManifestClaims
+	if kdcSigningKey != nil {
+		jwtClaimsTemplate = &distrib.JWTManifestClaims{
+			Issuer:          "kdc",
+			Subject:         "distribution",
+			IssuedAt:        time.Now().Unix(),
+			DistributionID:  distributionID,
+			ReceiverID:      nodeID,
+			Content:         contentType,
+			Crypto:          backendName,
+			ChunkHash:       checksum,
+			ZoneCount:       zoneCount,
+			KeyCount:        keyCount,
+			OperationCount:  operationCount,
+		}
+		// Add TTL fields for estimation
+		if conf != nil && conf.RetireTime > 0 {
+			jwtClaimsTemplate.RetireTime = conf.RetireTime.String()
+		}
+		if conf != nil && conf.GetDistributionTTL() > 0 {
+			jwtClaimsTemplate.DistributionTTL = conf.GetDistributionTTL().String()
+		}
+	}
+
 	// Split into chunks (or include inline)
-	chunkCount, chunkSize, dataChunks, err := splitIntoChunks(base64Data, metadata, conf)
+	// Pass JWT claims template if JWT format will be used, for accurate size estimation
+	chunkCount, chunkSize, dataChunks, err := splitIntoChunks(base64Data, metadata, jwtClaimsTemplate, conf)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create manifest data
-	manifestData := &distrib.ManifestData{
-		ChunkCount: chunkCount,
-		ChunkSize:  chunkSize,
-		Metadata:   metadata,
-	}
+	// Create manifest CHUNK
+	// Use JWT format when signing key is available (provides signature instead of HMAC)
+	// Otherwise fall back to JSON format with HMAC
+	var manifestCHUNK *core.CHUNK
 
-	// Include payload inline if chunkCount is 0 (indicates inline payload)
-	if chunkCount == 0 {
-		manifestData.Payload = make([]byte, len(base64Data))
-		copy(manifestData.Payload, base64Data)
-	}
+	if kdcSigningKey != nil {
+		// Use JWT format with flattened claims and built-in signature
+		// Start from the template and add chunk info (TTLs already set in template)
+		claims := jwtClaimsTemplate
+		claims.ChunkCount = chunkCount
+		claims.ChunkSize = chunkSize
 
-	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := distrib.CreateCHUNKManifest(manifestData, core.FormatJSON)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
-	}
+		// Include payload inline if chunkCount is 0
+		if chunkCount == 0 {
+			claims.Payload = base64.StdEncoding.EncodeToString(base64Data)
+		}
 
-	// Calculate HMAC using the recipient node's long-term public key
-	// Select the appropriate key based on the crypto backend used for encryption
-	var hmacKey []byte
-	if backendName == "hpke" {
-		// For HPKE, use the X25519 public key directly (32 bytes)
-		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
-			return nil, fmt.Errorf("node %s has invalid HPKE public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
+		manifestCHUNK, err = distrib.CreateJWTManifest(claims, kdcSigningKey, backend)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create JWT manifest: %v", err)
 		}
-		hmacKey = node.LongTermHpkePubKey
-	} else if backendName == "jose" {
-		// For JOSE, extract the x-coordinate from the ECDSA P-256 public key (32 bytes)
-		if len(node.LongTermJosePubKey) == 0 {
-			return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for HMAC)", nodeID)
-		}
-		// Parse JWK to extract ECDSA public key
-		var jwk jose.JSONWebKey
-		if err := json.Unmarshal(node.LongTermJosePubKey, &jwk); err != nil {
-			return nil, fmt.Errorf("failed to parse node JOSE public key for HMAC: %v", err)
-		}
-		ecdsaKey, ok := jwk.Key.(*ecdsa.PublicKey)
-		if !ok {
-			return nil, fmt.Errorf("node %s JOSE public key is not an ECDSA key (required for HMAC)", nodeID)
-		}
-		// Validate curve is P-256 (required for this backend)
-		if ecdsaKey.Curve != elliptic.P256() {
-			return nil, fmt.Errorf("node %s JOSE public key uses unsupported curve: %s (expected P-256)", nodeID, ecdsaKey.Curve.Params().Name)
-		}
-		// Extract x-coordinate (32 bytes for P-256)
-		xBytes := ecdsaKey.X.Bytes()
-		// Calculate expected coordinate length for P-256: (256 bits + 7) / 8 = 32 bytes
-		expectedLen := (ecdsaKey.Curve.Params().BitSize + 7) / 8
-		if len(xBytes) > expectedLen {
-			return nil, fmt.Errorf("node %s JOSE public key x-coordinate too large: %d bytes (max: %d for P-256)", nodeID, len(xBytes), expectedLen)
-		}
-		// Pad to expectedLen bytes if needed (ECDSA coordinates are variable length)
-		hmacKey = make([]byte, expectedLen)
-		copy(hmacKey[expectedLen-len(xBytes):], xBytes)
+		log.Printf("KDC: Created JWT manifest with signature for node %s (format=JWT)", nodeID)
 	} else {
-		return nil, fmt.Errorf("unsupported crypto backend for HMAC: %s", backendName)
+		// Fall back to JSON format with HMAC
+		manifestData := &distrib.ManifestData{
+			ChunkCount: chunkCount,
+			ChunkSize:  chunkSize,
+			Metadata:   metadata,
+		}
+
+		// Include payload inline if chunkCount is 0 (indicates inline payload)
+		if chunkCount == 0 {
+			manifestData.Payload = make([]byte, len(base64Data))
+			copy(manifestData.Payload, base64Data)
+		}
+
+		// Create manifest CHUNK (Sequence=0, Total=chunkCount)
+		manifestCHUNK, err = distrib.CreateCHUNKManifest(manifestData, core.FormatJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
+		}
+
+		// Calculate HMAC using the recipient node's long-term public key
+		// Select the appropriate key based on the crypto backend used for encryption
+		var hmacKey []byte
+		if backendName == "hpke" {
+			// For HPKE, use the X25519 public key directly (32 bytes)
+			if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
+				return nil, fmt.Errorf("node %s has invalid HPKE public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
+			}
+			hmacKey = node.LongTermHpkePubKey
+		} else if backendName == "jose" {
+			// For JOSE, extract the x-coordinate from the ECDSA P-256 public key (32 bytes)
+			if len(node.LongTermJosePubKey) == 0 {
+				return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for HMAC)", nodeID)
+			}
+			// Parse JWK to extract ECDSA public key
+			var jwk jose.JSONWebKey
+			if err := json.Unmarshal(node.LongTermJosePubKey, &jwk); err != nil {
+				return nil, fmt.Errorf("failed to parse node JOSE public key for HMAC: %v", err)
+			}
+			ecdsaKey, ok := jwk.Key.(*ecdsa.PublicKey)
+			if !ok {
+				return nil, fmt.Errorf("node %s JOSE public key is not an ECDSA key (required for HMAC)", nodeID)
+			}
+			// Validate curve is P-256 (required for this backend)
+			if ecdsaKey.Curve != elliptic.P256() {
+				return nil, fmt.Errorf("node %s JOSE public key uses unsupported curve: %s (expected P-256)", nodeID, ecdsaKey.Curve.Params().Name)
+			}
+			// Extract x-coordinate (32 bytes for P-256)
+			xBytes := ecdsaKey.X.Bytes()
+			// Calculate expected coordinate length for P-256: (256 bits + 7) / 8 = 32 bytes
+			expectedLen := (ecdsaKey.Curve.Params().BitSize + 7) / 8
+			if len(xBytes) > expectedLen {
+				return nil, fmt.Errorf("node %s JOSE public key x-coordinate too large: %d bytes (max: %d for P-256)", nodeID, len(xBytes), expectedLen)
+			}
+			// Pad to expectedLen bytes if needed (ECDSA coordinates are variable length)
+			hmacKey = make([]byte, expectedLen)
+			copy(hmacKey[expectedLen-len(xBytes):], xBytes)
+		} else {
+			return nil, fmt.Errorf("unsupported crypto backend for HMAC: %s", backendName)
+		}
+		if err := distrib.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
+			return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
+		}
+		log.Printf("KDC: Created JSON manifest with HMAC for node %s (format=JSON)", nodeID)
 	}
-	if err := distrib.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
-		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
-	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s %s public key (%d bytes)", nodeID, backendName, len(hmacKey))
 
 	// Create CHUNK records (manifest + data chunks)
 	allChunks := make([]*core.CHUNK, 0)
